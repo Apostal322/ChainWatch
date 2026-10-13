@@ -1,0 +1,39 @@
+# --- Data: Elliptic++ has no explicit redistribution licence; never commit it ---
+data/raw/*
+data/processed/*
+data/demo/
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# --- Experiment artifacts ---
+artifacts/
+mlruns/
+mlflow.db
+mlartifacts/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Notebooks / editors / OS ---
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Frontend ---
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo

@@ -1,0 +1,17 @@
+# Render Blueprint for the PUBLIC SYNTHETIC DEMO (docs/DEPLOYMENT.md, option A).
+# Free plan only; no paid resources. The image's default build target (`demo`) trains
+# synthetic models at build time; no Elliptic++ data is downloaded or served.
+# Render validates this file when the Blueprint is created; locally, with the Render CLI:
+#   render blueprints validate render.yaml
+services:
+  - type: web
+    name: chainwatch-demo
+    runtime: docker
+    plan: free                 # 512 MB / 0.1 CPU, sleeps after 15 min idle (checked 2026-10)
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health/ready
+    envVars:
+      - key: CHAINWATCH_CONFIG
+        value: /app/configs/public-demo.yaml

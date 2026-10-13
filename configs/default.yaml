@@ -1,0 +1,107 @@
+# ChainWatch experiment configuration (Phase 1 baselines + Phase 2 backtests).
+# All relative paths are resolved against the repository root, never the CWD.
+
+seed: 42
+
+paths:
+  raw_dir: data/raw/elliptic_pp        # override with env var CHAINWATCH_RAW_DIR
+  processed_dir: data/processed
+  artifacts_dir: artifacts/runs
+  backtests_dir: artifacts/backtests
+  reports_dir: reports
+
+data:
+  # "local"           -> 93 Local_feature_*            (per-transaction only)
+  # "local_aggregate" -> + 72 Aggregate_feature_*     (original Elliptic feature set)
+  # "all"             -> + 17 Elliptic++ augmented    (degrees, BTC amounts, fees, size, ...)
+  feature_set: all
+
+split:
+  # Chronological, inclusive time-step ranges. Steps 35-49 match the held-out
+  # range used by Weber et al. (2019) and Elmougy & Liu (2023).
+  train: [1, 29]
+  val: [30, 34]
+  test: [35, 49]
+
+preprocessing:
+  log1p_augmented: true      # augmented features are raw, non-negative, heavy-tailed
+  recompute_degrees: true    # fill missing in/out degree exactly from the edge list
+
+evaluation:
+  threshold_strategy: max_f1   # chosen on VALIDATION only; one of: max_f1, fixed
+  fixed_threshold: 0.5
+  k_values: [50, 100, 200, 500]
+  per_step_k: 20               # investigation budget per time step (~2-week window)
+  latency_repeats: 200
+
+models:
+  logreg:
+    class_weight: balanced
+    max_iter: 20000
+    grid:
+      C: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
+  xgboost:
+    n_estimators: 2000
+    early_stopping_rounds: 50
+    tree_method: hist
+    n_jobs: -1
+    use_scale_pos_weight: true
+    grid:
+      max_depth: [4, 6, 8]
+      learning_rate: [0.05, 0.1]
+      subsample: [0.8]
+      colsample_bytree: [0.5, 0.8]
+      min_child_weight: [1]
+
+tracking:
+  mlflow: false                 # set true (and `pip install -e .[tracking]`) to log runs
+  experiment_name: chainwatch-phase1
+  tracking_uri: sqlite:///mlflow.db
+
+# --------------------------------------------------------------------------- #
+# Phase 2: rolling-origin backtests (pre-registered in docs/PHASE2_PROTOCOL.md)
+# --------------------------------------------------------------------------- #
+backtest:
+  label_latency: 1              # label of step u is available at the end of step u + L
+  latency_sensitivity: [3]
+  feature_set: all
+  xgboost:                      # Phase 1 selected params; fixed tree count, no early stopping
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 1
+    tree_method: hist
+    n_jobs: -1
+  strategies:                   # family -> {kind, grid}
+    static: {kind: static}
+    expanding: {kind: expanding}
+    periodic: {kind: periodic, grid: {frequency: [2, 4, 8]}}
+    sliding: {kind: sliding, grid: {window: [3, 5, 10]}}
+    recency: {kind: recency, grid: {half_life: [2, 5, 10]}}
+  stages:
+    dev: {origin: 19, end: 34, seeds: [0, 1, 2]}          # selection; never touches 35-49
+    confirm: {origin: 34, end: 49, seeds: [0, 1, 2, 3, 4]}  # EXPLORATORY: inspected in Phase 1
+  budgets: [10, 20, 50, 100]    # reviews per time step
+  primary_budget: 50
+  selection_tolerance: 0.002
+  reference_prevalence: 0.109   # for prevalence-standardised AP (Phase 1 train prevalence)
+  bootstrap: {n_resamples: 2000, block_length: 3, seed: 0}
+  confirm_split_after: 42       # confirm sub-periods 35-42 and 43-49 (protocol §5)
+  time_proxy_threshold: 0.9     # |Spearman(feature, time step)| on steps <= time_proxy_max_step
+  time_proxy_max_step: 34       # (deviation 1: added after pre-registration)
+
+# --------------------------------------------------------------------------- #
+# Phase 3: inference service (docs/INFERENCE_CONTRACT.md)
+# --------------------------------------------------------------------------- #
+serving:
+  registry_dir: artifacts/registry
+  snapshot_seed: 0             # snapshots reproduce Phase 2 backtest seed 0
+  snapshot_first_tau: 19       # dev origin
+  snapshot_last_tau: 48        # scores up to step 49
+  max_batch_size: 1000
+  allow_version_mismatch: false
+  frontend_dist: frontend/dist
+  cors_origins: []
+  explain_top_k: 10

@@ -1,0 +1,24 @@
+# Inputs for requirements/serve.lock.txt (the serving/demo image).
+# Regenerate (versions must stay equal to the model registry's training environment):
+#   pip-compile --generate-hashes --allow-unsafe --strip-extras \
+#     -c requirements/constraints.txt -o requirements/serve.lock.txt requirements/serve.in
+#
+# Core runtime (mirrors pyproject [project.dependencies]) with one deliberate swap:
+# xgboost-cpu is the official CPU-only build of the same library and version (no 300 MB
+# NVIDIA NCCL wheel). It installs the same `xgboost` module, so pickled models load unchanged.
+numpy
+pandas
+pyarrow
+scikit-learn
+xgboost-cpu==3.4.1
+pyyaml
+joblib
+matplotlib
+tabulate
+# serve extra
+fastapi
+uvicorn[standard]
+httpx
+# build backend for `pip install --no-build-isolation -e .` (pinned + hashed, not fetched ad hoc)
+setuptools
+wheel

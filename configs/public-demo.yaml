@@ -1,0 +1,11 @@
+# Public, internet-facing synthetic demo (see docs/DEPLOYMENT.md).
+# Same synthetic data and models as demo.yaml, plus exposure controls.
+extends: demo.yaml
+
+serving:
+  rate_limit_per_minute: 120     # per client, /v1 routes only (health checks exempt)
+  trusted_proxy_hops: 1          # one platform proxy appends X-Forwarded-For; 0 if uvicorn is exposed directly
+  expose_docs: false             # Swagger UI/ReDoc load third-party JS; /openapi.json stays
+  max_body_bytes: 2000000
+  max_batch_size: 200
+  limit_concurrency: 32

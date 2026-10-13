@@ -1,0 +1,26 @@
+# docker compose --profile demo up --build   -> synthetic demo (built into the image)
+# docker compose --profile real up --build   -> serve your local Elliptic++ registry
+#   (requires: chainwatch prepare && chainwatch train ... && chainwatch export-snapshots)
+services:
+  demo:
+    profiles: ["demo"]
+    build: {context: ., target: demo}
+    image: chainwatch:demo
+    ports: ["8000:8000"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 1g
+    cpus: 2
+
+  real:
+    profiles: ["real"]
+    build: {context: ., target: runtime}
+    image: chainwatch:runtime
+    environment:
+      CHAINWATCH_CONFIG: /app/configs/default.yaml
+    volumes:
+      - ./data/processed:/app/data/processed:ro
+      - ./artifacts/registry:/app/artifacts/registry:ro
+    ports: ["8000:8000"]
+    read_only: true
+    tmpfs: ["/tmp"]

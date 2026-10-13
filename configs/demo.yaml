@@ -1,0 +1,13 @@
+# Public demo on SYNTHETIC data (no Elliptic++ files needed).
+# `chainwatch --config configs/demo.yaml demo-setup` builds everything below.
+extends: default.yaml
+
+paths:
+  raw_dir: data/demo/raw
+  processed_dir: data/demo/processed
+  artifacts_dir: artifacts/demo/runs
+  backtests_dir: artifacts/demo/backtests
+  reports_dir: artifacts/demo/reports
+
+serving:
+  registry_dir: artifacts/demo/registry
