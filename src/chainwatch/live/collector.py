@@ -544,6 +544,9 @@ class Collector:
                     self.store.close_outage(self._outage_id, self.clock())
                     self._outage_id = None
                 self.flush()
+                # retention runs every 60 s, so rows can exceed the cap by up to one minute
+                # of fetches while running; a stopped collector leaves the file within it
+                self.store.prune(self.cfg.retention_rows, retention_days=self.cfg.retention_days)
             if self._own_http:
                 await self.http.aclose()
             for sig in (signal.SIGINT, signal.SIGTERM):

@@ -278,6 +278,11 @@ def main() -> int:
                 row.update(connection=s.get("connection"), queue=c.get("queue_size"),
                            dedupe=c.get("dedupe_size"), received=c.get("received"))  # fmt: skip
             db = work / "live.sqlite"
+            try:
+                with sqlite3.connect(f"file:{work / 'live.sqlite'}?mode=ro", uri=True) as rc:
+                    row["rows"] = rc.execute("SELECT COUNT(*) FROM tx").fetchone()[0]
+            except sqlite3.Error:
+                pass
             row["db_bytes"] = (
                 sum(p.stat().st_size for p in work.glob("live.sqlite*")) if db.exists() else 0
             )
@@ -336,6 +341,7 @@ def main() -> int:
 
     con = sqlite3.connect(work / "live.sqlite")
     rows = con.execute("SELECT COUNT(*) FROM tx").fetchone()[0]
+    peak_rows = max([rows, *(r.get("rows") or 0 for r in samples)])
     outages = con.execute(
         "SELECT kind, COUNT(*), ROUND(SUM(COALESCE(ended_at, started_at) - started_at), 1) "
         "FROM outages GROUP BY kind"
@@ -392,6 +398,7 @@ def main() -> int:
         "queue_max_seen": max((r.get("queue") or 0 for r in samples), default=0),
         "db_bytes_max": peak("db_bytes", samples),
         "rows_final": rows,
+        "rows_peak_while_running": peak_rows,
         "outages_by_kind": {k: {"count": n, "seconds": s} for k, n, s in outages},
         "failed_by_error": dict(errors),
         "integrity_check": integrity,
@@ -409,7 +416,10 @@ def main() -> int:
     down = {k: n for k, n, _ in outages}.get("collector_down", 0)
     checks = {
         "every recovery happened (<= 90 s)": all(x is not None and x <= 90 for x in rec_times),
+        # pruning runs every 60 s while collecting and once more on a clean stop
         "rows within retention cap": rows <= args.retention_rows,
+        "rows while running within cap + one minute of fetches": peak_rows
+        <= args.retention_rows + args.fetch_per_minute,
         "collector memory bounded (2nd-half peak <= 1st-half peak + 25 MB)": (
             rss_second["collector"] <= rss_first["collector"] + 25
         ),

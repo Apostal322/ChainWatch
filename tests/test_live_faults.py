@@ -376,3 +376,17 @@ def test_bad_config_is_a_clean_ex_config_exit(tmp_path, capsys, content):
         live_cli.main(["--config", str(cfg), "collect", "--duration", "1"])
     assert exc.value.code == live_cli.EX_CONFIG
     assert "config error" in capsys.readouterr().err
+
+
+def test_clean_stop_leaves_the_database_within_the_row_cap(tmp_path):
+    """Retention runs every 60 s, so a running collector can exceed retention_rows by up
+    to a minute of fetches (the 110-min soak saw 3,026 / 3,000); a clean stop prunes."""
+    cfg = _cfg(tmp_path, retention_rows=10)
+    store = LiveStore(cfg.db_path)
+    now = time.time()
+    for i in range(25):
+        t = txid(f"cap{i}")
+        store.add_fetched(feat.extract(esplora_tx(t), txid=t, first_seen=now, fetched_at=now), [])
+    col = Collector(cfg, store, http=_rest(), connect=lambda *a, **k: _Hang())
+    asyncio.run(col.run(duration=0.3))
+    assert LiveReader(cfg.db_path).list(limit=1, outcome=None)[0] == 10

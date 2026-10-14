@@ -7,7 +7,7 @@
 
 Four independent read-only reviews (ingestion correctness against mempool's backend source,
 security and API, frontend with fault injection in a browser, ML scientific claims),
-followed by fixes. Every fixed item has a regression test or a recorded check; nothing
+followed by fixes, a real-systemd container test, a browser end-to-end test and fault-injection soak runs (6 min and 110 min). Every fixed item has a regression test or a recorded check; nothing
 was deployed. Severity: P0 critical, P1 high, P2 medium, P3 low. **No P0 was found.**
 
 | # | Sev | Component | Problem | Root cause | Fix | Evidence |
@@ -30,6 +30,7 @@ was deployed. Severity: P0 critical, P1 high, P2 medium, P3 low. **No P0 was fou
 | 16 | P3 | collector | HTTP-date `Retry-After` ignored; burst right after a 429 pause; no pause on 5xx; queued items not re-aged after waiting; backoff reset after one frame; token-bucket float spin; 4 MB frame cap below resync deltas; `timelocked` on non-enforced locktimes; missing status read as unconfirmed | — | each fixed | `tests/test_live_faults.py` |
 | 17 | P3 | deploy | `CHAINWATCH_HOST` unvalidated (a bad value emptied the Caddyfile); moving `main` installed as root; token readable by the collector's user; no syscall filter or loopback-only rule | — | host/REF validation, `EXPECTED_SHA`, Caddyfile validated before replace, token 0600 root:root, `SystemCallFilter`, `IPAddressDeny`; exposure 3.0 → 1.3 / 1.1 | systemd container test (LIVE_CLOUD.md §11) |
 | 18 | P3 | API | Hostile `Last-Event-ID` → 500; 429/413 without security headers; IPv6 rate-limit rotation within a /64; shutdown waited up to 300 s for SSE | — | strict parsing; headers on every error; /64 keys; `timeout_graceful_shutdown=10` | `tests/test_live_security.py` |
+| 19 | P3 | collector | (Found by the 110-min soak) the database could end above `retention_rows` (3,026 / 3,000) | retention runs every 60 s; the process stopped between prunes | prune on clean stop; documented bound while running (cap + one minute of fetches) | `test_clean_stop_leaves_the_database_within_the_row_cap`; soak check |
 
 Accepted, not changed: the collector and edge API share a service user (a compromised
 collector could read the edge's environment via `/proc`); `render.yaml` pulls a version tag

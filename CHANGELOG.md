@@ -79,7 +79,11 @@
     plus 13 frontend tests.
   - A real-systemd container test of `install.sh` and the units: crash restart,
     lock-contention fatal exit, backup/restore, upgrade, input validation, reboot.
-  - Fault-injection soak runs with `scripts/soak_test.py`.
+  - Fault-injection soak runs with `scripts/soak_test.py`:
+    - 6 min: 11 of 11 checks passed;
+    - 110 min: 52 faults, 99.97 % API availability, 0 tracebacks, integrity ok; it found that
+      the database can end a little above the row cap (now pruned on stop).
+  - A browser end-to-end test, `scripts/e2e_live_browser.py`: 10 of 10 checks passed.
 - **Not done:** no cloud resource has been created, real mempool.space ingestion is
   still unverified (the build proxy blocks it), and no 24/7 reliability is claimed.
   `render.yaml` and the public demo are unchanged.
