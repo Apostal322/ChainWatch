@@ -58,5 +58,6 @@ RUN chainwatch --config configs/demo.yaml demo-setup \
     && chown -R root:root data artifacts \
     && chmod -R a-w data/demo artifacts/demo
 ENV CHAINWATCH_DEMO=1 \
+    CHAINWATCH_PREBUILT_ONLY=1 \
     CHAINWATCH_CONFIG=/app/configs/demo.yaml
 USER app

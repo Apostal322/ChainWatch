@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.1: deployable on Render Free (2026-10)
+
+- **Fix:** the first Render deployment failed after 2 h (exit 143), because Render's
+  Docker build trained the 31 synthetic snapshot models (600–920 s each on its build
+  hardware). GitHub Actions now builds, gates and publishes the synthetic-demo image to
+  GHCR (`publish-demo-image.yml`), and `render.yaml` pulls it (`runtime: image`, free
+  plan).
+- **Release gate:** `scripts/check_demo_image.sh`. The image must contain synthetic data
+  and models only, start without any training, pass the end-to-end smoke test at
+  512 MB / 0.1 CPU and stay below 450 MiB.
+- **Safety:** the demo image sets `CHAINWATCH_PREBUILT_ONLY=1`, so the container refuses
+  to train at start-up if its registry is missing (new tests in `tests/test_entrypoint.py`).
+- No research result, model or metric changed.
+
 ## v0.4.0: first public release (2026-10)
 
 ChainWatch is a leakage-aware study of how an illicit-transaction ranking model behaves

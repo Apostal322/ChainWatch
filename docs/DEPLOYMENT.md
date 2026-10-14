@@ -15,7 +15,7 @@ models and builds a read-only model registry at image-build time.
 
 | Option | Cost | Resources | Fit for this app | Approval needed |
 |---|---|---|---|---|
-| **Render, free web service** (Docker) | $0. Hours are capped (750 instance hours per workspace per month); whether signup needs a card was not confirmed | 512 MB RAM, 0.1 CPU; sleeps after 15 min idle; about 1 min platform wake-up | **Fits.** Memory measured at 255 MB of 512 MB. Slow: ready 73–109 s after a cold start (two measured runs), first chart load 8–11 s | Render account |
+| **Render, free web service** (prebuilt image from GHCR) | $0. Hours are capped (750 instance hours per workspace per month); whether signup needs a card was not confirmed | 512 MB RAM, 0.1 CPU; sleeps after 15 min idle; about 1 min platform wake-up | **Fits.** Memory measured at 255 MB of 512 MB. Slow: ready 73–109 s after a cold start (two measured runs), first chart load 8–11 s | Render account |
 | **Hugging Face Spaces, Docker SDK, CPU Basic** | **Not free for new Spaces.** Since about July 2026, creating Docker or Gradio Spaces on CPU Basic needs a paid plan (PRO, $9/month); only static Spaces stay free | 2 vCPU, 16 GB RAM, 50 GB ephemeral disk; sleeps after 48 h idle | **Fits technically**, with a good experience: ready in 4–6 s (measured at 2 CPUs) | HF account **and $9/month** |
 | Static hosting (GitHub Pages, HF static Space) | $0 | n/a | **Does not fit** without new work: the dashboard needs the live API | n/a |
 | Cloud Run, Fly.io, Koyeb and similar | free tiers vary; most need a billing account or card | n/a | Not evaluated in detail; a billing account brings a risk of charges | yes |
@@ -57,41 +57,68 @@ docker run --rm --read-only --tmpfs /tmp --memory 512m --cpus 0.1 -p 10000:10000
 WAIT_SECONDS=300 scripts/smoke_demo.sh http://localhost:10000
 ```
 
-## 3. Option A (recommended, $0): Render free web service
+## 3. Option A (recommended, $0): Render free web service, prebuilt image
 
-The repository contains a Blueprint, [`render.yaml`](../render.yaml): one web service,
-Docker runtime, **`plan: free`** (stated explicitly, never defaulted), branch `main`,
-health check `/health/ready`, and `CHAINWATCH_CONFIG=/app/configs/public-demo.yaml`.
-Render sets `PORT`, and the container entrypoint honours it. No database, disk, worker
-or other resource is declared, so applying the Blueprint can create only this one free
-service.
+**Why a prebuilt image.** The first Render deployment (commit `7caf60f`, Dockerfile build)
+failed after 2 h 00 m with exit status 143. Render's build trains the 31 synthetic models
+inside `docker build`, and on Render's build hardware each snapshot took 600–920 s (on
+GitHub's runners the whole training takes about 4 minutes). Render now **pulls a prebuilt
+image**, so nothing is trained on Render, neither at build time nor at start-up.
 
-Validation status: the file was checked structurally against the field names in Render's
-Blueprint reference, and every referenced path exists. It was **not** checked against
-Render's live JSON schema (`render.com/schema/render.yaml.json`), which is unreachable
-from the environment that prepared this release. Render validates the file when the
-Blueprint is created (step 3), and the Render CLI can validate it beforehand. The
-deprecated `autoDeploy` key is deliberately absent, so Render's default applies: each
-push to `main` redeploys the free service. To deploy only after CI passes, choose
-**Settings → Auto-Deploy → After CI Checks Pass** in the dashboard.
+**Pipeline.**
+1. [`publish-demo-image.yml`](../.github/workflows/publish-demo-image.yml) runs on every
+   push to `main` (and on manual dispatch). It builds the same `demo` target as CI for
+   `linux/amd64`.
+2. [`scripts/check_demo_image.sh`](../scripts/check_demo_image.sh) gates the image:
+   - the image holds synthetic data and synthetic-trained models only (marker file, raw-file
+     hashes that do not match the published Elliptic++ files, `data_mode: synthetic`);
+   - `scripts/smoke_demo.sh` passes at 512 MB / 0.1 CPU with a read-only root filesystem;
+   - the logs show no `demo-setup` or training;
+   - memory stays below 450 MiB.
+3. Only then does it push to GHCR as `ghcr.io/apostal322/chainwatch-demo`, with an
+   immutable `sha-<commit>` tag and the version tag from `pyproject.toml` (for example
+   `0.4.1`). It never overwrites an existing version tag, and the step summary records the
+   image digest.
+4. Only that job holds `packages: write`. It authenticates with the workflow's own
+   `GITHUB_TOKEN`; no credential is stored in the repository.
 
-1. **Prerequisite:** the release is on `main` of the public repository you will connect
-   (see [RELEASE_READINESS.md](RELEASE_READINESS.md)).
-2. Optional: `render blueprints validate render.yaml` (Render CLI 2.7 or later).
-3. In the Render dashboard: **New → Blueprint**, connect the public `ChainWatch`
-   repository, and check that the plan column shows **Free** for `chainwatch-demo` before
-   you apply. Whether Render requires a payment method for free services could not be
-   confirmed; if it asks for one, stop and decide, because that is a cost decision.
-4. The first build takes several minutes, because it trains the synthetic models in the
-   Docker build. If the build fails at a `RUN --mount=type=secret` line, the builder lacks
-   BuildKit secret support. The secret is optional (it only supplies a corporate CA
-   bundle); report the log line rather than editing the Dockerfile blindly.
-5. When the service shows "Live", run the end-to-end check from your own machine:
-   `WAIT_SECONDS=300 scripts/smoke_demo.sh https://chainwatch-demo.onrender.com`
-   (use the URL Render shows; it can carry a suffix).
-6. Only after step 5 prints `PASS`: add the URL to the README, the repository's website
-   field and `docs/PORTFOLIO.md`, and note that the first visit after idle can take about
-   two minutes.
+The image sets `CHAINWATCH_PREBUILT_ONLY=1`. If its registry were ever missing, the
+container exits with an error instead of training, which on 0.1 CPU would take hours.
+
+**Blueprint** ([`render.yaml`](../render.yaml)): one web service, `runtime: image`,
+`image.url: ghcr.io/apostal322/chainwatch-demo:0.4.1`, **`plan: free`**, health check
+`/health/ready`, `CHAINWATCH_CONFIG=/app/configs/public-demo.yaml`. There are no
+registry credentials, because the package must be **public** (step 2). Image-backed
+services do not auto-deploy: after changing the tag, use **Manual Deploy**.
+
+**Steps (owner):**
+1. Merge to `main` and wait for **Publish demo image** to pass. Note the digest in its
+   step summary.
+2. **Make the package public** (it starts private, and the change is irreversible): GitHub
+   → your profile → Packages → `chainwatch-demo` → Package settings → Danger Zone →
+   Change visibility → Public. Verify anonymous access from a logged-out machine:
+   `docker pull ghcr.io/apostal322/chainwatch-demo:0.4.1`. It must succeed without
+   `docker login`.
+3. **Switch the existing failed service** `chainwatch-demo` to the image. Render documents
+   changing a service's source in the dashboard (Settings → Build & Deploy → Source →
+   Edit → Existing image, URL `ghcr.io/apostal322/chainwatch-demo:0.4.1`); only a
+   service's *type* cannot change. How a Blueprint **sync** behaves when it finds
+   `runtime: image` on a service created with `runtime: docker` is not documented in the
+   sources checked. Therefore either:
+   - (a) change the source in the dashboard first, then sync the Blueprint (the YAML then
+     matches the service); or
+   - (b) delete the failed service (it never went live; free plan, no data), then sync the
+     Blueprint to create it again as an image service.
+4. Confirm that the plan still shows **Free** before you save. If Render asks for a
+   payment method, stop: that is a cost decision.
+5. **Manual Deploy**, wait for "Live", then from your own machine:
+   `WAIT_SECONDS=300 scripts/smoke_demo.sh https://<service>.onrender.com`
+6. Only after it prints `PASS`, publish the URL (README, website field,
+   `docs/PORTFOLIO.md`), noting that the first visit after idle can take about two minutes.
+
+Pinning by digest (`ghcr.io/apostal322/chainwatch-demo@sha256:…`, taken from the
+workflow summary) is a stricter alternative to the version tag. Use it if you want each
+deploy to be byte-for-byte reproducible.
 
 ## 4. Option B (paid, $9/month): Hugging Face Space
 

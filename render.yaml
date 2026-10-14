@@ -1,16 +1,17 @@
-# Render Blueprint for the PUBLIC SYNTHETIC DEMO (docs/DEPLOYMENT.md, option A).
-# Free plan only; no paid resources. The image's default build target (`demo`) trains
-# synthetic models at build time; no Elliptic++ data is downloaded or served.
-# Render validates this file when the Blueprint is created; locally, with the Render CLI:
-#   render blueprints validate render.yaml
+# Render Blueprint for the PUBLIC SYNTHETIC DEMO (docs/DEPLOYMENT.md).
+# Free plan only; no paid resources. Render PULLS a prebuilt image: training the synthetic
+# models inside Render's Docker build exceeded its build time limit (first attempt failed
+# after 2 h). GitHub Actions builds, validates and publishes the image
+# (.github/workflows/publish-demo-image.yml); it holds synthetic data and models only.
+# Image-backed services do not auto-deploy: trigger "Manual Deploy" after changing the tag.
 services:
   - type: web
     name: chainwatch-demo
-    runtime: docker
+    runtime: image
     plan: free                 # 512 MB / 0.1 CPU, sleeps after 15 min idle (checked 2026-10)
-    branch: main
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    image:
+      # explicit version tag; the publish workflow never overwrites an existing version tag
+      url: ghcr.io/apostal322/chainwatch-demo:0.4.1
     healthCheckPath: /health/ready
     envVars:
       - key: CHAINWATCH_CONFIG

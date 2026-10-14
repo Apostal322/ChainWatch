@@ -3,7 +3,7 @@
 [![CI](https://github.com/Apostal322/ChainWatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Apostal322/ChainWatch/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Python 3.11–3.13](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)
-![Tests](https://img.shields.io/badge/tests-262%20Python%20%2B%203%20frontend-brightgreen)
+![Tests](https://img.shields.io/badge/tests-265%20Python%20%2B%203%20frontend-brightgreen)
 
 **How well does an illicit-transaction ranking model hold up when behaviour changes over
 time, and does retraining on newly arriving labels help?**
@@ -125,7 +125,7 @@ git commit.
 src/chainwatch/   data, features, training, evaluation, backtest, analysis, serving (API)
 frontend/         React + TypeScript dashboard
 configs/          default.yaml (real data), demo.yaml, public-demo.yaml (hosted demo)
-tests/            262 tests: leakage canaries, metrics, backtest causality, API contract
+tests/            265 tests: leakage canaries, metrics, backtest causality, API contract
 reports/          committed aggregate results and figures (no row-level data)
 docs/             case study, protocols, results, inference contract, deployment, audit
 scripts/          screenshot capture, demo smoke test

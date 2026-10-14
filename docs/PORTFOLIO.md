@@ -42,7 +42,7 @@ XGBoost model (AP 0.80 overall) collapsed after a regime change (AP 0.92 → 0.0
 pre-registered a backtest of retraining strategies under delayed labels: retraining
 recovered late-period AP to 0.46, which I report as exploratory because no untouched
 holdout remained. I shipped the research models as a FastAPI and React replay service whose
-scores match the research predictions exactly (234,596 of them), with 262 tests, CI on
+scores match the research predictions exactly (234,596 of them), with 265 tests, CI on
 Linux and Windows, a hardened Docker demo on synthetic data, and a security review that
 found and fixed 18 issues. The project taught me to treat evaluation design, label
 availability and training/serving consistency as engineering problems, not afterthoughts.
@@ -81,7 +81,7 @@ holdout, labels are heuristic, and the system does not score live transactions.
   the gain shrank with slower labels.
 - **Engineering:** FastAPI service with a versioned, provenance-checked model registry;
   exact research-to-serving reproducibility (234,596 scores); React/TypeScript dashboard;
-  262 tests including leakage canaries; CI on Linux and Windows; hardened Docker demo on
+  265 tests including leakage canaries; CI on Linux and Windows; hardened Docker demo on
   synthetic data.
 - **Stack:** Python, pandas, scikit-learn, XGBoost, FastAPI, pydantic, React, TypeScript,
   Recharts, Docker, GitHub Actions.
