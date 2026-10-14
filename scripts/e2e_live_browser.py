@@ -3,8 +3,11 @@
     mock WS/REST -> collector -> SQLite -> edge API (bearer token) -> dashboard in remote
     mode (RemoteBackend) -> SSE -> React "Live monitor" tab
 
-Checks that a new transaction arrives live and its detail panel matches the API, that a
-collector outage and its recovery are shown, and that the replay tab stays synthetic.
+Checks that a new transaction arrives live and its detail panel matches the API, that risk
+intelligence works end to end (a local TEST indicator list naming some mock output addresses
+-> source matches in the API, the investigation queue and the per-transaction assessment;
+every fetched row is assessed in the same commit), that a collector outage and its recovery
+are shown, and that the replay tab stays synthetic.
 Needs Playwright with Chromium in the running interpreter; the services run with
 CHAINWATCH_PY (default: this interpreter), which needs the project installed. Built
 frontend required (cd frontend && npm run build).
@@ -26,6 +29,9 @@ import httpx
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from live_fixtures import p2wpkh_address, txid  # noqa: E402  (the mock's address scheme)
+
 PY = os.environ.get("CHAINWATCH_PY", sys.executable)
 OUT = Path(sys.argv[1])
 OUT.mkdir(parents=True, exist_ok=True)
@@ -85,6 +91,14 @@ def check(name, ok, detail=""):
 
 
 try:
+    # TEST indicator list (not real sanctions data): output 0 of every 5th mock transaction
+    listed = [p2wpkh_address(f"{txid(f'mock-0-{n}')}-out-0") for n in range(5, 3000, 5)]
+    (work / "test-list.txt").write_text("\n".join(listed) + "\n")
+    subprocess.run(
+        [PY, "-m", "chainwatch.live.cli", "--config", str(work / "live.yaml"), "indicators",
+         "update", "--source", "ofac-sdn-mirror", "--file", str(work / "test-list.txt")],
+        cwd=ROOT, env=env, check=True, capture_output=True,
+    )  # fmt: skip
     spawn("mock", [PY, "scripts/mock_mempool.py", "--port", "8971", "--tx-per-second", "4"])
     wait("http://127.0.0.1:8971/__mock/stats")
     spawn(
@@ -154,6 +168,48 @@ try:
             f"txid {str(txid)[:12]}",
         )
         pg.screenshot(path=str(OUT / "e2e_connected.png"), full_page=True)
+        # ---- risk intelligence, end to end
+        base = "http://127.0.0.1:8973/v1/live"
+        until(lambda: httpx.get(f"{base}/findings?max_priority=1").json()["findings"], 90)
+        p1 = httpx.get(f"{base}/findings?max_priority=1").json()["findings"][0]
+        match = p1["screening"]["matches"][0]
+        check(
+            "source match in the API (point in time, with provenance)",
+            match["address"] in listed and match["source_id"] == "ofac-sdn-mirror"
+            and match["available_at"] <= p1["evaluated_at"],
+            f"{p1['txid'][:12]} {match['role']} #{match['index']}",
+        )  # fmt: skip
+        rows = httpx.get(f"{base}/transactions?limit=200&outcome=fetched").json()["rows"]
+        check(
+            "every fetched row is assessed (same commit)",
+            rows and all(r.get("risk_assessed") for r in rows),
+            f"{len(rows)} rows",
+        )
+        summ = httpx.get(f"{base}/risk/summary?hours=1").json()
+        check(
+            "summary: source fresh, settings reported, supervised abstains",
+            summ["summary"]["sources"][0]["stale"] is False
+            and summ["engine"]["anomaly_min_reference"] == 500
+            and summ["engine"]["supervised"]["state"] == "abstaining"
+            and set(summ["summary"]["supervised"]) == {"NO_VALIDATED_MODEL"},
+            json.dumps({k: summ["engine"].get(k) for k in ("supervised", "anomaly_min_reference")}),
+        )
+        pg.wait_for_selector(f"ul.findings button[aria-label$='{p1['txid']}']", timeout=40000)
+        live_text = pg.locator("body").inner_text()
+        check(
+            "risk panels rendered with caveats",
+            all(t in live_text for t in ("Risk intelligence", "Investigation queue",
+                                          "Recent findings", "not proof of fraud"))
+            and "illicit" not in live_text.lower(),
+        )  # fmt: skip
+        pg.locator(f"ul.findings button[aria-label$='{p1['txid']}']").first.click()
+        pg.wait_for_selector("#ra-h", timeout=15000)
+        detail = pg.locator(".detail, aside").last.inner_text()
+        check(
+            "assessment in the detail panel matches the API",
+            p1["txid"] in detail and match["address"] in detail and "Source match" in detail,
+        )
+        pg.screenshot(path=str(OUT / "e2e_risk.png"), full_page=True)
         # upstream outage: kill the collector (unclean) and keep it down
         procs["collector"].send_signal(signal.SIGKILL)
         procs["collector"].wait()
