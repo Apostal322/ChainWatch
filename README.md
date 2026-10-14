@@ -133,6 +133,23 @@ chainwatch --config configs/live.yaml serve            # dashboard reads the SQL
   [docs/LIVE_MONITOR.md](docs/LIVE_MONITOR.md), and a plan for a properly evaluated live
   model in [docs/LIVE_ML_PROPOSAL.md](docs/LIVE_ML_PROPOSAL.md).
 
+### Always-on collector (v0.6.0, prepared, not deployed)
+
+`deploy/oracle/` holds a kit for running the collector on its own on a small Linux VM,
+targeting Oracle Cloud Always Free. It contains systemd units, Caddy HTTPS, an
+idempotent `install.sh` and `smoke_live.sh`.
+
+* The VM runs only `chainwatch-live`: the collector, a token-protected read-only edge API
+  on 127.0.0.1 and daily backups. It has hash-locked dependencies and no ML stack.
+* The Render dashboard can proxy that API server-to-server
+  (`configs/public-demo-live.yaml`). Browsers never see the token or the database.
+* Restarts, disconnections and mempool sequence gaps are recorded as outages, and the
+  dashboard shows them together with the observed share of time.
+
+Nothing has been deployed, and no 24/7 reliability is claimed. See
+[docs/LIVE_CLOUD.md](docs/LIVE_CLOUD.md) for provider limits, Oracle's idle-reclamation
+risk, the manual activation steps and the 24-hour test plan.
+
 ## Limitations
 
 - **No untouched holdout.** Steps 35–49 were inspected in Phase 1, so the retraining gains
@@ -154,6 +171,7 @@ configs/          default.yaml (real data), demo.yaml, public-demo.yaml (hosted 
 tests/            309 tests: leakage canaries, metrics, backtest causality, API contract
 reports/          committed aggregate results and figures (no row-level data)
 docs/             case study, protocols, results, inference contract, deployment, audit
+deploy/oracle/     always-on collector: systemd units, Caddy, install and smoke scripts
 scripts/          screenshot capture, demo smoke test, mock mempool, live load test
 ```
 
@@ -166,7 +184,7 @@ scripts/          screenshot capture, demo smoke test, mock mempool, live load t
 | [Results](docs/RESULTS.md) · [evaluation](docs/EVALUATION.md) · [dataset card](docs/DATASET.md) | Phase 1 baselines, metrics, data provenance and licensing |
 | [Inference contract](docs/INFERENCE_CONTRACT.md) · [architecture](docs/ARCHITECTURE.md) | what the service may claim and how it is built |
 | [Deployment](docs/DEPLOYMENT.md) · [audit](docs/AUDIT.md) · [release readiness](docs/RELEASE_READINESS.md) · [changelog](CHANGELOG.md) | hosting, security review, release checklist, release notes |
-| [Live monitor](docs/LIVE_MONITOR.md) · [live ML proposal](docs/LIVE_ML_PROPOSAL.md) | Phase 5 data pipeline, API contract, limits, measurements |
+| [Live monitor](docs/LIVE_MONITOR.md) · [always-on cloud kit](docs/LIVE_CLOUD.md) · [live ML proposal](docs/LIVE_ML_PROPOSAL.md) | Phase 5 data pipeline, API contract, limits, measurements; 24/7 deployment plan |
 | [Interview guide](docs/INTERVIEW_GUIDE.md) · [portfolio material](docs/PORTFOLIO.md) | explanations and verified resume bullets |
 
 ## Development
@@ -179,7 +197,7 @@ scripts/smoke_demo.sh http://localhost:8000      # end-to-end check of a running
 
 **Status.** Completed: data pipeline, Phase 1 baselines, Phase 2 pre-registered backtest
 and shift diagnostics, replay service and dashboard, Docker, CI, live mempool monitor MVP
-(no model). Planned (not
+(no model), always-on collector deployment kit (not deployed). Planned (not
 implemented): a properly evaluated live-data model, pickle-free model format,
 label-efficiency study, probability calibration
 under prior shift, and a graph-model comparison only after a cheaper graph-feature

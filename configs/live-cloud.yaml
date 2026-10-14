@@ -11,7 +11,7 @@ live:
   fetch_burst: 3
   fetch_concurrency: 1
   queue_max: 100
-  retention_rows: 50000      # plus retention_days; bounds the database (~150 MB, see docs)
+  retention_rows: 50000      # plus retention_days; bounds the database (measured: 63 MB at the cap)
   retention_days: 7
   edge_rate_limit_per_minute: 240
   edge_trusted_proxy_hops: 1 # Caddy in front of the edge API

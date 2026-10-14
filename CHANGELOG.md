@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.6.0: always-on collector kit (2026-10, prepared, not deployed)
+
+- **`chainwatch-live`** is a lightweight entry point with no ML imports. Commands:
+  - `collect` runs the collector;
+  - `serve-edge` serves a token-protected, read-only edge API on 127.0.0.1;
+  - `backup` takes an online SQLite backup, runs an integrity check and rotates copies;
+  - `report` prints reliability figures.
+- **Recovery and gap tracking:**
+  - an `outages` table records `collector_down` (clean or unclean exit, measured from the
+    last heartbeat), `disconnected`, and `sequence_gap` (the mempool update sequence jumps
+    within a connection);
+  - "observed share" availability is computed from those outages;
+  - old databases migrate automatically.
+- **Storage:** retention by age as well as by row count, hourly WAL checkpoints and an
+  index on fetch time. 50,000 rows measured at about 63 MB.
+- **Edge API:**
+  - bearer token of at least 32 characters, compared in constant time;
+  - per-client rate limit, body size limit, `no-store`, security headers;
+  - no docs or OpenAPI routes;
+  - `/health/live` and `/health/ready`.
+- **Dashboard remote mode** (`RemoteBackend`, `configs/public-demo-live.yaml`): the
+  Render service proxies the edge API over HTTPS with the token, through a short shared
+  cache. The Live tab shows how the data arrives, the last successful observation, the
+  24-hour observed share and a table of gaps and outages.
+- **Deployment kit** (`deploy/oracle/`):
+  - hardened systemd units (restart on crash, start on boot, memory and CPU caps);
+  - daily backup timer;
+  - Caddy HTTPS template;
+  - idempotent `install.sh` that installs from a hash-locked, ML-free
+    `requirements/live.lock.txt`;
+  - `smoke_live.sh`.
+- **Tests:** 24 new Python tests in `tests/test_live_cloud.py`, plus 1 frontend test. The
+  install was also tested in a fresh Ubuntu 24.04 container, including a `kill -9`
+  restart; see `docs/LIVE_CLOUD.md` §11.
+- **Not done:** no cloud resource has been created, real mempool.space ingestion is
+  still unverified (the build proxy blocks it), and no 24/7 reliability is claimed.
+  `render.yaml` and the public demo are unchanged.
+
 ## v0.5.0: live Bitcoin mempool monitor MVP (2026-10)
 
 - **Collector** (`chainwatch live-collect`, `src/chainwatch/live/`): asynchronous pipeline

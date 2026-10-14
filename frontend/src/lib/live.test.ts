@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { ago, connectionLabel, filterSort, formatSat, mergeFeed, shortTxid, type LiveRow } from "./live";
+import {
+  ago,
+  connectionLabel,
+  filterSort,
+  formatDuration,
+  formatSat,
+  mergeFeed,
+  outageDuration,
+  shortTxid,
+  type LiveRow,
+} from "./live";
 
 const row = (id: number, over: Partial<LiveRow> = {}): LiveRow => ({
   id,
@@ -45,5 +55,18 @@ describe("live feed helpers", () => {
     expect(ago(100, 165)).toBe("1m ago");
     expect(connectionLabel(null)).toBe("Disconnected");
     expect(connectionLabel("reconnecting")).toBe("Reconnecting");
+  });
+});
+
+describe("collection gaps", () => {
+  it("formats durations and measures open outages until now", () => {
+    expect(formatDuration(45)).toBe("45s");
+    expect(formatDuration(725)).toBe("12m 5s");
+    expect(formatDuration(11_040)).toBe("3h 4m");
+    expect(formatDuration(null)).toBe("—");
+    const base = { id: 1, started_at: 100, detail: null };
+    expect(outageDuration({ ...base, kind: "collector_down", ended_at: 160 }, 1000)).toBe(60);
+    expect(outageDuration({ ...base, kind: "disconnected", ended_at: null }, 1000)).toBe(900);
+    expect(outageDuration({ ...base, kind: "sequence_gap", ended_at: 100 }, 1000)).toBeNull();
   });
 });

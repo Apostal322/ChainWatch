@@ -178,5 +178,6 @@ were not measured here; check the `received` and `dropped` counters in `/v1/live
   validated.
 * **No labels exist for live data**, so no model can be evaluated yet
   (`docs/LIVE_ML_PROPOSAL.md`).
-* SQLite with one writer suits one local collector. Several collectors, or a hosted
-  deployment, would need a different store.
+* SQLite with one writer suits one collector. Several collectors would need a different
+  store. A single always-on hosted collector, with an authenticated edge API in front of
+  the file, is described in [LIVE_CLOUD.md](LIVE_CLOUD.md).

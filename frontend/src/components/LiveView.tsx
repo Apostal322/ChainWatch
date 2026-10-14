@@ -5,8 +5,11 @@ import {
   ago,
   connectionLabel,
   filterSort,
+  formatDuration,
   formatSat,
   liveApi,
+  OUTAGE_LABEL,
+  outageDuration,
   mergeFeed,
   shortTxid,
   type Connection,
@@ -15,6 +18,7 @@ import {
   type LiveRow,
   type LiveStats,
   type LiveStatus,
+  type Outage,
   type SortKey,
 } from "../lib/live";
 import { Tile } from "./common";
@@ -57,6 +61,7 @@ export default function LiveView({ info }: { info: Info }) {
   const [status, setStatus] = useState<LiveStatus | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [stats, setStats] = useState<LiveStats | null>(null);
+  const [outages, setOutages] = useState<Outage[]>([]);
   const [feed, setFeed] = useState<LiveRow[]>([]);
   const [stream, setStream] = useState<"open" | "reconnecting">("reconnecting");
   const [selected, setSelected] = useState<string | null>(null);
@@ -76,7 +81,10 @@ export default function LiveView({ info }: { info: Info }) {
         .catch((e) => alive && setProblem(e instanceof ApiError && e.code === "live_no_data"
           ? "No live data yet: start `chainwatch --config configs/live.yaml live-collect`."
           : `Live API unavailable: ${String(e.message ?? e)}`));
-    const pollStats = () => liveApi.stats(60).then((s) => alive && setStats(s)).catch(() => undefined);
+    const pollStats = () => {
+      liveApi.stats(60).then((s) => alive && setStats(s)).catch(() => undefined);
+      liveApi.outages(24).then((o) => alive && setOutages(o.outages)).catch(() => undefined);
+    };
     poll();
     pollStats();
     liveApi.recent(200).then((r) => alive && setFeed((f) => mergeFeed(f, r.rows))).catch(() => undefined);
@@ -131,6 +139,7 @@ export default function LiveView({ info }: { info: Info }) {
         <ConnectionBadge c={status?.connection ?? null} />
         <span className="muted">
           event stream: {stream === "open" ? "open" : "reconnecting"} · source: {status?.source_url ?? "—"}
+          {status?.via ? ` · via ${status.via}` : ""}
         </span>
       </div>
       <div className="notice">
@@ -152,6 +161,10 @@ export default function LiveView({ info }: { info: Info }) {
         <Tile k="Median virtual size" v={stats?.vsize_quantiles ? `${stats.vsize_quantiles.p50} vB` : "—"}
               h={stats?.vsize_quantiles ? `p90 ${stats.vsize_quantiles.p90} vB` : undefined} />
         <Tile k="Reconnects / rate-limited" v={`${status?.collector?.reconnects ?? 0} / ${c.rate_limited ?? 0}`} h="since collector start" />
+        <Tile k="Last successful observation" v={status?.last_observation_at ? ago(status.last_observation_at, now) : "—"}
+              h={status?.last_observation_at ? new Date(status.last_observation_at * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC" : "no transaction fetched yet"} />
+        <Tile k="Observed share (24 h)" v={status?.availability_24h?.observed_share != null ? `${(status.availability_24h.observed_share * 100).toFixed(1)}%` : "—"}
+              h={status?.availability_24h ? `down ${formatDuration(status.availability_24h.down_s)} of ${formatDuration(status.availability_24h.window_s)} · ${status.availability_24h.sequence_gaps} missed-update gaps` : undefined} />
       </div>
 
       <div className="split">
@@ -181,6 +194,35 @@ export default function LiveView({ info }: { info: Info }) {
           </ResponsiveContainer>
           <p className="muted small">Sampled transactions only; the sample is hash-based and independent of fee.</p>
         </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2>Collection gaps and outages (24 h)</h2>
+        {outages.length === 0 ? (
+          <p className="muted">No gaps recorded in the last 24 hours (or the collector has not run that long).</p>
+        ) : (
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr><th>Started (UTC)</th><th>Type</th><th className="num">Duration</th><th>Detail</th></tr>
+              </thead>
+              <tbody>
+                {outages.map((o) => (
+                  <tr key={o.id}>
+                    <td className="nowrap">{new Date(o.started_at * 1000).toISOString().replace("T", " ").slice(0, 19)}</td>
+                    <td>{OUTAGE_LABEL[o.kind]}{o.ended_at === null ? " (ongoing)" : ""}</td>
+                    <td className="num">{o.kind === "sequence_gap" ? "—" : formatDuration(outageDuration(o, now))}</td>
+                    <td className="muted">{o.detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="muted small">
+          Transactions announced during a gap were not observed. Even without gaps the feed is a
+          sample of the public mempool.space view, never complete network coverage.
+        </p>
       </div>
 
       <div className="split" style={{ marginTop: 16 }}>

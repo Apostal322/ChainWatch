@@ -71,10 +71,23 @@ export interface LiveStatus {
     settings: Record<string, string | number>;
   } | null;
   coverage: { sample_rate: number; fetch_per_minute: number; fetched_share_of_announced: number | null };
+  via: string;
+  last_observation_at: number | null;
+  availability_24h: { window_s: number; observed_share: number | null; down_s: number; sequence_gaps: number };
   explorer_tx_url: string;
   indicators: Record<string, string>;
   notice: string;
   server_time: number;
+}
+
+export type OutageKind = "collector_down" | "disconnected" | "sequence_gap";
+
+export interface Outage {
+  id: number;
+  kind: OutageKind;
+  started_at: number;
+  ended_at: number | null;
+  detail: string | null;
 }
 
 export interface MinuteStat {
@@ -115,7 +128,29 @@ export const liveApi = {
     get<{ total: number; rows: LiveRow[] }>(`/v1/live/transactions?limit=${limit}&sort=id&outcome=all`),
   tx: (txid: string) => get<LiveDetail>(`/v1/live/transactions/${txid}`),
   stats: (windowMinutes = 60) => get<LiveStats>(`/v1/live/stats?window_minutes=${windowMinutes}`),
+  outages: (hours = 24) => get<{ outages: Outage[] }>(`/v1/live/outages?hours=${hours}&limit=50`),
 };
+
+export const OUTAGE_LABEL: Record<OutageKind, string> = {
+  collector_down: "Collector not running",
+  disconnected: "WebSocket disconnected",
+  sequence_gap: "Missed mempool updates",
+};
+
+/** Human duration: 45s, 12m 5s, 3h 4m. */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return "—";
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
+/** Duration of an outage; open outages run until `now`. Gaps are instantaneous events. */
+export function outageDuration(o: Outage, now: number): number | null {
+  if (o.kind === "sequence_gap") return null;
+  return (o.ended_at ?? now) - o.started_at;
+}
 
 export const MAX_FEED = 500;
 
