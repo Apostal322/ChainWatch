@@ -345,3 +345,17 @@ def test_restore_round_trip_and_refuses_while_collector_runs(tmp_path):
     corrupt.write_bytes(b"not a database" * 100)
     with pytest.raises(sqlite3.DatabaseError):
         live_cli.restore(corrupt, db, heartbeat_s=5.0)
+
+
+def test_stats_totals_survive_lost_minute_counters(tmp_path):
+    """A SIGKILL loses up to heartbeat_s of per-minute counters; durable rows must win."""
+    store = LiveStore(tmp_path / "s.sqlite")
+    now = time.time()
+    for i in range(5):
+        t = txid(f"st{i}")
+        f = feat.extract(esplora_tx(t), txid=t, first_seen=now - 10, fetched_at=now - 5)
+        store.add_fetched(f, [])
+    store.add_failed(txid("stf"), now - 10, now - 5, "not_found")
+    store.bump(now - 5, received=40, sampled=6, fetched=2)  # 3 fetches were never flushed
+    totals = LiveReader(store.path).stats(60, now)["totals"]
+    assert totals["fetched"] == 5 and totals["failed"] == 1 and totals["received"] == 40

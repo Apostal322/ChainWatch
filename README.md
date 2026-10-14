@@ -178,7 +178,8 @@ tests/            370 tests: leakage canaries, metrics, backtest causality, API 
 reports/          committed aggregate results and figures (no row-level data)
 docs/             case study, protocols, results, inference contract, deployment, audit
 deploy/oracle/     always-on collector: systemd units, Caddy, install and smoke scripts
-scripts/          screenshot capture, demo smoke test, mock mempool, live load test
+scripts/          screenshot capture, demo smoke test, mock mempool (with fault injection), live
+                  load test, soak/fault-injection test, browser end-to-end test
 ```
 
 ## Documentation

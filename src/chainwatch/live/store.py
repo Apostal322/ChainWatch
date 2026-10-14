@@ -419,6 +419,11 @@ class LiveReader:
             ).fetchall()
         totals = {k: sum(m[k] for m in minutes) for k in MINUTE_FIELDS}
         rates = sorted(r["fee_rate"] for r in fetched)
+        # Both sources are lower bounds: per-minute counters are flushed every heartbeat, so
+        # a hard kill loses up to heartbeat_s of counts, while stored rows can be pruned by
+        # retention. Rows are durable, so stored fetched/failed counts are used when larger.
+        totals["fetched"] = max(totals["fetched"], len(rates))
+        totals["failed"] = max(totals["failed"], sum(n for _, n in failed))
         vsizes = sorted(r["vsize"] for r in fetched)
         flag_counts: dict[str, int] = {}
         for r in fetched:
