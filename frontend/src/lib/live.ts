@@ -2,7 +2,8 @@
 // historical / synthetic replay. Types mirror /v1/live/* (src/chainwatch/serving/live_api.py).
 import { ApiError } from "./api";
 
-export type Connection = "connected" | "reconnecting" | "disconnected";
+/** Collector connection as reported by the API ("failed": the collector gave up and needs attention). */
+export type Connection = "connected" | "reconnecting" | "disconnected" | "failed";
 
 export interface LiveRow {
   id: number;
@@ -26,6 +27,8 @@ export interface LiveFeatures {
   version: number;
   locktime: number;
   locktime_kind: string;
+  /** False when every input sequence is final, so the locktime has no effect. Absent from older collectors. */
+  locktime_enforced?: boolean | null;
   size: number;
   weight: number;
   vsize: number;
@@ -45,7 +48,8 @@ export interface LiveFeatures {
   input_refs: string[];
   n_op_return: number;
   n_dust_outputs: number;
-  confirmed_at_fetch: boolean;
+  /** null when the source did not say whether the transaction was confirmed. */
+  confirmed_at_fetch: boolean | null;
 }
 
 export interface LiveDetail extends LiveRow {
@@ -119,6 +123,10 @@ async function get<T>(path: string): Promise<T> {
     const err = body?.error;
     throw new ApiError(res.status, err?.code ?? "http_error", err?.message ?? res.statusText);
   }
+  // A 200 with an empty or truncated body must not be treated as "no data" (it would erase state).
+  if (body === null || typeof body !== "object") {
+    throw new ApiError(res.status, "invalid_response", "unreadable response from the live API");
+  }
   return body as T;
 }
 
@@ -186,6 +194,7 @@ export function filterSort(rows: LiveRow[], f: FeedFilter): LiveRow[] {
 export function connectionLabel(c: Connection | null): string {
   if (c === "connected") return "Connected";
   if (c === "reconnecting") return "Reconnecting";
+  if (c === "failed") return "Collector failed";
   return "Disconnected";
 }
 
@@ -205,4 +214,123 @@ export function ago(ts: number, now: number): string {
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   return `${Math.floor(s / 3600)}h ago`;
+}
+
+export function confirmedLabel(v: boolean | null | undefined): string {
+  if (v === true) return "yes";
+  if (v === false) return "no (in mempool)";
+  return "unknown";
+}
+
+/** UTC "YYYY-MM-DD HH:MM:SS". */
+export function utcStamp(ts: number): string {
+  return new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
+
+// ------------------------------------------------------------------ status interpretation
+/** A status response older than this (client clock) is treated as unknown, e.g. API unreachable. */
+export const STATUS_STALE_S = 20;
+/** Connected but no successful transaction fetch for this long: data is stale. */
+export const OBSERVATION_STALE_S = 120;
+
+export type SourceKind = "real" | "mock" | "unknown";
+
+/** Data-origin badge. Only an explicit `source_is_public_mempool === true` is labelled real. */
+export function sourceBadge(status: Pick<LiveStatus, "source_is_public_mempool"> | null): {
+  kind: SourceKind;
+  text: string;
+} {
+  if (!status || typeof status.source_is_public_mempool !== "boolean") {
+    return { kind: "unknown", text: "DATA SOURCE UNKNOWN: live status not loaded" };
+  }
+  return status.source_is_public_mempool
+    ? { kind: "real", text: "REAL BITCOIN NETWORK DATA" }
+    : { kind: "mock", text: "LOCAL MOCK / CUSTOM SOURCE: not real network data" };
+}
+
+export interface ConnectionView {
+  tone: "ok" | "warn" | "off";
+  label: string;
+  detail: string | null;
+}
+
+/**
+ * What the connection badge may claim, given the last status, when it arrived (client seconds),
+ * whether the latest poll failed, and the client clock. Never "Connected" on stale information.
+ */
+export function connectionView(
+  status: LiveStatus | null,
+  opts: { now: number; statusAt: number | null; apiError: boolean },
+): ConnectionView {
+  const { now, statusAt, apiError } = opts;
+  if (!status || statusAt === null) {
+    return { tone: "off", label: "Status unknown", detail: apiError ? "live API unreachable" : "waiting for status" };
+  }
+  const age = now - statusAt;
+  if (apiError || age > STATUS_STALE_S) {
+    return { tone: "off", label: "Status unknown", detail: `live API unreachable; last status ${ago(statusAt, now)}` };
+  }
+  if (status.connection === "failed" || status.collector?.state === "failed") {
+    return { tone: "off", label: "Collector failed", detail: "the collector exited after an internal error; systemd restarts it (see its journal)" };
+  }
+  if (status.connection === "connected") {
+    // Server clock "now", so collector timestamps are compared without client clock skew.
+    const serverNow = (Number.isFinite(status.server_time) ? status.server_time : statusAt) + age;
+    if (status.last_observation_at === null) {
+      return { tone: "ok", label: "Connected", detail: "no transaction fetched yet" };
+    }
+    const quiet = serverNow - status.last_observation_at;
+    if (quiet > OBSERVATION_STALE_S) {
+      return { tone: "warn", label: "Connected, no new data", detail: `no successful observation for ${formatDuration(quiet)}` };
+    }
+    return { tone: "ok", label: "Connected", detail: null };
+  }
+  if (status.connection === "reconnecting") return { tone: "warn", label: "Reconnecting", detail: null };
+  return { tone: "off", label: connectionLabel(status.connection), detail: null };
+}
+
+// ------------------------------------------------------------------ charts
+export interface ThroughputPoint {
+  t: number;
+  label: string;
+  announced: number | null;
+}
+
+/**
+ * Per-minute throughput for the chart: complete minutes only (the minute containing `serverNow`
+ * is still filling and would look like a drop), with minutes that have no row filled with null so
+ * collection gaps show as breaks instead of being bridged by the line.
+ */
+export function throughputSeries(
+  perMinute: Pick<MinuteStat, "t" | "received">[],
+  serverNow: number,
+): { points: ThroughputPoint[]; lastComplete: ThroughputPoint | null } {
+  const lastMinute = Math.floor(serverNow / 60) * 60 - 60; // start of the last complete minute
+  const byT = new Map<number, number>();
+  for (const m of perMinute) if (m.t <= lastMinute) byT.set(m.t, m.received);
+  if (byT.size === 0) return { points: [], lastComplete: null };
+  const start = Math.min(...byT.keys());
+  const points: ThroughputPoint[] = [];
+  for (let t = start; t <= lastMinute; t += 60) {
+    points.push({ t, label: new Date(t * 1000).toISOString().slice(11, 16), announced: byT.get(t) ?? null });
+  }
+  return { points, lastComplete: points[points.length - 1] ?? null };
+}
+
+// ------------------------------------------------------------------ event stream
+export function eventsUrl(since: number | null): string {
+  return since === null ? "/v1/live/events" : `/v1/live/events?since=${since}`;
+}
+
+export function maxRowId(rows: Pick<LiveRow, "id">[]): number | null {
+  return rows.length ? Math.max(...rows.map((r) => r.id)) : null;
+}
+
+/**
+ * Delay before re-opening an event stream the browser gave up on (HTTP error such as 503 "too many
+ * streams"): exponential from `base`, capped at `max`, with "equal jitter" so clients spread out.
+ */
+export function reconnectDelay(attempt: number, rand: () => number = Math.random, base = 3000, max = 60_000): number {
+  const ceiling = Math.min(max, base * 2 ** Math.max(0, attempt));
+  return Math.round(ceiling / 2 + (rand() * ceiling) / 2);
 }

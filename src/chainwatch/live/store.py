@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS tx (
 CREATE INDEX IF NOT EXISTS tx_fee_rate ON tx(fee_rate);
 CREATE INDEX IF NOT EXISTS tx_first_seen ON tx(first_seen);
 CREATE INDEX IF NOT EXISTS tx_fetched_at ON tx(fetched_at);
+-- covering index for the API's filtered counts/pages (COUNT by outcome was a full scan)
+CREATE INDEX IF NOT EXISTS tx_outcome_fee ON tx(outcome, fee_rate);
 CREATE TABLE IF NOT EXISTS outages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL CHECK (kind IN ('collector_down', 'disconnected', 'sequence_gap')),
@@ -281,28 +283,42 @@ class LiveReader:
     ) -> tuple[int, list[dict[str, Any]]]:
         if sort not in SORTABLE:
             raise ValueError(f"sort must be one of {sorted(SORTABLE)}")
-        where, args = [], []
+        # Index use (measured at the 50k-row cap, docs/LIVE_CLOUD.md section 8): COUNT uses the
+        # covering (outcome, fee_rate) index; a page sorted by fee uses it too; a page sorted
+        # by anything else is fastest as a reverse rowid scan that stops after LIMIT rows,
+        # so there the unary "+" keeps SQLite from choosing the index plus a full sort.
+        hint = "" if sort == "fee_rate" else "+"
+        where, page, args = [], [], []
         if outcome:
-            where.append("outcome = ?")
+            # with a flag filter every row is read anyway (json_each), so a plain table
+            # scan beats an index lookup per row for the COUNT as well
+            where.append(f"{'+' if flag else ''}outcome = ?")
+            page.append(f"{hint}outcome = ?")
             args.append(outcome)
         if min_fee_rate is not None:
             where.append("fee_rate >= ?")
+            page.append(f"{hint}fee_rate >= ?")
             args.append(min_fee_rate)
         if max_fee_rate is not None:
             where.append("fee_rate <= ?")
+            page.append(f"{hint}fee_rate <= ?")
             args.append(max_fee_rate)
         if flag:
-            where.append("EXISTS (SELECT 1 FROM json_each(tx.flags) WHERE value = ?)")
+            cond = "EXISTS (SELECT 1 FROM json_each(tx.flags) WHERE value = ?)"
+            where.append(cond)
+            page.append(cond)
             args.append(flag)
         if after_id is not None:
             where.append("id > ?")
+            page.append("id > ?")
             args.append(after_id)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
+        page_clause = f"WHERE {' AND '.join(page)}" if page else ""
         order = f"{sort} {'DESC' if descending else 'ASC'}, id DESC"
         with self._conn() as c:
             total = c.execute(f"SELECT COUNT(*) FROM tx {clause}", args).fetchone()[0]
             rows = c.execute(
-                f"SELECT {SUMMARY_COLS} FROM tx {clause} ORDER BY {order} LIMIT ? OFFSET ?",
+                f"SELECT {SUMMARY_COLS} FROM tx {page_clause} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*args, limit, offset),
             ).fetchall()
         return total, [_summary(r) for r in rows]
@@ -319,9 +335,10 @@ class LiveReader:
 
     def last_observation_at(self) -> float | None:
         with self._conn() as c:
-            return c.execute("SELECT MAX(fetched_at) FROM tx WHERE outcome = 'fetched'").fetchone()[
-                0
-            ]
+            # "+outcome": walk the fetched_at index backwards (the outcome index made this a
+            # 73 ms scan at 50k rows)
+            q = "SELECT MAX(fetched_at) FROM tx WHERE +outcome = 'fetched'"
+            return c.execute(q).fetchone()[0]
 
     def outages(self, since: float, limit: int = 50) -> list[dict[str, Any]]:
         with self._conn() as c:
@@ -388,18 +405,20 @@ class LiveReader:
                     "SELECT * FROM minute_stats WHERE minute >= ? ORDER BY minute", (since_min,)
                 )
             ]
+            # no ORDER BY: it made SQLite walk the fee_rate index over the whole table
+            # (83 ms at 50k rows) instead of the fetched_at range (3 ms); sorted below
             fetched = c.execute(
-                "SELECT fee_rate, vsize, flags FROM tx WHERE outcome = 'fetched' AND "
-                "fetched_at >= ? ORDER BY fee_rate",
+                "SELECT fee_rate, vsize, flags FROM tx WHERE +outcome = 'fetched' AND "
+                "fetched_at >= ?",
                 (since,),
             ).fetchall()
             failed = c.execute(
-                "SELECT error, COUNT(*) FROM tx WHERE outcome = 'failed' AND fetched_at >= ? "
+                "SELECT error, COUNT(*) FROM tx WHERE +outcome = 'failed' AND fetched_at >= ? "
                 "GROUP BY error",
                 (since,),
             ).fetchall()
         totals = {k: sum(m[k] for m in minutes) for k in MINUTE_FIELDS}
-        rates = [r["fee_rate"] for r in fetched]
+        rates = sorted(r["fee_rate"] for r in fetched)
         vsizes = sorted(r["vsize"] for r in fetched)
         flag_counts: dict[str, int] = {}
         for r in fetched:

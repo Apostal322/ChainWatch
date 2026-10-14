@@ -146,6 +146,10 @@ async function get<T>(path: string): Promise<T> {
     const err = body?.error;
     throw new ApiError(res.status, err?.code ?? "http_error", err?.message ?? res.statusText);
   }
+  // A 200 with an empty or truncated body is an error, not "no data".
+  if (body === null || typeof body !== "object") {
+    throw new ApiError(res.status, "invalid_response", "unreadable response from the API");
+  }
   return body as T;
 }
 

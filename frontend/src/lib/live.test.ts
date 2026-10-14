@@ -1,10 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "./api";
 import {
   ago,
+  confirmedLabel,
   connectionLabel,
+  connectionView,
+  eventsUrl,
+  maxRowId,
+  OBSERVATION_STALE_S,
+  reconnectDelay,
+  sourceBadge,
+  STATUS_STALE_S,
+  throughputSeries,
+  type LiveStatus,
   filterSort,
   formatDuration,
   formatSat,
+  liveApi,
   mergeFeed,
   outageDuration,
   shortTxid,
@@ -68,5 +80,141 @@ describe("collection gaps", () => {
     expect(outageDuration({ ...base, kind: "collector_down", ended_at: 160 }, 1000)).toBe(60);
     expect(outageDuration({ ...base, kind: "disconnected", ended_at: null }, 1000)).toBe(900);
     expect(outageDuration({ ...base, kind: "sequence_gap", ended_at: 100 }, 1000)).toBeNull();
+  });
+});
+
+const status = (over: Partial<LiveStatus> = {}): LiveStatus => ({
+  mode: "live",
+  source_url: "wss://mempool.space/api/v1/ws",
+  source_is_public_mempool: true,
+  data_origin: "real",
+  connection: "connected",
+  collector: {
+    state: "connected", updated_at: 1000, started_at: 900, connected_since: 900, last_message_at: 999,
+    reconnects: 0, counters: {}, settings: {},
+  },
+  coverage: { sample_rate: 0.05, fetch_per_minute: 30, fetched_share_of_announced: 0.05 },
+  via: "local database",
+  last_observation_at: 995,
+  availability_24h: { window_s: 86400, observed_share: 1, down_s: 0, sequence_gaps: 0 },
+  explorer_tx_url: "https://mempool.space/tx/{txid}",
+  indicators: {},
+  notice: "",
+  server_time: 1000,
+  ...over,
+});
+
+describe("data-origin badge", () => {
+  it("labels data real only when the status explicitly says so", () => {
+    expect(sourceBadge(status()).kind).toBe("real");
+    expect(sourceBadge(status({ source_is_public_mempool: false })).kind).toBe("mock");
+    expect(sourceBadge(null)).toEqual({ kind: "unknown", text: expect.stringContaining("UNKNOWN") });
+    // a malformed / partial status (e.g. truncated body) is never "real"
+    expect(sourceBadge({} as LiveStatus).kind).toBe("unknown");
+    expect(sourceBadge({ source_is_public_mempool: "yes" } as unknown as LiveStatus).kind).toBe("unknown");
+  });
+});
+
+describe("connection badge", () => {
+  // client clock == server clock here; statusAt is when the status arrived (client seconds)
+  const view = (s: LiveStatus | null, now: number, statusAt: number | null, apiError = false) =>
+    connectionView(s, { now, statusAt, apiError });
+
+  it("is unknown without a status, after a failed poll, or when the status is old", () => {
+    expect(view(null, 1000, null)).toMatchObject({ tone: "off", label: "Status unknown", detail: "waiting for status" });
+    expect(view(null, 1000, null, true).detail).toBe("live API unreachable");
+    expect(view(status(), 1001, 1000, true)).toMatchObject({ tone: "off", label: "Status unknown" });
+    expect(view(status(), 1000 + STATUS_STALE_S + 1, 1000).label).toBe("Status unknown");
+    expect(view(status(), 1000 + STATUS_STALE_S - 1, 1000).label).toBe("Connected");
+  });
+
+  it("flags a connected collector whose last observation is stale", () => {
+    expect(view(status(), 1000, 1000)).toEqual({ tone: "ok", label: "Connected", detail: null });
+    const stale = view(status({ last_observation_at: 1000 - OBSERVATION_STALE_S - 600 }), 1005, 1000);
+    expect(stale.tone).toBe("warn");
+    expect(stale.detail).toContain("12m");
+    expect(view(status({ last_observation_at: null }), 1000, 1000).detail).toBe("no transaction fetched yet");
+  });
+
+  it("compares against the server clock, not the client clock", () => {
+    // client clock 1 h ahead of the server: the observation is 5 s old on the server's clock
+    expect(view(status({ server_time: 1000 }), 4600, 4600).label).toBe("Connected");
+  });
+
+  it("maps reconnecting, disconnected and failed", () => {
+    expect(view(status({ connection: "reconnecting" }), 1000, 1000).tone).toBe("warn");
+    expect(view(status({ connection: "disconnected" }), 1000, 1000)).toMatchObject({ tone: "off", label: "Disconnected" });
+    expect(view(status({ connection: "failed" }), 1000, 1000).label).toBe("Collector failed");
+    const failedState = status();
+    failedState.collector!.state = "failed";
+    expect(view(failedState, 1000, 1000).label).toBe("Collector failed");
+    expect(connectionLabel("failed")).toBe("Collector failed");
+  });
+});
+
+describe("throughput series", () => {
+  const m = (t: number, received: number) => ({ t, received });
+
+  it("drops the minute that is still filling", () => {
+    const { points, lastComplete } = throughputSeries([m(600, 300), m(660, 20)], 690);
+    expect(points.map((p) => p.t)).toEqual([600]);
+    expect(lastComplete).toMatchObject({ t: 600, announced: 300, label: "00:10" });
+  });
+
+  it("fills missing minutes with null so gaps are not bridged", () => {
+    const { points } = throughputSeries([m(600, 5), m(780, 7)], 900);
+    expect(points.map((p) => [p.t, p.announced])).toEqual([[600, 5], [660, null], [720, null], [780, 7], [840, null]]);
+  });
+
+  it("is empty when nothing complete exists", () => {
+    expect(throughputSeries([], 1000)).toEqual({ points: [], lastComplete: null });
+    expect(throughputSeries([m(960, 3)], 1000)).toEqual({ points: [], lastComplete: null });
+  });
+});
+
+describe("event stream helpers", () => {
+  it("resumes after the newest row already loaded", () => {
+    expect(eventsUrl(null)).toBe("/v1/live/events");
+    expect(eventsUrl(42)).toBe("/v1/live/events?since=42");
+    expect(maxRowId([])).toBeNull();
+    expect(maxRowId([row(3), row(9), row(5)])).toBe(9);
+  });
+
+  it("backs off exponentially with jitter and a cap", () => {
+    const hi = () => 1;
+    const lo = () => 0;
+    expect([0, 1, 2, 3].map((a) => reconnectDelay(a, hi))).toEqual([3000, 6000, 12000, 24000]);
+    expect(reconnectDelay(10, hi)).toBe(60000);
+    expect(reconnectDelay(0, lo)).toBe(1500);
+    expect(reconnectDelay(10, lo)).toBe(30000);
+    for (let a = 0; a < 8; a++) {
+      const d = reconnectDelay(a);
+      expect(d).toBeGreaterThanOrEqual(1500);
+      expect(d).toBeLessThanOrEqual(60000);
+    }
+  });
+});
+
+describe("detail labels", () => {
+  it("shows unknown confirmation state as unknown", () => {
+    expect(confirmedLabel(true)).toBe("yes");
+    expect(confirmedLabel(false)).toBe("no (in mempool)");
+    expect(confirmedLabel(null)).toBe("unknown");
+  });
+});
+
+describe("live API client", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("rejects a 200 with a truncated body instead of returning null", async () => {
+    vi.stubGlobal("fetch", async () => new Response('{"mode":"live","source_url":"ws://', { status: 200 }));
+    await expect(liveApi.status()).rejects.toMatchObject({ code: "invalid_response" });
+    await expect(liveApi.status()).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("surfaces the API error code", async () => {
+    vi.stubGlobal("fetch", async () =>
+      new Response(JSON.stringify({ error: { code: "live_no_data", message: "no live data yet" } }), { status: 503 }));
+    await expect(liveApi.status()).rejects.toMatchObject({ status: 503, code: "live_no_data" });
   });
 });
