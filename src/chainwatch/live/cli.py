@@ -20,6 +20,8 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
+
 from chainwatch.config import LiveConfig, load_config
 
 
@@ -223,20 +225,34 @@ def cmd_indicators(args) -> int:
         if args.action == "status":
             print(json.dumps(rp.source_status(store.db), indent=2))
             return 0
-        if args.source not in sources.SOURCES:
-            raise SystemExit(f"unknown source; choose from {sorted(sources.SOURCES)}")
-        spec = sources.SOURCES[args.source]
-        if args.file:
-            content, url = Path(args.file).read_bytes(), f"file:{Path(args.file).name}"
-        else:
-            content, url = sources.fetch(spec.url), spec.url
-        snap = sources.load(spec, content, url)
+        for name in (args.source, args.fallback):
+            if name and name not in sources.SOURCES:
+                raise SystemExit(f"unknown source {name!r}; choose from {sorted(sources.SOURCES)}")
+        order = [args.source] + ([args.fallback] if args.fallback else [])
+        snap, failures = None, []
+        for source in order:
+            spec = sources.SOURCES[source]
+            try:
+                if args.file:
+                    content, url = Path(args.file).read_bytes(), f"file:{Path(args.file).name}"
+                else:
+                    content, url = sources.fetch(spec.url), spec.url
+                snap = sources.load(spec, content, url)
+                break
+            except (OSError, ValueError, httpx.HTTPError) as e:  # unreachable, invalid, too big
+                failures.append({"source": source, "error": f"{type(e).__name__}: {e}"[:300]})
+                print(f"chainwatch-live: source {source} failed: {failures[-1]['error']}",
+                      file=sys.stderr)  # fmt: skip
+        if snap is None:
+            print(json.dumps({"status": "failed", "failures": failures}, indent=2))
+            return 1  # the previous version stays in use; freshness shows the age
         report = rp.ingest_snapshot(store.db, snap, time.time())
         if report["status"] == "new_version":
             report["retrospective_matches"] = rp.retro_screen(
                 store.db, report["version_id"], time.time()
             )
         report["rejected_examples"] = snap.rejected[:5]
+        report["failures"] = failures
         print(json.dumps(report, indent=2, default=str))
     finally:
         store.close()
@@ -294,6 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("indicators", help="load / inspect risk-indicator sources")
     s.add_argument("action", choices=["update", "status"])
     s.add_argument("--source", default="ofac-sdn", help="ofac-sdn (official) or ofac-sdn-mirror")
+    s.add_argument("--fallback", default=None, help="source to try if the first one fails")
     s.add_argument("--file", type=Path, default=None, help="ingest a local copy instead")
     s.add_argument("--db", type=Path, default=None)
     s.set_defaults(func=cmd_indicators)

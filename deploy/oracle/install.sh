@@ -101,12 +101,14 @@ fi
 if [ "$SKIP_SYSTEMD" != "1" ]; then
   note "systemd units (restart on crash, start on boot)"
   for unit in chainwatch-collector.service chainwatch-live-api.service \
-              chainwatch-backup.service chainwatch-backup.timer; do
+              chainwatch-backup.service chainwatch-backup.timer \
+              chainwatch-indicators.service chainwatch-indicators.timer; do
     run install -m 0644 "$APP/deploy/oracle/$unit" "/etc/systemd/system/$unit"
   done
   run systemctl daemon-reload
   run systemctl restart systemd-journald
-  run systemctl enable --now chainwatch-collector.service chainwatch-live-api.service chainwatch-backup.timer
+  run systemctl enable --now chainwatch-collector.service chainwatch-live-api.service \
+    chainwatch-backup.timer chainwatch-indicators.timer
   run systemctl restart chainwatch-collector.service chainwatch-live-api.service
 fi
 

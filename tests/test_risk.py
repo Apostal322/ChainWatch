@@ -395,3 +395,100 @@ def test_retrospective_screening_does_not_rewrite_history(tmp_path):
     assert alert["retrospective"] is True and alert["kind"] == "retrospective_source_match"
     # the point-in-time record keeps what was known at evaluation time
     assert rp.risk_record(store.db, f["txid"])["screening"]["status"] == "NO_KNOWN_SCREENING_MATCH"
+
+
+# ---------------------------------------------------------------- API (edge + remote proxy)
+def _populated(tmp_path):
+    from chainwatch.risk.anomaly import RobustTailDetector
+
+    store = _store(tmp_path)
+    _ingest(store, [LISTED], at=1.0)
+    f, tx = _features("api", out_addresses=[LISTED])
+    tx_id = store.add_fetched_id(f, [])
+    now = time.time()
+    eng = RiskEngine(_screener(store), RobustTailDetector(), SupervisedLayer(None),
+                     clock=lambda: now)  # fmt: skip
+    rec = eng.assess(f, feat.extract_addresses(tx), [])
+    rp.save_addresses(store.db, tx_id, feat.extract_addresses(tx))
+    rp.save_risk(store.db, tx_id, rec)
+    for spec in alert_specs(rec):
+        rp.upsert_alert(store.db, txid=f["txid"], at=now, **spec)
+    store.heartbeat(state="connected", updated_at=time.time(), started_at=1.0)
+    return store, f["txid"]
+
+
+def test_risk_routes_on_the_edge_and_through_the_remote_proxy(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from chainwatch.live.edge import create_edge_app
+    from chainwatch.serving.live_api import RemoteBackend
+
+    token = "k" * 48
+    store, tid = _populated(tmp_path)
+    live = LiveConfig(enabled=True, db_path=store.path, edge_trusted_proxy_hops=0)
+    edge = TestClient(create_edge_app(live, token))
+    auth = {"authorization": f"Bearer {token}"}
+    assert edge.get("/v1/live/findings").status_code == 401  # token required
+    s = edge.get("/v1/live/risk/summary?hours=1", headers=auth).json()
+    assert (
+        s["summary"]["by_priority"] == {"1": 1} and "not proof of fraud" in s["layers"]["screening"]
+    )
+    assert s["summary"]["sources"][0]["source_id"] == "test-src"
+    fd = edge.get("/v1/live/findings", headers=auth).json()["findings"]
+    assert fd[0]["txid"] == tid and fd[0]["screening"]["matches"][0]["address"] == LISTED
+    al = edge.get("/v1/live/alerts?status=new", headers=auth).json()["alerts"]
+    assert al[0]["kind"] == "source_match" and al[0]["txids"] == [tid]
+    assert edge.get("/v1/live/alerts?status=guilty", headers=auth).status_code == 422
+    detail = edge.get(f"/v1/live/transactions/{tid}", headers=auth).json()
+    assert detail["risk"]["priority"]["level"] == 1 and "lifecycle" in detail
+    rows = edge.get("/v1/live/transactions?outcome=all", headers=auth).json()["rows"]
+    assert rows[0]["risk_priority"] == 1
+
+    remote_live = LiveConfig(enabled=True, remote_url="http://testserver", remote_cache_s=0.0)
+    be = RemoteBackend(remote_live, token, transport=edge._transport)
+    assert be.findings(4, 10, None)[0]["txid"] == tid
+    assert be.alerts("new", 10)[0]["priority"] == 1
+    assert be.risk_summary(24)["layers"]["supervised"].startswith("No supervised model")
+
+
+def test_reader_tolerates_a_database_from_before_risk_tables(tmp_path):
+    import sqlite3
+
+    from chainwatch.live.store import SCHEMA
+
+    db = tmp_path / "old.sqlite"
+    con = sqlite3.connect(db)
+    con.executescript(SCHEMA)
+    con.close()
+    reader = LiveReader(db)
+    assert reader.findings(4, 10, None) == [] and reader.alerts(None, 10) == []
+    assert reader.risk_summary(0.0) is None
+
+
+def test_indicator_update_falls_back_and_never_breaks_on_failure(tmp_path, monkeypatch, capsys):
+    from chainwatch.live import cli as live_cli
+    from chainwatch.risk import sources
+
+    calls = []
+
+    def fake_fetch(url, timeout=120.0):
+        calls.append(url)
+        if "treasury.gov" in url:
+            raise httpx.ConnectError("blocked")
+        return f"{LISTED}\n".encode()
+
+    monkeypatch.setattr(sources, "fetch", fake_fetch)
+    cfg = tmp_path / "c.yaml"
+    from chainwatch.config import REPO_ROOT
+
+    base = REPO_ROOT / "configs" / "live.yaml"
+    cfg.write_text(f"extends: {base}\nlive:\n  db_path: {tmp_path / 'i.sqlite'}\n")
+    argv = ["--config", str(cfg), "indicators", "update", "--source", "ofac-sdn",
+            "--fallback", "ofac-sdn-mirror"]  # fmt: skip
+    assert live_cli.main(argv) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["source_id"] == "ofac-sdn-mirror" and out["failures"][0]["source"] == "ofac-sdn"
+    monkeypatch.setattr(sources, "fetch", lambda url, timeout=120.0: (_ for _ in ()).throw(
+        httpx.ConnectError("down")))  # fmt: skip
+    assert live_cli.main(argv) == 1  # previous version stays in use
+    assert len(calls) == 2

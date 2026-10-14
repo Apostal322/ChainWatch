@@ -1,0 +1,12 @@
+# OFAC publishes changes irregularly; a daily check keeps screening sources under a day old.
+[Unit]
+Description=Daily ChainWatch indicator source refresh
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*-*-* 04:41:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
