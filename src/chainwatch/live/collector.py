@@ -76,6 +76,16 @@ class Counters:
     removed: int = 0
     mined: int = 0
     replacement_pairs: int = 0
+    lifecycle_updates: int = 0  # stored transactions later seen mined / removed / replaced
+    # risk intelligence (docs/RISK_ENGINE.md)
+    risk_assessed: int = 0
+    risk_errors: int = 0  # assessment or persistence failed; the observation is kept
+    layer_errors: int = 0  # a single layer failed inside an assessment (isolated)
+    screening_matches: int = 0
+    graph_relations: int = 0
+    anomalies_strong: int = 0
+    anomalies_notable: int = 0
+    alerts_raised: int = 0
     connects: int = 0
     reconnects: int = 0
     stale_reconnects: int = 0
@@ -179,6 +189,13 @@ def backoff_delay(attempt: int, base: float, cap: float, rng: random.Random) -> 
     return rng.uniform(0.0, min(cap, base * 2 ** min(attempt, 30)))
 
 
+def _pct(values, q: float) -> float | None:
+    if not values:
+        return None
+    s = sorted(values)
+    return round(s[min(len(s) - 1, int(q * (len(s) - 1) + 0.5))], 3)
+
+
 HEALTHY_AFTER_S = 30.0  # a connection must deliver for this long before backoff resets
 UPSTREAM_ERROR_PAUSE_S = 30.0  # fetch pause after an HTTP 5xx from the REST API
 GONE_MAX = 50_000  # remembered removed/mined txids (bounded)
@@ -223,6 +240,9 @@ class Collector:
         self.first_started_at = self.started_at
         self._max_fetches: int | None = None
         self.fatal: str | None = None  # set when a pipeline task died; the CLI exits non-zero
+        self.engine = None  # built in run() from the store (risk intelligence)
+        self._indicator_version = -1
+        self._latencies: deque[float] = deque(maxlen=500)
 
     # ---- WebSocket side ------------------------------------------------------------------
     def handle_frame(self, raw: str | bytes) -> None:
@@ -252,6 +272,16 @@ class Collector:
         self.c.replacement_pairs += len(d.replaced)
         for txid in (*d.removed, *d.mined):
             self.gone.add(txid)
+        if self.store is not None and (d.removed or d.mined or d.replaced):
+            # post-observation state only; features and past assessments are never changed
+            from chainwatch.risk.persistence import mark_lifecycle
+
+            at = self.last_message_at
+            n = mark_lifecycle(self.store.db, d.mined, "mined", at)
+            n += mark_lifecycle(self.store.db, d.removed, "removed", at)
+            for old, by in d.replaced:
+                n += mark_lifecycle(self.store.db, [old], "replaced", at, replaced_by=by)
+            self.c.lifecycle_updates += n
         now = self.clock()
         for txid in d.added:
             self.c.received += 1
@@ -380,8 +410,9 @@ class Collector:
                 error = f"http_{resp.status_code}"
             else:
                 try:
+                    payload = resp.json()
                     f = feat.extract(
-                        resp.json(), txid=txid, first_seen=first_seen, fetched_at=self.clock()
+                        payload, txid=txid, first_seen=first_seen, fetched_at=self.clock()
                     )
                 except (ValueError, feat.FeatureError) as e:
                     self.c.malformed_payloads += 1
@@ -389,11 +420,92 @@ class Collector:
                 else:
                     flags = feat.indicators(f, self.recent_fee_rates)
                     self.recent_fee_rates.append(f["fee_rate"])
-                    if self.store.add_fetched(f, flags):
+                    tx_id = self.store.add_fetched_id(f, flags)
+                    if tx_id is not None:
                         self.c.fetched += 1
+                        self._assess(tx_id, f, payload)
         if error is not None:
             self.c.failed += 1
             self.store.add_failed(txid, first_seen, self.clock(), error)
+
+    # ---- risk intelligence --------------------------------------------------------------
+    def _build_engine(self) -> None:
+        from chainwatch.risk import persistence as rp
+        from chainwatch.risk.anomaly import RobustTailDetector
+        from chainwatch.risk.engine import RiskEngine
+        from chainwatch.risk.supervised import SupervisedLayer
+
+        detector = RobustTailDetector()
+        detector.warm_start(self.store.recent_features(detector.cfg.window))
+        db = self.store.db
+
+        def parents(txids: list[str]) -> tuple[list[dict], int]:
+            return rp.observed_parent_matches(db, txids), rp.count_observed(db, txids)
+
+        self.engine = RiskEngine(
+            self._load_screener(), detector, SupervisedLayer(None), parents, clock=self.clock
+        )
+
+    def _load_screener(self):
+        from chainwatch.risk import persistence as rp
+        from chainwatch.risk.screening import Screener
+
+        self._indicator_version = rp.latest_version_id(self.store.db)
+        return Screener(
+            rp.indicator_rows(self.store.db),
+            rp.source_status(self.store.db),
+            max_source_age_s=self.cfg.indicator_max_age_days * 86400,
+        )
+
+    def _reload_indicators_if_changed(self) -> None:
+        from chainwatch.risk import persistence as rp
+
+        if (
+            self.engine is not None
+            and rp.latest_version_id(self.store.db) != self._indicator_version
+        ):
+            self.engine.screener = self._load_screener()
+        elif self.engine is not None:  # refresh freshness (checked_at) of unchanged sources
+            self.engine.screener.sources = rp.source_status(self.store.db)
+
+    def _assess(self, tx_id: int, f: dict[str, Any], payload: dict[str, Any]) -> None:
+        if self.engine is None or not self.cfg.risk_enabled:
+            return
+        from chainwatch.risk import persistence as rp
+        from chainwatch.risk.engine import alert_specs
+
+        try:
+            addrs = feat.extract_addresses(payload)
+            parents = sorted(
+                {
+                    i["txid"]
+                    for i in payload["vin"]
+                    if isinstance(i, dict)
+                    and not i.get("is_coinbase")
+                    and isinstance(i.get("txid"), str)
+                }
+            )
+            record = self.engine.assess(f, addrs, parents)
+            self.engine.detector.update(f)  # the window holds only transactions before the next
+            db = self.store.db
+            rp.save_addresses(db, tx_id, addrs)
+            rp.save_risk(db, tx_id, record)
+            for spec in alert_specs(record):
+                rp.upsert_alert(db, txid=f["txid"], at=record["evaluated_at"], **spec)
+                self.c.alerts_raised += 1
+        except Exception as e:  # keep the observation even if the assessment fails
+            self.c.risk_errors += 1
+            self.last_error = f"risk: {type(e).__name__}: {e}"[:200]
+            log.exception(json.dumps({"msg": "risk assessment failed", "txid": f["txid"]}))
+            return
+        self.c.risk_assessed += 1
+        self.c.layer_errors += len(record["errors"])
+        self._latencies.append(record["latency_ms"])
+        level = record["priority"]["level"]
+        self.c.screening_matches += level == 1
+        self.c.graph_relations += level == 2
+        self.c.anomalies_strong += level == 3
+        self.c.anomalies_notable += level == 4
 
     async def _worker(self) -> None:
         while not self.stop.is_set():
@@ -432,6 +544,10 @@ class Collector:
                 "queue_size": self.queue.qsize(),
                 "dedupe_size": len(self.seen),
                 "last_error": self.last_error,
+                "risk_latency_ms_p50": _pct(self._latencies, 0.5),
+                "risk_latency_ms_p95": _pct(self._latencies, 0.95),
+                "anomaly_reference_size": self.engine.detector.n if self.engine else None,
+                "supervised_state": self.engine.supervised.status() if self.engine else None,
             },
             "settings": {
                 "source": "mempool.space",
@@ -464,6 +580,7 @@ class Collector:
         last_prune = last_checkpoint = self.clock()
         while not self.stop.is_set():
             self.flush()
+            self._reload_indicators_if_changed()
             if self.clock() - last_prune > 60:
                 self.store.prune(self.cfg.retention_rows, retention_days=self.cfg.retention_days)
                 last_prune = self.clock()
@@ -501,6 +618,8 @@ class Collector:
     async def run(self, duration: float | None = None, max_fetches: int | None = None) -> Counters:
         self._max_fetches = max_fetches
         self.recover()
+        if self.cfg.risk_enabled:
+            self._build_engine()
         if self.http is None:
             self.http = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.cfg.request_timeout_s),

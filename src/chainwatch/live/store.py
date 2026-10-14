@@ -114,6 +114,9 @@ class LiveStore:
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(collector)")}
         if "first_started_at" not in cols:  # migrate databases created by v0.5.0
             self.db.execute("ALTER TABLE collector ADD COLUMN first_started_at REAL")
+        from chainwatch.risk.persistence import migrate
+
+        migrate(self.db)  # risk tables and tx lifecycle columns (v0.7.0)
 
     def close(self) -> None:
         self.db.close()
@@ -123,6 +126,10 @@ class LiveStore:
 
     def add_fetched(self, f: dict[str, Any], flags: list[str]) -> bool:
         """Insert a fetched transaction; returns False if the txid was already stored."""
+        return self.add_fetched_id(f, flags) is not None
+
+    def add_fetched_id(self, f: dict[str, Any], flags: list[str]) -> int | None:
+        """Insert a fetched transaction and return its row id (None if already stored)."""
         cur = self.db.execute(
             "INSERT OR IGNORE INTO tx (txid, first_seen, fetched_at, outcome, fee_rate, fee, "
             "vsize, n_inputs, n_outputs, output_value_total, rbf_signal, confirmed_at_fetch, "
@@ -134,7 +141,7 @@ class LiveStore:
                 json.dumps(f, separators=(",", ":")),
             ),
         )  # fmt: skip
-        return cur.rowcount == 1
+        return int(cur.lastrowid) if cur.rowcount == 1 else None
 
     def add_failed(self, txid: str, first_seen: float, fetched_at: float, error: str) -> bool:
         cur = self.db.execute(
@@ -221,7 +228,20 @@ class LiveStore:
         self.db.execute(
             "DELETE FROM outages WHERE ended_at IS NOT NULL AND ended_at < ?", (now - 30 * 86400,)
         )
+        from chainwatch.risk.persistence import prune_orphans
+
+        prune_orphans(self.db, now)  # addresses and risk records of pruned rows; old alerts
         return removed
+
+    def recent_features(self, limit: int) -> list[dict[str, Any]]:
+        """Features of the last ``limit`` fetched transactions, oldest first (detector warm
+        start after a restart: the same reference window the previous process had)."""
+        rows = self.db.execute(
+            "SELECT features FROM tx WHERE outcome = 'fetched' AND features IS NOT NULL "
+            "ORDER BY fetched_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [json.loads(r[0]) for r in reversed(rows)]
 
     def checkpoint(self) -> None:
         """Fold the WAL into the database and truncate it (bounds the -wal file)."""
@@ -321,17 +341,68 @@ class LiveReader:
                 f"SELECT {SUMMARY_COLS} FROM tx {page_clause} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*args, limit, offset),
             ).fetchall()
-        return total, [_summary(r) for r in rows]
+            out = [_summary(r) for r in rows]
+            if out:  # review priority of each row (risk intelligence), when assessed
+                marks = ",".join("?" * len(out))
+                try:
+                    prio = dict(
+                        c.execute(
+                            f"SELECT tx_id, priority FROM risk WHERE tx_id IN ({marks})",
+                            [r["id"] for r in out],
+                        ).fetchall()
+                    )
+                except sqlite3.OperationalError:  # database from before v0.7.0
+                    prio = {}
+                for r in out:
+                    r["risk_priority"] = prio.get(r["id"])
+        return total, out
 
     def get(self, txid: str) -> dict[str, Any] | None:
+        from chainwatch.risk import persistence as rp
+
         with self._conn() as c:
             row = c.execute(f"SELECT {SUMMARY_COLS}, features FROM tx WHERE txid = ?", (txid,))
             row = row.fetchone()
-        if row is None:
-            return None
-        d = _summary(row)
-        d["features"] = json.loads(row["features"]) if row["features"] else None
+            if row is None:
+                return None
+            d = _summary(row)
+            d["features"] = json.loads(row["features"]) if row["features"] else None
+            try:
+                d["risk"] = rp.risk_record(c, txid)
+                lc = c.execute(
+                    "SELECT lifecycle, lifecycle_at, replaced_by FROM tx WHERE txid = ?", (txid,)
+                ).fetchone()
+                d["lifecycle"] = {"state": lc[0], "at": lc[1], "replaced_by": lc[2]}
+            except sqlite3.OperationalError:  # database from before v0.7.0
+                d["risk"], d["lifecycle"] = None, None
         return d
+
+    def _risk(self, fn, default):
+        with self._conn() as c:
+            try:
+                return fn(c)
+            except sqlite3.OperationalError as e:  # tables not created yet (older collector)
+                if "no such table" in str(e) or "no such column" in str(e):
+                    return default
+                raise
+
+    def findings(self, max_priority: int, limit: int, before_id: int | None) -> list[dict]:
+        from chainwatch.risk import persistence as rp
+
+        return self._risk(
+            lambda c: rp.findings(c, max_priority=max_priority, limit=limit, before_id=before_id),
+            [],
+        )
+
+    def alerts(self, status: str | None, limit: int) -> list[dict]:
+        from chainwatch.risk import persistence as rp
+
+        return self._risk(lambda c: rp.alerts(c, status=status, limit=limit), [])
+
+    def risk_summary(self, since: float) -> dict[str, Any] | None:
+        from chainwatch.risk import persistence as rp
+
+        return self._risk(lambda c: rp.risk_summary(c, since), None)
 
     def last_observation_at(self) -> float | None:
         with self._conn() as c:

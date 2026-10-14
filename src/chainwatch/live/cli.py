@@ -211,6 +211,56 @@ def reliability_report(live: LiveConfig, hours: float, now: float | None = None)
     }
 
 
+def cmd_indicators(args) -> int:
+    """Load an indicator source snapshot (fetch, or --file), version it, retro-screen."""
+    from chainwatch.live.store import LiveStore
+    from chainwatch.risk import persistence as rp
+    from chainwatch.risk import sources
+
+    live = _live(args)
+    store = LiveStore(live.db_path)
+    try:
+        if args.action == "status":
+            print(json.dumps(rp.source_status(store.db), indent=2))
+            return 0
+        if args.source not in sources.SOURCES:
+            raise SystemExit(f"unknown source; choose from {sorted(sources.SOURCES)}")
+        spec = sources.SOURCES[args.source]
+        if args.file:
+            content, url = Path(args.file).read_bytes(), f"file:{Path(args.file).name}"
+        else:
+            content, url = sources.fetch(spec.url), spec.url
+        snap = sources.load(spec, content, url)
+        report = rp.ingest_snapshot(store.db, snap, time.time())
+        if report["status"] == "new_version":
+            report["retrospective_matches"] = rp.retro_screen(
+                store.db, report["version_id"], time.time()
+            )
+        report["rejected_examples"] = snap.rejected[:5]
+        print(json.dumps(report, indent=2, default=str))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_alerts(args) -> int:
+    from chainwatch.live.store import LiveStore
+    from chainwatch.risk import persistence as rp
+
+    store = LiveStore(_live(args).db_path)
+    try:
+        if args.action == "list":
+            print(json.dumps(rp.alerts(store.db, status=args.status, limit=args.limit), indent=2))
+        elif args.action == "set-status":
+            rp.set_alert_status(store.db, args.id, args.status, time.time(), args.note)
+            print(json.dumps({"id": args.id, "status": args.status}))
+        else:  # history
+            print(json.dumps(rp.alert_history(store.db, args.id), indent=2))
+    finally:
+        store.close()
+    return 0
+
+
 def cmd_report(args) -> int:
     print(json.dumps(reliability_report(_live(args), args.hours), indent=2, default=str))
     return 0
@@ -241,6 +291,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("source", type=Path)
     s.add_argument("--db", type=Path, default=None)
     s.set_defaults(func=cmd_restore)
+    s = sub.add_parser("indicators", help="load / inspect risk-indicator sources")
+    s.add_argument("action", choices=["update", "status"])
+    s.add_argument("--source", default="ofac-sdn", help="ofac-sdn (official) or ofac-sdn-mirror")
+    s.add_argument("--file", type=Path, default=None, help="ingest a local copy instead")
+    s.add_argument("--db", type=Path, default=None)
+    s.set_defaults(func=cmd_indicators)
+    s = sub.add_parser("alerts", help="investigation queue: list, set-status, history")
+    s.add_argument("action", choices=["list", "set-status", "history"])
+    s.add_argument("--id", type=int)
+    s.add_argument("--status", default=None)
+    s.add_argument("--note", default=None)
+    s.add_argument("--limit", type=int, default=50)
+    s.add_argument("--db", type=Path, default=None)
+    s.set_defaults(func=cmd_alerts)
     s = sub.add_parser("report", help="reliability report (availability, outages, totals)")
     s.add_argument("--hours", type=float, default=24.0)
     s.add_argument("--db", type=Path, default=None)

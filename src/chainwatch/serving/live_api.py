@@ -54,6 +54,17 @@ CACHE_MAX_KEYS = 256  # RemoteBackend LRU size
 UPSTREAM_PER_S = 3.0  # RemoteBackend cache misses per second (edge allows 240/min per client)
 UPSTREAM_BURST = 20
 EVENT_ID_RE = re.compile(r"[0-9]{1,18}")
+RISK_LAYERS = {
+    "screening": "Source-backed screening: exact matches of input/output addresses against "
+    "versioned indicator sources (e.g. OFAC SDN). A match means the source lists the "
+    "address; it is not proof of fraud. No match means only that the enabled sources did "
+    "not list the screened addresses.",
+    "graph": "Relations within this collector's observed data (distance 2). Proximity is "
+    "not ownership or culpability; unobserved parents are not checked.",
+    "anomaly": "Behavioural anomalies: measurements in the tail of recently sampled "
+    "traffic. Unusual is not illicit (batch payouts, consolidations, CoinJoins).",
+    "supervised": "No supervised model is validated for live transactions; this layer abstains.",
+}
 
 
 class LiveDisabled(Exception):
@@ -144,6 +155,31 @@ class LocalBackend:
 
     def recent(self) -> list[dict[str, Any]]:
         return self.reader.list(limit=RECENT_WINDOW, sort="id", descending=True, outcome=None)[1]
+
+    def risk_summary(self, hours: float) -> dict[str, Any]:
+        summary = self.reader.risk_summary(time.time() - hours * 3600)
+        st = self.reader.status() or {}
+        counters = st.get("counters") or {}
+        return {
+            "enabled": summary is not None,
+            "window_hours": hours,
+            "summary": summary,
+            "engine": {
+                "anomaly_reference_size": counters.get("anomaly_reference_size"),
+                "risk_latency_ms_p50": counters.get("risk_latency_ms_p50"),
+                "risk_latency_ms_p95": counters.get("risk_latency_ms_p95"),
+                "risk_errors": counters.get("risk_errors"),
+                "layer_errors": counters.get("layer_errors"),
+                "supervised": counters.get("supervised_state"),
+            },
+            "layers": RISK_LAYERS,
+        }
+
+    def findings(self, max_priority: int, limit: int, before_id: int | None) -> list[dict]:
+        return self.reader.findings(max_priority, limit, before_id)
+
+    def alerts(self, status: str | None, limit: int) -> list[dict]:
+        return self.reader.alerts(status, limit)
 
     def max_id(self) -> int:
         return self.reader.max_id()
@@ -297,6 +333,17 @@ class RemoteBackend:
         rows = self.recent()
         return max((r["id"] for r in rows), default=0)
 
+    def risk_summary(self, hours: float) -> dict[str, Any]:
+        body = self._get("/v1/live/risk/summary", {"hours": hours})
+        return {k: v for k, v in body.items() if k != "mode"}
+
+    def findings(self, max_priority: int, limit: int, before_id: int | None) -> list[dict]:
+        q = {"max_priority": max_priority, "limit": limit, "before_id": before_id}
+        return self._get("/v1/live/findings", q)["findings"]
+
+    def alerts(self, status: str | None, limit: int) -> list[dict]:
+        return self._get("/v1/live/alerts", {"status": status, "limit": limit})["alerts"]
+
 
 def _code(body: Any) -> str:
     try:
@@ -414,6 +461,31 @@ def install_live_routes(
     @r.get("/stats")
     def live_stats(window_minutes: int = Query(60, ge=1, le=1440)) -> dict[str, Any]:
         return {"mode": "live", **be.stats(window_minutes)}
+
+    @r.get("/risk/summary")
+    def live_risk_summary(hours: float = Query(24, gt=0, le=720)) -> dict[str, Any]:
+        """Risk intelligence health: layer outcomes, latency, sources and their freshness."""
+        return {"mode": "live", **be.risk_summary(hours)}
+
+    @r.get("/findings")
+    def live_findings(
+        max_priority: int = Query(4, ge=1, le=4),
+        limit: int = Query(50, ge=1, le=200),
+        before_id: int | None = Query(None, ge=0),
+    ) -> dict[str, Any]:
+        """Assessed transactions with a finding, newest first (priority 1 = source match)."""
+        return {"mode": "live", "findings": be.findings(max_priority, limit, before_id)}
+
+    @r.get("/alerts")
+    def live_alerts(
+        status: str | None = Query(
+            None, pattern="^(new|under_review|dismissed|resolved|insufficient_evidence)$"
+        ),
+        limit: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """Investigation queue (grouped, deduplicated). Read-only over HTTP; statuses are
+        changed with `chainwatch-live alerts set-status` on the collector host."""
+        return {"mode": "live", "alerts": be.alerts(status, limit)}
 
     @r.get("/outages")
     def live_outages(

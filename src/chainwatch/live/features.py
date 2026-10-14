@@ -32,7 +32,12 @@ LOCKTIME_THRESHOLD = 500_000_000  # below: block height, at or above: Unix time
 MAX_MONEY_SAT = 21_000_000 * 100_000_000  # consensus upper bound on any amount
 MAX_TX_WEIGHT = 4_000_000  # a transaction cannot exceed the block weight limit
 SEQUENCE_FINAL = 0xFFFFFFFF  # nLockTime is enforced only if some input sequence is below this
-MAX_LISTED = 25  # outputs / input refs stored per transaction (memory bound)
+MAX_LISTED = 25
+MAX_ADDRESSES = 500  # addresses kept per side for screening (large consolidations are cut)
+# Bump when a feature's meaning, unit or computation changes (docs/RISK_ENGINE.md section 3).
+FEATURE_SCHEMA_VERSION = (
+    "live-features/2"  # outputs / input refs stored per transaction (memory bound)
+)
 FAN_OUT_MIN_OUTPUTS = 50
 CONSOLIDATION_MIN_INPUTS = 50
 FEE_OUTLIER_FACTOR = 10.0  # fee rate >= 10x the rolling median of recently fetched txs
@@ -118,9 +123,13 @@ def extract(tx: Any, *, txid: str, first_seen: float, fetched_at: float) -> dict
     in_types: dict[str, int] = {}
     rbf = segwit = locktime_enforced = False
     parents: set[str] = set()
+    coinbase = False
     for i in vin:
         if not isinstance(i, dict):
             raise FeatureError("malformed input")
+        if i.get("is_coinbase") is True:  # never in the mempool, but defined: no prevout
+            coinbase = True
+            continue
         seq = i.get("sequence")
         if isinstance(seq, int) and seq <= BIP125_MAX_SEQUENCE:
             rbf = True
@@ -140,13 +149,19 @@ def extract(tx: Any, *, txid: str, first_seen: float, fetched_at: float) -> dict
             in_types[kind] = in_types.get(kind, 0) + 1
 
     n_in, n_out = len(vin), len(vout)
+    value_counts: dict[int, int] = {}
+    for v in out_values:
+        if v >= DUST_LIMIT_SAT:
+            value_counts[v] = value_counts.get(v, 0) + 1
     locktime_kind = (
         "none" if locktime == 0 else ("height" if locktime < LOCKTIME_THRESHOLD else "time")
     )
     return {
+        "schema_version": FEATURE_SCHEMA_VERSION,
         "txid": txid,
         "first_seen": first_seen,
         "fetched_at": fetched_at,
+        "coinbase": coinbase,
         "confirmed_at_fetch": confirmed if isinstance(confirmed, bool) else None,
         "version": version,
         "locktime": locktime,
@@ -173,6 +188,52 @@ def extract(tx: Any, *, txid: str, first_seen: float, fetched_at: float) -> dict
         "input_refs": refs,
         "n_op_return": op_return,
         "n_dust_outputs": dust,
+        # largest group of identical non-dust output values (CoinJoin-like or batch
+        # patterns; equal outputs are common in privacy tools and say nothing about intent)
+        "max_equal_value_outputs": max(value_counts.values(), default=0),
+        "n_output_types": len(out_types),
+    }
+
+
+def extract_addresses(tx: dict[str, Any]) -> dict[str, Any]:
+    """Addresses of a validated Esplora payload, for screening (not stored as features).
+
+    Inputs use the address of the spent output (``prevout.scriptpubkey_address``); outputs
+    their own. Scripts without an address (P2PK, bare multisig, OP_RETURN, non-standard)
+    and inputs whose prevout is missing cannot be screened by address and are counted.
+    Addresses are validated and canonicalised; nothing here says who controls them.
+    """
+    from chainwatch.risk.addresses import canonical
+
+    def side(items: list[Any], prevout: bool) -> tuple[list[tuple[int, str]], int, int]:
+        found: list[tuple[int, str]] = []
+        no_address = missing = 0
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            if prevout and item.get("is_coinbase") is True:
+                continue
+            src = item.get("prevout") if prevout else item
+            if not isinstance(src, dict):
+                missing += 1
+                continue
+            addr = canonical(src.get("scriptpubkey_address") or "")
+            if addr is None:
+                no_address += 1
+            elif len(found) < MAX_ADDRESSES:
+                found.append((idx, addr))
+        return found, no_address, missing
+
+    ins, in_none, in_missing = side(tx.get("vin") or [], True)
+    outs, out_none, _ = side(tx.get("vout") or [], False)
+    n_in, n_out = len(tx.get("vin") or []), len(tx.get("vout") or [])
+    return {
+        "inputs": ins,
+        "outputs": outs,
+        "inputs_without_address": in_none,
+        "inputs_missing_prevout": in_missing,
+        "outputs_without_address": out_none,
+        "truncated": n_in - in_none - in_missing > len(ins) or n_out - out_none > len(outs),
     }
 
 
