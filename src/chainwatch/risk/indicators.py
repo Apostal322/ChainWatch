@@ -153,17 +153,19 @@ def parse_ofac_sdn_advanced(
     """
     if isinstance(content, Path):
         size = content.stat().st_size
-        with content.open("rb") as fh:
-            head = fh.read(65536)
-        digest = _sha256_file(content)
+        if size > MAX_SOURCE_BYTES:
+            raise ValueError("indicator source too large")
+        digest, has_dtd = _scan_file(content)
         stream: Any = content.open("rb")
     else:
-        size, head = len(content), content[:65536]
+        size = len(content)
+        if size > MAX_SOURCE_BYTES:
+            raise ValueError("indicator source too large")
         digest = hashlib.sha256(content).hexdigest()
+        has_dtd = any(m in content for m in _DTD_MARKERS)
         stream = io.BytesIO(content)
-    if size > MAX_SOURCE_BYTES:
-        raise ValueError("indicator source too large")
-    if b"<!DOCTYPE" in head or b"<!ENTITY" in head:
+    if has_dtd:
+        # the whole file is checked, not just its head: a long comment may precede a DOCTYPE
         raise ValueError("DTDs/entities are not accepted in indicator sources")
 
     issued: str | None = None
@@ -286,12 +288,21 @@ _LIST_SECTIONS = {
 }
 
 
-def _sha256_file(path: Path) -> str:
+_DTD_MARKERS = (b"<!DOCTYPE", b"<!ENTITY")
+
+
+def _scan_file(path: Path) -> tuple[str, bool]:
+    """SHA-256 of the file and whether it contains a DTD/entity declaration anywhere
+    (chunks overlap so a marker split across a boundary is still found)."""
     h = hashlib.sha256()
+    found, tail = False, b""
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
-    return h.hexdigest()
+            window = tail + chunk
+            found = found or any(m in window for m in _DTD_MARKERS)
+            tail = chunk[-16:]
+    return h.hexdigest(), found
 
 
 def _child(el: ET.Element, name: str) -> ET.Element | None:

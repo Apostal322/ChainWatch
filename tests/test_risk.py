@@ -138,10 +138,18 @@ def test_sdn_xml_streams_from_a_file_with_bounded_memory(tmp_path):
     assert peak < 0.5 * len(big) + 5_000_000, f"peak {peak} for a {len(big)}-byte file"
 
 
-def test_xml_with_dtd_or_entities_is_refused():
+def test_xml_with_dtd_or_entities_is_refused(tmp_path):
     evil = b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]><Sanctions/>'
     with pytest.raises(ValueError, match="DTD"):
         parse_ofac_sdn_advanced(evil)
+    # a long comment before the DOCTYPE must not hide it (the check covered 64 KB before)
+    padded = b'<?xml version="1.0"?><!--' + b"x" * (3 << 20) + b"-->" + evil[21:]
+    path = tmp_path / "padded.xml"
+    path.write_bytes(padded)
+    with pytest.raises(ValueError, match="DTD"):
+        parse_ofac_sdn_advanced(path)
+    with pytest.raises(ValueError, match="DTD"):
+        parse_ofac_sdn_advanced(padded)
 
 
 def _store(tmp_path) -> LiveStore:
