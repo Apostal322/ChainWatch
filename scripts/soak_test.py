@@ -12,8 +12,12 @@ Topology (the docs/LIVE_CLOUD.md architecture, minus Caddy/TLS):
 Faults are injected round-robin every --fault-every seconds: REST 429 / 500 / malformed
 JSON / schema drift / slow responses, WebSocket drop / silence (stale watchdog) / burst /
 sequence gap, collector SIGKILL (restarted like systemd would), edge API restart, dashboard
-SSE clients that connect and drop. Resources, API availability and latency are sampled
-throughout; pass criteria are evaluated at the end and the process exits 1 on failure.
+SSE clients that connect and drop, and an indicator refresh (a new version of a local TEST
+list naming some mock output addresses; not sanctions data) while the collector runs, which
+exercises screening reloads and retrospective alerts.
+
+Resources, API availability and latency are sampled throughout; pass criteria are
+evaluated at the end and the process exits 1 on failure.
 
 This measures the software under controlled faults. It is NOT a public-network observation:
 the source is constructed data, and it says nothing about mempool.space or a cloud VM.
@@ -38,6 +42,9 @@ from pathlib import Path
 
 import httpx
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+from live_fixtures import p2wpkh_address, txid  # the mock's address scheme
+
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 TICK = os.sysconf("SC_CLK_TCK")
@@ -55,6 +62,7 @@ FAULTS = [
     ("restart_edge", {}),
     ("ws_silent", {"seconds": 40}),  # longer than stale_after_s: the watchdog must reconnect
     ("sse_clients", {}),
+    ("indicator_update", {}),
 ]
 
 
@@ -128,6 +136,18 @@ class Stack:
             "collector", [PY, "-m", "chainwatch.live.cli", "--config", str(self.cfg), "collect"]
         )
 
+    def ingest_test_list(self, step: int, offset: int, upto: int = 120_000) -> bool:
+        """A TEST indicator list: output 0 of every ``step``-th mock transaction."""
+        addrs = [p2wpkh_address(f"{txid(f'mock-0-{n}')}-out-0") for n in range(offset, upto, step)]
+        path = self.work / "test-list.txt"
+        path.write_text("\n".join(addrs) + "\n")
+        r = subprocess.run(
+            [PY, "-m", "chainwatch.live.cli", "--config", str(self.cfg), "indicators", "update",
+             "--source", "ofac-sdn-mirror", "--file", str(path)],
+            cwd=ROOT, env=self.env, capture_output=True, timeout=120,
+        )  # fmt: skip
+        return r.returncode == 0
+
     def start_edge(self) -> None:
         self._spawn("edge", [PY, "-m", "chainwatch.live.cli", "--config", str(self.cfg),
                              "serve-edge", "--port", str(self.ports["edge"])])  # fmt: skip
@@ -196,6 +216,7 @@ def main() -> int:
 
     st.start_mock()
     st.wait_http(f"{mock}/__mock/stats")
+    indicator_updates = [st.ingest_test_list(step=10, offset=10)]
     t_start = time.time()
     st.start_collector()
     st.start_edge()
@@ -316,6 +337,10 @@ def main() -> int:
                 except RuntimeError:
                     rec["recovered_s"] = None
                 st.cpu_base["edge"] = (proc_stats(st.procs["edge"].pid) or (0,))[0]
+            elif kind == "indicator_update":
+                k = len(indicator_updates)
+                indicator_updates.append(st.ingest_test_list(step=9 + k, offset=3 * k))
+                rec["ok"] = indicator_updates[-1]
             elif kind == "sse_clients":
                 ts = [threading.Thread(target=sse_client, args=(5 + k,)) for k in range(5)]
                 for t in ts:
@@ -349,6 +374,23 @@ def main() -> int:
     errors = con.execute("SELECT error, COUNT(*) FROM tx WHERE outcome='failed' "
                          "GROUP BY error ORDER BY 2 DESC LIMIT 10").fetchall()  # fmt: skip
     integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
+    risk = {
+        "fetched_rows_without_risk_record": con.execute(
+            "SELECT COUNT(*) FROM tx t LEFT JOIN risk r ON r.tx_id = t.id "
+            "WHERE t.outcome = 'fetched' AND r.tx_id IS NULL"
+        ).fetchone()[0],
+        "by_priority": {str(k): n for k, n in con.execute(
+            "SELECT priority, COUNT(*) FROM risk GROUP BY 1").fetchall()},
+        "records_with_layer_errors": con.execute(
+            "SELECT COUNT(*) FROM risk WHERE record LIKE '%\"errors\":[{%'").fetchone()[0],
+        "alerts_by_kind": dict(con.execute(
+            "SELECT kind, COUNT(*) FROM alerts GROUP BY kind").fetchall()),
+        "retrospective_alerts": con.execute(
+            "SELECT COUNT(*) FROM alerts WHERE retrospective = 1").fetchone()[0],
+        "indicator_versions": con.execute("SELECT COUNT(*) FROM indicator_versions").fetchone()[0],
+        "indicator_updates_ok": sum(indicator_updates),
+        "indicator_updates": len(indicator_updates),
+    }  # fmt: skip
     con.close()
     tracebacks = {n: (work / f"{n}.log").read_text(errors="replace").count("Traceback")
                   for n in ("collector", "edge", "dash")}  # fmt: skip
@@ -402,6 +444,7 @@ def main() -> int:
         "outages_by_kind": {k: {"count": n, "seconds": s} for k, n, s in outages},
         "failed_by_error": dict(errors),
         "integrity_check": integrity,
+        "risk": risk,
         "api_availability": avail,
         "probes": total,
         "latency_ms": latency,
@@ -433,6 +476,13 @@ def main() -> int:
         "no tracebacks in logs": sum(tracebacks.values()) == 0,
         "every process stopped cleanly on SIGTERM": all(v is not None for v in shutdown.values()),
         "collector_down outage recorded for each kill": down >= st.restarts["collector"],
+        "every stored fetched row has a risk record": risk["fetched_rows_without_risk_record"] == 0,
+        "no layer errors in stored risk records": risk["records_with_layer_errors"] == 0,
+        "screening matched the TEST list": risk["by_priority"].get("1", 0) > 0,
+        "every indicator update succeeded": all(indicator_updates),
+        "no risk assessment errors (last collector)": (
+            (report["final_counters"] or {}).get("risk_errors", 0) == 0
+        ),
     }
     report["checks"] = checks
     report["passed"] = all(checks.values())
