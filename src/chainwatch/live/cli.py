@@ -32,8 +32,21 @@ def _logging() -> None:
     )
 
 
+EX_CONFIG = 78  # sysexits.h; the systemd units do not restart on it (RestartPreventExitStatus)
+
+
+class ConfigError(SystemExit):
+    """A missing, unparsable or invalid config: retrying cannot help."""
+
+
 def _live(args) -> LiveConfig:
-    live = load_config(args.config).live
+    import yaml
+
+    try:
+        live = load_config(args.config).live
+    except (OSError, yaml.YAMLError, ValueError, TypeError, KeyError) as e:
+        print(f"chainwatch-live: config error in {args.config}: {e}", file=sys.stderr)
+        raise ConfigError(EX_CONFIG) from None
     if getattr(args, "db", None):
         live = dataclasses.replace(live, db_path=args.db.resolve())
     return live

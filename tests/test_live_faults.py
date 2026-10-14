@@ -359,3 +359,20 @@ def test_stats_totals_survive_lost_minute_counters(tmp_path):
     store.bump(now - 5, received=40, sampled=6, fetched=2)  # 3 fetches were never flushed
     totals = LiveReader(store.path).stats(60, now)["totals"]
     assert totals["fetched"] == 5 and totals["failed"] == 1 and totals["received"] == 40
+
+
+@pytest.mark.parametrize(
+    "content",
+    [None, "live:\n  enabled: [unterminated\n", "live:\n  sample_rate: 7\n", "live:\n  bogus: 1\n"],
+)
+def test_bad_config_is_a_clean_ex_config_exit(tmp_path, capsys, content):
+    """Missing, unparsable or invalid configs exit 78 with one line (systemd does not
+    restart on 78: RestartPreventExitStatus), instead of a traceback and a restart loop."""
+    cfg = tmp_path / "c.yaml"
+    if content is not None:
+        base = REPO_ROOT / "configs" / "live.yaml"
+        cfg.write_text(f"extends: {base}\n{content}" if "enabled" not in content else content)
+    with pytest.raises(SystemExit) as exc:
+        live_cli.main(["--config", str(cfg), "collect", "--duration", "1"])
+    assert exc.value.code == live_cli.EX_CONFIG
+    assert "config error" in capsys.readouterr().err

@@ -18,6 +18,8 @@ WorkingDirectory=/opt/chainwatch/app
 EnvironmentFile=/etc/chainwatch/live.env
 ExecStart=/opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml serve-edge --host 127.0.0.1 --port 8100
 Restart=always
+# a config error (exit 78, EX_CONFIG) cannot be fixed by restarting: stay failed, visibly
+RestartPreventExitStatus=78
 RestartSec=5
 RestartSteps=5
 RestartMaxDelaySec=120

@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import hmac
 import os
+import sys
 import time
 from typing import Any
 
@@ -47,10 +48,12 @@ def _error(status: int, code: str, message: str, request: Request) -> JSONRespon
 def edge_token(live: LiveConfig) -> str:
     token = os.environ.get(live.api_token_env, "")
     if len(token) < MIN_TOKEN_CHARS:
-        raise SystemExit(
-            f"${live.api_token_env} must be set to a random token of at least "
-            f"{MIN_TOKEN_CHARS} characters (e.g. `openssl rand -hex 32`)"
+        print(
+            f"chainwatch-live: config error: ${live.api_token_env} must be set to a random "
+            f"token of at least {MIN_TOKEN_CHARS} characters (e.g. `openssl rand -hex 32`)",
+            file=sys.stderr,
         )
+        raise SystemExit(78)  # EX_CONFIG: systemd does not restart on it
     return token
 
 
