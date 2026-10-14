@@ -81,6 +81,7 @@ def cmd_serve_edge(args) -> int:
         log_config=None,
         limit_concurrency=32,
         timeout_keep_alive=5,
+        timeout_graceful_shutdown=10,  # do not wait sse_max_seconds for open streams
     )
     return 0
 

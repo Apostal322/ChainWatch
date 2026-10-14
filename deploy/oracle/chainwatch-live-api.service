@@ -12,7 +12,9 @@ Type=simple
 User=chainwatch
 Group=chainwatch
 WorkingDirectory=/opt/chainwatch/app
-# CHAINWATCH_LIVE_TOKEN (generated on the VM by install.sh; never committed)
+# CHAINWATCH_LIVE_TOKEN (generated on the VM by install.sh; never committed). The file is
+# 0600 root:root: systemd reads it before dropping privileges, so the collector (same
+# service user, parses internet data) cannot read the token file.
 EnvironmentFile=/etc/chainwatch/live.env
 ExecStart=/opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml serve-edge --host 127.0.0.1 --port 8100
 Restart=always
@@ -39,7 +41,16 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# loopback only: Caddy is its sole client; it never needs the internet
+IPAddressDeny=any
+IPAddressAllow=localhost
 CapabilityBoundingSet=
 UMask=0027
 # SQLite opens the database read-only (mode=ro) but WAL readers need the -shm file

@@ -11,4 +11,5 @@ live:
   api_token_env: CHAINWATCH_LIVE_TOKEN
   remote_timeout_s: 5
   remote_cache_s: 2
-  sse_max_clients: 20
+  sse_max_clients: 10       # well below serving.limit_concurrency (32): streams hold a slot
+  sse_max_per_client: 2

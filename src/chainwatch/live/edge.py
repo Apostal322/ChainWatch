@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hmac
 import os
 import time
 from typing import Any
@@ -98,11 +99,25 @@ def create_edge_app(live: LiveConfig, token: str) -> FastAPI:
         ok = state == "connected"
         return JSONResponse({"status": "ready" if ok else state}, status_code=200 if ok else 503)
 
-    install_live_routes(app, live, _error, token=token)
+    install_live_routes(
+        app, live, _error, token=token, trusted_proxy_hops=live.edge_trusted_proxy_hops
+    )
+    expected = f"bearer {token}".encode()
+
+    def authenticated(scope) -> bool:
+        """The service token holder (the dashboard) is not rate limited here, so floods of
+        unauthenticated requests from a shared egress IP cannot lock it out."""
+        for name, value in scope.get("headers", []):
+            if name == b"authorization":
+                given = value[:7].lower() + value[7:]
+                return hmac.compare_digest(given, expected)
+        return False
+
     app.add_middleware(
         RateLimitMiddleware,
         per_minute=live.edge_rate_limit_per_minute,
         trusted_proxy_hops=live.edge_trusted_proxy_hops,
+        exempt=authenticated,
     )
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=65_536)
     return app

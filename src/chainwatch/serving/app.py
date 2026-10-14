@@ -252,7 +252,13 @@ def create_app(
     _routes(app)
     app.state.live_enabled = cfg.live.enabled
     # read-only; 404 live_disabled unless opted in; remote mode proxies to the collector VM
-    install_live_routes(app, cfg.live, _error, backend=live_backend)
+    install_live_routes(
+        app,
+        cfg.live,
+        _error,
+        backend=live_backend,
+        trusted_proxy_hops=sv.trusted_proxy_hops if sv else 0,
+    )
     _mount_frontend(app, cfg)
     if sv and sv.rate_limit_per_minute > 0:
         app.add_middleware(

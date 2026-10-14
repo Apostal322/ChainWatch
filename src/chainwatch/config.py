@@ -231,6 +231,7 @@ class LiveConfig:
     heartbeat_s: float = 5.0
     sse_max_clients: int = 20
     sse_max_seconds: float = 300.0  # clients reconnect automatically after this
+    sse_max_per_client: int = 2  # per client address (a tab or two); the rest get 429
     # Remote collector (docs/LIVE_CLOUD.md). The edge API on the collector VM requires a
     # bearer token read from the environment variable named here (never from the config);
     # a dashboard with ``remote_url`` set proxies /v1/live/* to that edge API with it.

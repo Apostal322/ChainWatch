@@ -19,8 +19,10 @@ import asyncio
 import hmac
 import json
 import os
+import re
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 from urllib.parse import urlparse
 
@@ -32,6 +34,7 @@ from chainwatch.config import LiveConfig
 from chainwatch.live.features import INDICATORS
 from chainwatch.live.protocol import valid_txid
 from chainwatch.live.store import SORTABLE, LiveReader, NoLiveData
+from chainwatch.serving.security import client_key
 
 LIVE_NOTICE = (
     "Real Bitcoin mempool observations received from mempool.space by this collector. "
@@ -47,6 +50,10 @@ MOCK_NOTICE = (
 )
 MAX_REMOTE_BYTES = 2_000_000
 RECENT_WINDOW = 100  # rows polled for the event stream (shared by all clients)
+CACHE_MAX_KEYS = 256  # RemoteBackend LRU size
+UPSTREAM_PER_S = 3.0  # RemoteBackend cache misses per second (edge allows 240/min per client)
+UPSTREAM_BURST = 20
+EVENT_ID_RE = re.compile(r"[0-9]{1,18}")
 
 
 class LiveDisabled(Exception):
@@ -145,8 +152,14 @@ class LocalBackend:
 class RemoteBackend:
     """HTTPS client for the collector's edge API, with a short shared cache.
 
-    Every distinct query is fetched at most once per ``remote_cache_s`` however many
-    browsers are connected, so the load on the collector VM is bounded.
+    Load on the collector VM is bounded however many browsers are connected:
+    * each distinct query is fetched at most once per ``remote_cache_s`` (LRU of
+      ``CACHE_MAX_KEYS``); concurrent misses for the same key share one request
+      (single flight);
+    * failures are cached too, so an outage does not turn every page view into a slow
+      upstream timeout that ties up the dashboard's worker threads;
+    * all cache misses share a token bucket (``UPSTREAM_PER_S``), so varying query
+      parameters cannot multiply upstream traffic; over budget, requests fail fast (502).
     """
 
     kind = "remote"
@@ -166,35 +179,90 @@ class RemoteBackend:
             transport=transport,
             follow_redirects=False,
         )
-        self._cache: dict[str, tuple[float, Any]] = {}
+        # key -> (stored_at, value or exception); LRU order
+        self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+        self._inflight: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        self._tokens, self._last = float(UPSTREAM_BURST), time.monotonic()
+        self.upstream_requests = 0  # observability and tests
+
+    def _cached(self, key: str, now: float) -> tuple[bool, Any]:
+        hit = self._cache.get(key)
+        if hit and now - hit[0] < self.live.remote_cache_s:
+            self._cache.move_to_end(key)
+            return True, hit[1]
+        return False, None
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         params = {k: v for k, v in (params or {}).items() if v is not None}
         key = path + "?" + "&".join(f"{k}={params[k]}" for k in sorted(params))
-        now = time.monotonic()
-        with self._lock:
-            hit = self._cache.get(key)
-            if hit and now - hit[0] < self.live.remote_cache_s:
-                return hit[1]
+        while True:
+            with self._lock:
+                found, value = self._cached(key, time.monotonic())
+                if not found:
+                    event = self._inflight.get(key)
+                    if event is None:  # this thread fetches; others wait for it
+                        self._inflight[key] = threading.Event()
+                        break
+            if found:
+                if isinstance(value, Exception):
+                    raise value
+                return value
+            event.wait(self.live.remote_timeout_s + 1.0)
         try:
-            r = self.client.get(self.base + path, params=params)
+            value = self._fetch(path, params)
+        except (UpstreamUnavailable, NoLiveData) as e:
+            value = e
+        finally:
+            with self._lock:
+                event = self._inflight.pop(key)
+        with self._lock:
+            self._cache[key] = (time.monotonic(), value)
+            self._cache.move_to_end(key)
+            while len(self._cache) > CACHE_MAX_KEYS:
+                self._cache.popitem(last=False)
+        event.set()
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def _take_token(self) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            self._tokens = min(UPSTREAM_BURST, self._tokens + (now - self._last) * UPSTREAM_PER_S)
+            self._last = now
+            if self._tokens < 1.0:
+                return False
+            self._tokens -= 1.0
+            return True
+
+    def _fetch(self, path: str, params: dict[str, Any]) -> Any:
+        if not self._take_token():
+            raise UpstreamUnavailable("upstream request budget exhausted")
+        self.upstream_requests += 1
+        try:
+            with self.client.stream("GET", self.base + path, params=params) as r:
+                chunks, size = [], 0
+                for chunk in r.iter_bytes():  # bounded read: never buffer a huge body
+                    size += len(chunk)
+                    if size > MAX_REMOTE_BYTES:
+                        raise UpstreamUnavailable("response too large")
+                    chunks.append(chunk)
         except httpx.HTTPError as e:
             raise UpstreamUnavailable(type(e).__name__) from e
-        if len(r.content) > MAX_REMOTE_BYTES:
-            raise UpstreamUnavailable("response too large")
-        if r.status_code == 503 and _code(r) == "live_no_data":
+        content = b"".join(chunks)
+        try:
+            body = json.loads(content) if content else None
+        except ValueError:
+            body = None
+            if r.status_code == 200:
+                raise UpstreamUnavailable("edge API sent invalid JSON") from None
+        if r.status_code == 503 and _code(body) == "live_no_data":
             raise NoLiveData(self.base)
         if r.status_code == 404 and path.startswith("/v1/live/transactions/"):
-            body = None
-        elif r.status_code != 200:
-            raise UpstreamUnavailable(f"edge API answered {r.status_code} ({_code(r)})")
-        else:
-            body = r.json()
-        with self._lock:
-            if len(self._cache) > 512:
-                self._cache.clear()
-            self._cache[key] = (now, body)
+            return None
+        if r.status_code != 200 or body is None:
+            raise UpstreamUnavailable(f"edge API answered {r.status_code} ({_code(body)})")
         return body
 
     def status(self, now: float) -> dict[str, Any]:
@@ -230,10 +298,10 @@ class RemoteBackend:
         return max((r["id"] for r in rows), default=0)
 
 
-def _code(r: httpx.Response) -> str:
+def _code(body: Any) -> str:
     try:
-        return r.json()["error"]["code"]
-    except (ValueError, KeyError, TypeError):
+        return str(body["error"]["code"])
+    except (KeyError, TypeError):
         return "unknown"
 
 
@@ -257,10 +325,13 @@ def install_live_routes(
     *,
     token: str | None = None,
     backend: LocalBackend | RemoteBackend | None = None,
+    trusted_proxy_hops: int = 0,
 ) -> None:
-    """Register /v1/live/*. ``token`` makes every route require a bearer token (edge API)."""
+    """Register /v1/live/*. ``token`` makes every route require a bearer token (edge API).
+    ``trusted_proxy_hops`` identifies clients for the per-client event-stream cap."""
     be = backend or (make_backend(live) if live.enabled else LocalBackend(live))
-    streams = {"open": 0}
+    streams: dict[str, int] = {}  # open event streams per client; total = sum
+    streams_lock = threading.Lock()
 
     @app.exception_handler(LiveDisabled)
     async def _disabled(request: Request, exc: LiveDisabled):
@@ -354,13 +425,28 @@ def install_live_routes(
     @r.get("/events")
     async def live_events(request: Request, since: int | None = Query(None, ge=0)):
         """Server-sent events: ``tx`` for each newly stored observation, ``status`` every 5 s."""
-        if streams["open"] >= live.sse_max_clients:
-            raise HTTPException(503, "too many live event streams")
-        header = request.headers.get("last-event-id", "")
-        start = int(header) if header.isdigit() else since
-        if start is None:
-            start = await asyncio.to_thread(be.max_id)  # only new observations
-        streams["open"] += 1
+        who = client_key(request.scope, trusted_proxy_hops)
+        with streams_lock:  # reserve the slot before any await (no check-then-act race)
+            if sum(streams.values()) >= live.sse_max_clients:
+                raise HTTPException(503, "too many live event streams")
+            if streams.get(who, 0) >= live.sse_max_per_client:
+                raise HTTPException(429, "too many live event streams from this client")
+            streams[who] = streams.get(who, 0) + 1
+
+        def release() -> None:
+            with streams_lock:
+                streams[who] -= 1
+                if streams[who] <= 0:
+                    del streams[who]
+
+        try:
+            header = request.headers.get("last-event-id", "")
+            start = int(header) if EVENT_ID_RE.fullmatch(header) else since
+            if start is None:
+                start = await asyncio.to_thread(be.max_id)  # only new observations
+        except BaseException:
+            release()
+            raise
 
         async def gen():
             last, last_status = start, 0.0
@@ -382,10 +468,15 @@ def install_live_routes(
                     await asyncio.sleep(1.0)
             except (NoLiveData, UpstreamUnavailable):
                 yield 'event: status\ndata: "disconnected"\n\n'
-            finally:
-                streams["open"] -= 1
 
-        return StreamingResponse(
+        class _Stream(StreamingResponse):
+            async def __call__(self, scope, receive, send):  # release even if never iterated
+                try:
+                    await super().__call__(scope, receive, send)
+                finally:
+                    release()
+
+        return _Stream(
             gen(),
             media_type="text/event-stream",
             headers={"cache-control": "no-cache", "x-accel-buffering": "no"},

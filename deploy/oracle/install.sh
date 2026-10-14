@@ -7,7 +7,9 @@
 #
 # Environment:
 #   CHAINWATCH_HOST   public hostname for HTTPS (required unless SKIP_CADDY=1)
-#   REPO_URL, REF     source to install (default: the public repository, branch main)
+#   REPO_URL, REF     source to install (default: the public repository, branch main);
+#                     prefer a release tag, e.g. REF=v0.6.0
+#   EXPECTED_SHA      optional: abort unless the checked-out commit is exactly this SHA
 #   DRY_RUN=1         print the commands instead of running them
 #   SKIP_SYSTEMD=1    do not install/enable systemd units (container tests)
 #   SKIP_CADDY=1      do not install/configure Caddy (container tests)
@@ -32,9 +34,13 @@ run() { echo "+ $*"; if [ "$DRY_RUN" != "1" ]; then "$@"; fi; }
 note() { echo "== $*"; }
 
 [ "$(id -u)" = "0" ] || { echo "run as root (sudo)" >&2; exit 1; }
-if [ "$SKIP_CADDY" != "1" ] && [ -z "${CHAINWATCH_HOST:-}" ]; then
-  echo "set CHAINWATCH_HOST (e.g. <public-ip-with-dashes>.sslip.io)" >&2; exit 1
+if [ "$SKIP_CADDY" != "1" ]; then
+  [ -n "${CHAINWATCH_HOST:-}" ] || { echo "set CHAINWATCH_HOST (e.g. <public-ip-with-dashes>.sslip.io)" >&2; exit 1; }
+  # a bare hostname only: no scheme, port, path, spaces or Caddyfile syntax
+  [[ "$CHAINWATCH_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]] \
+    || { echo "CHAINWATCH_HOST must be a bare hostname, got: $CHAINWATCH_HOST" >&2; exit 1; }
 fi
+[[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || { echo "invalid REF: $REF" >&2; exit 1; }
 
 note "packages"
 export DEBIAN_FRONTEND=noninteractive
@@ -57,6 +63,11 @@ if [ -d "$APP/.git" ]; then
 else
   run git clone -q --depth 1 --branch "$REF" "$REPO_URL" "$APP"
 fi
+if [ -n "${EXPECTED_SHA:-}" ] && [ "$DRY_RUN" != "1" ]; then
+  actual=$(git -C "$APP" rev-parse HEAD)
+  [ "$actual" = "$EXPECTED_SHA" ] || { echo "checked out $actual, expected $EXPECTED_SHA; aborting" >&2; exit 1; }
+  echo "   verified commit $actual"
+fi
 
 note "virtualenv from the hash-locked live dependency set (no ML stack)"
 [ -x "$VENV/bin/python" ] || run python3 -m venv "$VENV"
@@ -68,8 +79,8 @@ if [ ! -s "$ETC/live.env" ]; then
   if [ "$DRY_RUN" != "1" ]; then
     umask 077
     printf 'CHAINWATCH_LIVE_TOKEN=%s\n' "$(openssl rand -hex 32)" > "$ETC/live.env"
-    chown root:chainwatch "$ETC/live.env"
-    chmod 0640 "$ETC/live.env"
+    chown root:root "$ETC/live.env"
+    chmod 0600 "$ETC/live.env"  # systemd reads it as root; the service user cannot
     echo "   created $ETC/live.env. Read it ONCE with: sudo cat $ETC/live.env"
     echo "   and store the value as the Render secret CHAINWATCH_LIVE_TOKEN."
   else
@@ -77,6 +88,8 @@ if [ ! -s "$ETC/live.env" ]; then
   fi
 else
   echo "   $ETC/live.env exists; keeping the current token"
+  run chown root:root "$ETC/live.env"  # upgrade from v0.6.0-rc (0640 root:chainwatch)
+  run chmod 0600 "$ETC/live.env"
 fi
 
 note "journald size cap"
@@ -100,7 +113,13 @@ fi
 if [ "$SKIP_CADDY" != "1" ]; then
   note "Caddy: HTTPS for $CHAINWATCH_HOST -> 127.0.0.1:8100"
   if [ "$DRY_RUN" != "1" ]; then
-    sed "s/__CHAINWATCH_HOST__/$CHAINWATCH_HOST/" "$APP/deploy/oracle/Caddyfile.template" > /etc/caddy/Caddyfile
+    # render to a temporary file and validate before replacing the live Caddyfile
+    tmp=$(mktemp /etc/caddy/Caddyfile.XXXXXX)
+    sed "s/__CHAINWATCH_HOST__/$CHAINWATCH_HOST/" "$APP/deploy/oracle/Caddyfile.template" > "$tmp"
+    if ! caddy validate --config "$tmp" --adapter caddyfile >/dev/null; then
+      rm -f "$tmp"; echo "rendered Caddyfile is invalid; the current one is unchanged" >&2; exit 1
+    fi
+    chmod 0644 "$tmp" && mv "$tmp" /etc/caddy/Caddyfile
   fi
   run systemctl enable --now caddy
   run systemctl reload caddy

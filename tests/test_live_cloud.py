@@ -260,8 +260,15 @@ def test_edge_rate_limit(tmp_path):
     cfg = _cfg(tmp_path, edge_rate_limit_per_minute=8, edge_trusted_proxy_hops=0)
     _fill(cfg, 1)
     with TestClient(create_edge_app(cfg, TOKEN)) as c:
-        codes = [c.get("/v1/live/status", headers=AUTH).status_code for _ in range(6)]
-        assert 429 in codes and c.get("/health/live").status_code == 200
+        bad = {"authorization": "Bearer " + "x" * 48}
+        codes = [c.get("/v1/live/status", headers=bad).status_code for _ in range(6)]
+        assert codes[0] == 401 and 429 in codes  # unauthenticated floods are limited
+        limited = c.get("/v1/live/status", headers=bad)
+        assert limited.status_code == 429 and limited.headers["cache-control"] == "no-store"
+        assert limited.headers["x-content-type-options"] == "nosniff"  # headers on 429 too
+        # ...but they cannot lock the token holder (the dashboard) out of the same IP
+        assert all(c.get("/v1/live/status", headers=AUTH).status_code == 200 for _ in range(12))
+        assert c.get("/health/live").status_code == 200
 
 
 def test_edge_refuses_weak_or_missing_token(tmp_path, monkeypatch):

@@ -168,6 +168,7 @@ def _cmd_serve(args, cfg) -> None:
         access_log=False,
         limit_concurrency=served.serving.limit_concurrency if served.serving else 64,
         timeout_keep_alive=5,
+        timeout_graceful_shutdown=10,  # do not wait sse_max_seconds for open streams
     )
 
 
