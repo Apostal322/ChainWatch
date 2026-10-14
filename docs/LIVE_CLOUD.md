@@ -199,10 +199,10 @@ the edge API every 2 s:
 
 | Measure | Value |
 |---|---|
-| Collector CPU | __COLLECTOR_CPU__ |
-| Edge API CPU (with polling) | __EDGE_CPU__ |
-| Collector memory (peak RSS) | __COLLECTOR_RSS__ |
-| Edge API memory (peak RSS) | __EDGE_RSS__ |
+| Collector CPU | 0.46 CPU-s over 600 s ⇒ **0.08 %** of one core (3,600 txids announced, 79 sampled, 78 fetched, 1 failed, 0 dropped) |
+| Edge API CPU (with polling) | 2.6 CPU-s over 600 s ⇒ **0.43 %** of one core (about 560 authenticated requests) |
+| Collector memory (peak RSS) | **39.4 MB** (VmHWM) |
+| Edge API memory (peak RSS) | **56.6 MB** (VmHWM) |
 | Container test (fresh Ubuntu 24.04, install.sh) | collector 37 MB, edge API 57 MB RSS; < 1 % CPU |
 | Database at the retention cap | **62.7 MB** for 50,000 rows (1,253 bytes per row) |
 | Virtualenv on the VM | 68 MB |
@@ -260,5 +260,7 @@ Monthly estimates (derived, not measured on the network):
 | `systemd-analyze verify` (systemd 255, as on Ubuntu 24.04) | all 4 units OK; security exposure 3.0 / 3.0 / 2.3 ("OK") |
 | `install.sh` in a fresh `ubuntu:24.04` container (no systemd or Caddy) | exit 0 in 41–55 s; user, directories and token permissions correct; no ML packages; re-run idempotent with the token kept |
 | Same container, real processes against a local mock source | `smoke_live.sh` **PASS** (health, 401 ×2, status, transactions, limits, no DB/docs exposure); `kill -9` → restart → one 21 s `collector_down` gap "unclean exit"; backup OK; SIGTERM → `stopped` |
+| 10-minute resource run (real processes, mock at 6 tx/s, client polling every 2 s) | collector 0.08 % CPU / 39 MB, edge 0.43 % CPU / 57 MB; 3,600 txids, 0 dropped, 0 sequence gaps (§8) |
+| Dashboard in remote mode, real processes (`public-demo-live.yaml` → edge API with a 64-hex token → collector) | status `via remote collector (edge API)`; a 36 s restart gap appears in the gaps table and in the 24-hour observed share (94.7 %); SSE, detail panel and the mock-source label work; Replay tab still shows the synthetic banner; 0 browser console errors (Playwright) |
 | Wheels for ARM64 and x86-64 | all 26 locked wheels downloaded with hash verification for both |
 | Not tested here | real mempool.space traffic, Oracle itself, Caddy and Let's Encrypt issuance, systemd restart and boot behaviour on a real VM, a 24-hour run |
