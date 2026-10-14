@@ -1,0 +1,49 @@
+# ChainWatch edge API: authenticated, read-only /v1/live/* on 127.0.0.1:8100.
+# Only Caddy (HTTPS) is reachable from the internet; the SQLite file never is.
+[Unit]
+Description=ChainWatch live edge API (read-only, token-protected)
+Documentation=https://github.com/Apostal322/ChainWatch/blob/main/docs/LIVE_CLOUD.md
+After=network-online.target chainwatch-collector.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=chainwatch
+Group=chainwatch
+WorkingDirectory=/opt/chainwatch/app
+# CHAINWATCH_LIVE_TOKEN (generated on the VM by install.sh; never committed)
+EnvironmentFile=/etc/chainwatch/live.env
+ExecStart=/opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml serve-edge --host 127.0.0.1 --port 8100
+Restart=always
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=120
+Environment=PYTHONUNBUFFERED=1
+MemoryMax=250M
+CPUQuota=50%
+TasksMax=64
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0027
+# SQLite opens the database read-only (mode=ro) but WAL readers need the -shm file
+ReadWritePaths=/var/lib/chainwatch
+
+[Install]
+WantedBy=multi-user.target

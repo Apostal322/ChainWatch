@@ -224,18 +224,33 @@ class LiveConfig:
     max_queue_age_s: float = 300.0  # skip queued txids older than this (no stale backfill)
     dedupe_max: int = 200_000  # txids remembered for deduplication (bounded LRU)
     retention_rows: int = 20_000  # stored transactions kept in SQLite
+    retention_days: float = 7.0  # and none older than this
     reconnect_base_s: float = 1.0
     reconnect_max_s: float = 60.0
     stale_after_s: float = 90.0  # reconnect if no message arrives for this long
     heartbeat_s: float = 5.0
     sse_max_clients: int = 20
     sse_max_seconds: float = 300.0  # clients reconnect automatically after this
+    # Remote collector (docs/LIVE_CLOUD.md). The edge API on the collector VM requires a
+    # bearer token read from the environment variable named here (never from the config);
+    # a dashboard with ``remote_url`` set proxies /v1/live/* to that edge API with it.
+    api_token_env: str = "CHAINWATCH_LIVE_TOKEN"
+    remote_url: str | None = None
+    remote_timeout_s: float = 5.0
+    remote_cache_s: float = 2.0
+    edge_rate_limit_per_minute: int = 240  # per client on the edge API (dashboards poll it)
+    edge_trusted_proxy_hops: int = 1  # Caddy terminates TLS in front of the edge API
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> LiveConfig:
         d = dict(d)
         if "db_path" in d:
             d["db_path"] = _resolve(d["db_path"])
+        url = d.get("remote_url")
+        if isinstance(url, str) and url.startswith("env:"):  # deployment-specific, not in Git
+            d["remote_url"] = os.environ.get(url[4:]) or None
+            if d["remote_url"] is None and d.get("enabled"):
+                raise ValueError(f"live.remote_url: environment variable {url[4:]} is not set")
         cfg = cls(**d)
         if not 0.0 < cfg.sample_rate <= 1.0:
             raise ValueError("live.sample_rate must be in (0, 1]")

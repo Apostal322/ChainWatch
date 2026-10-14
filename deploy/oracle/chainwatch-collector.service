@@ -1,0 +1,53 @@
+# ChainWatch live mempool collector (REAL Bitcoin data from mempool.space, sampled).
+# Installed by deploy/oracle/install.sh; see docs/LIVE_CLOUD.md.
+[Unit]
+Description=ChainWatch live mempool collector
+Documentation=https://github.com/Apostal322/ChainWatch/blob/main/docs/LIVE_CLOUD.md
+After=network-online.target
+Wants=network-online.target
+# never give up restarting (a long mempool.space outage must not stop collection for good)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=chainwatch
+Group=chainwatch
+WorkingDirectory=/opt/chainwatch/app
+ExecStart=/opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml collect
+# crash -> restart after 10 s, backing off to 5 min on repeated failures (systemd >= 254)
+Restart=always
+RestartSec=10
+RestartSteps=5
+RestartMaxDelaySec=300
+# SIGTERM -> graceful shutdown (final heartbeat "stopped", outage bookkeeping)
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Environment=PYTHONUNBUFFERED=1
+# cost and blast-radius limits (measured need: < 100 MB, < 5% of one core)
+MemoryMax=300M
+CPUQuota=50%
+TasksMax=64
+# sandbox
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0027
+ReadWritePaths=/var/lib/chainwatch
+
+[Install]
+WantedBy=multi-user.target

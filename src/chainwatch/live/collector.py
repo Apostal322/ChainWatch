@@ -62,6 +62,8 @@ class Counters:
     connects: int = 0
     reconnects: int = 0
     stale_reconnects: int = 0
+    sequence_gaps: int = 0  # missed mempool updates while connected
+    recovered_downtime_s: float = 0.0  # gap since the previous process's last heartbeat
 
 
 class SeenSet:
@@ -174,6 +176,9 @@ class Collector:
         self.last_sequence: int | None = None
         self.last_error: str | None = None
         self._flushed = Counters()
+        self._outage_id: int | None = None
+        self._conn_sequence: int | None = None
+        self.first_started_at = self.started_at
         self._max_fetches: int | None = None
 
     # ---- WebSocket side ------------------------------------------------------------------
@@ -188,6 +193,15 @@ class Collector:
         if d is None:
             return
         if d.sequence is not None:
+            prev = self._conn_sequence
+            if prev is not None and d.sequence > prev + 1:
+                missed = d.sequence - prev - 1
+                self.c.sequence_gaps += 1
+                self.store.record_gap(
+                    "sequence_gap", self.last_message_at, self.last_message_at,
+                    f"{missed} mempool update(s) missed (sequence {prev} -> {d.sequence})",
+                )  # fmt: skip
+            self._conn_sequence = d.sequence
             self.last_sequence = d.sequence
         self.c.invalid_txids += d.invalid
         self.c.removed += len(d.removed)
@@ -223,6 +237,10 @@ class Collector:
                     await ws.send(SUBSCRIBE)
                     self.c.connects += 1
                     self.state, self.connected_since = "connected", self.clock()
+                    self._conn_sequence = None  # a new connection restarts sequence tracking
+                    if self._outage_id is not None:
+                        self.store.close_outage(self._outage_id, self.connected_since)
+                        self._outage_id = None
                     log.info(json.dumps({"msg": "connected", "url": self.cfg.ws_url}))
                     while not self.stop.is_set():
                         recv = asyncio.ensure_future(ws.recv())
@@ -254,6 +272,10 @@ class Collector:
             self.connected_since = None
             if self.stop.is_set():
                 break
+            if self._outage_id is None:  # not receiving from now until the next connect
+                self._outage_id = self.store.open_outage(
+                    "disconnected", self.clock(), self.last_error or "connection lost"
+                )
             self.state = "reconnecting"
             self.c.reconnects += 1
             delay = backoff_delay(
@@ -328,6 +350,7 @@ class Collector:
             "state": self.state,
             "updated_at": self.clock(),
             "started_at": self.started_at,
+            "first_started_at": self.first_started_at,
             "connected_since": self.connected_since,
             "last_message_at": self.last_message_at,
             "last_sequence": self.last_sequence,
@@ -366,18 +389,46 @@ class Collector:
         self.store.heartbeat(**self.snapshot())
 
     async def _heartbeat(self) -> None:
-        last_prune = 0.0
+        last_prune = last_checkpoint = self.clock()
         while not self.stop.is_set():
             self.flush()
             if self.clock() - last_prune > 60:
-                self.store.prune(self.cfg.retention_rows)
+                self.store.prune(self.cfg.retention_rows, retention_days=self.cfg.retention_days)
                 last_prune = self.clock()
+            if self.clock() - last_checkpoint > 3600:
+                self.store.checkpoint()
+                last_checkpoint = self.clock()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.stop.wait(), timeout=self.cfg.heartbeat_s)
 
     # ---- lifecycle -----------------------------------------------------------------------
+    def recover(self) -> None:
+        """Account for the time the collector was not running (crash, reboot, deploy).
+
+        The interval between the previous process's last heartbeat and this start is a
+        collection gap: it is stored as a ``collector_down`` outage. Outages that the
+        previous process left open are closed at its last heartbeat.
+        """
+        prev = self.store.previous_status()
+        if prev is None:
+            return
+        last = prev["updated_at"]
+        self.first_started_at = prev.get("first_started_at") or prev.get("started_at") or last
+        self.store.close_dangling_outages(last)
+        if self.started_at > last:
+            how = (
+                "clean stop"
+                if prev["state"] == "stopped"
+                else f"unclean exit in state {prev['state']}"
+            )
+            self.store.record_gap(
+                "collector_down", last, self.started_at, f"collector not running ({how})"
+            )
+            self.c.recovered_downtime_s = round(self.started_at - last, 1)
+
     async def run(self, duration: float | None = None, max_fetches: int | None = None) -> Counters:
         self._max_fetches = max_fetches
+        self.recover()
         if self.http is None:
             self.http = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.cfg.request_timeout_s),
@@ -404,6 +455,9 @@ class Collector:
             await asyncio.gather(*tasks, return_exceptions=True)
             self.state = "stopped"
             self.connected_since = None
+            if self._outage_id is not None:
+                self.store.close_outage(self._outage_id, self.clock())
+                self._outage_id = None
             self.flush()
             if self._own_http:
                 await self.http.aclose()

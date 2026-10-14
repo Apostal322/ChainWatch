@@ -190,30 +190,11 @@ def _cmd_verify_replay(args, cfg) -> None:
 
 
 def _cmd_live_collect(args, cfg) -> None:
-    """Run the live mempool collector (talks to mempool.space; writes cfg.live.db_path)."""
-    import asyncio
-    import dataclasses
-    import json
+    """Run the live mempool collector (same as ``chainwatch-live collect``)."""
+    from chainwatch.live.cli import cmd_collect
 
-    from chainwatch.live.collector import Collector
-    from chainwatch.live.store import LiveStore
-
-    live = cfg.live
-    if args.db:
-        live = dataclasses.replace(live, db_path=args.db.resolve())
-    if args.sample_rate is not None:
-        live = dataclasses.replace(live, sample_rate=args.sample_rate)
-    if not live.enabled and not args.force:
-        raise SystemExit(
-            "live monitoring is disabled in this config; use configs/live.yaml "
-            "(or pass --force for a one-off bounded run)"
-        )
-    store = LiveStore(live.db_path)
-    try:
-        c = asyncio.run(Collector(live, store).run(args.duration, args.max_fetches))
-    finally:
-        store.close()
-    print(json.dumps({"db": str(live.db_path), **dataclasses.asdict(c)}, indent=2))
+    args.config = args.config or Path("configs/default.yaml")
+    cmd_collect(args)
 
 
 def build_parser() -> argparse.ArgumentParser:

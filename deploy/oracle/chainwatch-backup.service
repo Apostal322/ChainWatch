@@ -1,0 +1,35 @@
+# Daily consistent SQLite backup (online backup API + integrity check, keeps 7).
+[Unit]
+Description=ChainWatch live database backup
+Documentation=https://github.com/Apostal322/ChainWatch/blob/main/docs/LIVE_CLOUD.md
+
+[Service]
+Type=oneshot
+User=chainwatch
+Group=chainwatch
+WorkingDirectory=/opt/chainwatch/app
+ExecStart=/opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml backup --dest /var/backups/chainwatch --keep 7
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=200M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+UMask=0027
+ReadWritePaths=/var/lib/chainwatch /var/backups/chainwatch

@@ -2,8 +2,12 @@
 
 * WAL mode: one writer process and concurrent readers.
 * Idempotent: one row per txid (``INSERT OR IGNORE``); re-delivered txids are no-ops.
-* Bounded: ``prune`` keeps the newest ``retention_rows`` transactions and 24 h of
-  per-minute counters, so the file cannot grow without limit.
+* Bounded: ``prune`` keeps at most ``retention_rows`` transactions no older than
+  ``retention_days``, 24 h of per-minute counters and 30 days of outage records, and
+  ``checkpoint`` truncates the WAL, so the files cannot grow without limit.
+* Gaps are explicit: the ``outages`` table records every interval in which the collector
+  was not receiving (process down, WebSocket disconnected) and every missed mempool update
+  (``sequence_gap``), so coverage can be reported honestly.
 """
 
 from __future__ import annotations
@@ -37,6 +41,15 @@ CREATE TABLE IF NOT EXISTS tx (
 );
 CREATE INDEX IF NOT EXISTS tx_fee_rate ON tx(fee_rate);
 CREATE INDEX IF NOT EXISTS tx_first_seen ON tx(first_seen);
+CREATE INDEX IF NOT EXISTS tx_fetched_at ON tx(fetched_at);
+CREATE TABLE IF NOT EXISTS outages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK (kind IN ('collector_down', 'disconnected', 'sequence_gap')),
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS outages_started ON outages(started_at);
 CREATE TABLE IF NOT EXISTS minute_stats (
     minute INTEGER PRIMARY KEY,
     received INTEGER NOT NULL DEFAULT 0,
@@ -51,6 +64,7 @@ CREATE TABLE IF NOT EXISTS collector (
     state TEXT NOT NULL,
     updated_at REAL NOT NULL,
     started_at REAL,
+    first_started_at REAL,
     connected_since REAL,
     last_message_at REAL,
     last_sequence INTEGER,
@@ -91,6 +105,9 @@ class LiveStore:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(collector)")}
+        if "first_started_at" not in cols:  # migrate databases created by v0.5.0
+            self.db.execute("ALTER TABLE collector ADD COLUMN first_started_at REAL")
 
     def close(self) -> None:
         self.db.close()
@@ -148,13 +165,74 @@ class LiveStore:
             tuple(status.values()),
         )
 
-    def prune(self, retention_rows: int, now: float | None = None) -> int:
+    def previous_status(self) -> dict[str, Any] | None:
+        self.db.row_factory = sqlite3.Row
+        try:
+            row = self.db.execute("SELECT * FROM collector WHERE id = 1").fetchone()
+        finally:
+            self.db.row_factory = None
+        return dict(row) if row else None
+
+    def open_outage(self, kind: str, started_at: float, detail: str = "") -> int:
+        cur = self.db.execute(
+            "INSERT INTO outages (kind, started_at, detail) VALUES (?, ?, ?)",
+            (kind, started_at, detail[:200]),
+        )
+        return int(cur.lastrowid)
+
+    def close_outage(self, outage_id: int, ended_at: float) -> None:
+        self.db.execute(
+            "UPDATE outages SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+            (ended_at, outage_id),
+        )
+
+    def record_gap(self, kind: str, started_at: float, ended_at: float, detail: str) -> None:
+        self.db.execute(
+            "INSERT INTO outages (kind, started_at, ended_at, detail) VALUES (?, ?, ?, ?)",
+            (kind, started_at, ended_at, detail[:200]),
+        )
+
+    def close_dangling_outages(self, ended_at: float) -> int:
+        """Outages left open by a crashed process end where its last heartbeat was."""
+        cur = self.db.execute(
+            "UPDATE outages SET ended_at = MAX(started_at, ?) WHERE ended_at IS NULL", (ended_at,)
+        )
+        return cur.rowcount
+
+    def prune(
+        self, retention_rows: int, now: float | None = None, retention_days: float | None = None
+    ) -> int:
         now = time.time() if now is None else now
         cur = self.db.execute(
             "DELETE FROM tx WHERE id <= (SELECT MAX(id) FROM tx) - ?", (retention_rows,)
         )
+        removed = cur.rowcount
+        if retention_days is not None:
+            removed += self.db.execute(
+                "DELETE FROM tx WHERE fetched_at < ?", (now - retention_days * 86400,)
+            ).rowcount
         self.db.execute("DELETE FROM minute_stats WHERE minute < ?", (int(now // 60) - 24 * 60,))
-        return cur.rowcount
+        self.db.execute(
+            "DELETE FROM outages WHERE ended_at IS NOT NULL AND ended_at < ?", (now - 30 * 86400,)
+        )
+        return removed
+
+    def checkpoint(self) -> None:
+        """Fold the WAL into the database and truncate it (bounds the -wal file)."""
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def backup(self, dest: Path) -> Path:
+        """Consistent online copy (SQLite backup API); safe while the collector writes."""
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".partial")
+        target = sqlite3.connect(tmp)
+        try:
+            self.db.backup(target)
+        finally:
+            target.close()
+        tmp.replace(dest)
+        return dest
 
 
 class LiveReader:
@@ -234,6 +312,62 @@ class LiveReader:
         d = _summary(row)
         d["features"] = json.loads(row["features"]) if row["features"] else None
         return d
+
+    def last_observation_at(self) -> float | None:
+        with self._conn() as c:
+            return c.execute("SELECT MAX(fetched_at) FROM tx WHERE outcome = 'fetched'").fetchone()[
+                0
+            ]
+
+    def outages(self, since: float, limit: int = 50) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM outages WHERE COALESCE(ended_at, 1e18) >= ? "
+                "ORDER BY started_at DESC LIMIT ?",
+                (since, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def availability(self, window_s: float, now: float | None = None) -> dict[str, Any]:
+        """Share of the window in which the collector was receiving (outages subtracted).
+
+        The window starts no earlier than the collector's first start, so a fresh install
+        is not penalised for time before it existed. Sequence gaps are counted separately.
+        """
+        now = time.time() if now is None else now
+        st = self.status()
+        if st is None or st.get("started_at") is None:
+            return {"window_s": 0.0, "observed_share": None, "down_s": 0.0, "sequence_gaps": 0}
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT kind, started_at, COALESCE(ended_at, ?) AS e, detail FROM outages "
+                "WHERE COALESCE(ended_at, ?) >= ?",
+                (now, now, now - window_s),
+            ).fetchall()
+        begin = max(now - window_s, st.get("first_started_at") or st["started_at"])
+        span = max(now - begin, 1e-9)
+        intervals = sorted(
+            (max(r["started_at"], begin), min(r["e"], now))
+            for r in rows
+            if r["kind"] != "sequence_gap" and r["e"] > begin
+        )
+        down, cur_s, cur_e = 0.0, None, None
+        for s0, e0 in intervals:  # merge overlapping intervals
+            if cur_e is None or s0 > cur_e:
+                if cur_e is not None:
+                    down += cur_e - cur_s
+                cur_s, cur_e = s0, e0
+            else:
+                cur_e = max(cur_e, e0)
+        if cur_e is not None:
+            down += cur_e - cur_s
+        gaps = sum(1 for r in rows if r["kind"] == "sequence_gap")
+        return {
+            "window_s": round(span, 1),
+            "observed_share": round(max(0.0, 1 - down / span), 4),
+            "down_s": round(down, 1),
+            "sequence_gaps": gaps,
+        }
 
     def max_id(self) -> int:
         with self._conn() as c:

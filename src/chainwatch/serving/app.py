@@ -181,7 +181,9 @@ def _install_error_handlers(app: FastAPI) -> None:
 
 
 # --------------------------------------------------------------------------- app
-def create_app(cfg: Config | None = None, state: ServiceState | None = None) -> FastAPI:
+def create_app(
+    cfg: Config | None = None, state: ServiceState | None = None, live_backend=None
+) -> FastAPI:
     cfg = cfg or load_config(os.environ.get("CHAINWATCH_CONFIG"))
 
     @asynccontextmanager
@@ -249,7 +251,8 @@ def create_app(cfg: Config | None = None, state: ServiceState | None = None) -> 
 
     _routes(app)
     app.state.live_enabled = cfg.live.enabled
-    install_live_routes(app, cfg.live, _error)  # read-only; 404 live_disabled unless opted in
+    # read-only; 404 live_disabled unless opted in; remote mode proxies to the collector VM
+    install_live_routes(app, cfg.live, _error, backend=live_backend)
     _mount_frontend(app, cfg)
     if sv and sv.rate_limit_per_minute > 0:
         app.add_middleware(
