@@ -129,7 +129,11 @@ an evaluation with a time-separated independent holdout, pre-registered primary 
 the label source, and the artifact hash matches. No model passes; the layer abstains with
 `NO_VALIDATED_MODEL`. The offline feature-subset experiment
 ([LIVE_FEATURE_SUBSET_PROTOCOL.md](LIVE_FEATURE_SUBSET_PROTOCOL.md)) cannot pass it by
-construction.
+construction. Its results ([LIVE_FEATURE_SUBSET_RESULTS.md](LIVE_FEATURE_SUBSET_RESULTS.md)):
+on Elliptic++ test steps 35-49, XGBoost on the 16 live-computable features reaches AP 0.646
+against 0.797 with all 182 features (paired difference -0.151, 95% interval [-0.216, -0.089]).
+Like every model it collapses after step 42 (AP 0.028). Exploratory and rejected for
+promotion.
 
 ## 8. Review priority and alerts
 
