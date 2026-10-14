@@ -17,6 +17,7 @@ import json
 import logging
 import sqlite3
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -234,10 +235,12 @@ def cmd_indicators(args) -> int:
             spec = sources.SOURCES[source]
             try:
                 if args.file:
-                    content, url = Path(args.file).read_bytes(), f"file:{Path(args.file).name}"
+                    content, url = Path(args.file), f"file:{Path(args.file).name}"
+                    snap = sources.load(spec, content, url)
                 else:
-                    content, url = sources.fetch(spec.url), spec.url
-                snap = sources.load(spec, content, url)
+                    with tempfile.TemporaryDirectory(prefix="chainwatch-src-") as tmp:
+                        path = sources.fetch(spec.url, dest=Path(tmp) / "source")
+                        snap = sources.load(spec, path, spec.url)
                 break
             except (OSError, ValueError, httpx.HTTPError) as e:  # unreachable, invalid, too big
                 failures.append({"source": source, "error": f"{type(e).__name__}: {e}"[:300]})

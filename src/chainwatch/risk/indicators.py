@@ -13,9 +13,11 @@ and sizes are bounded. No field from a source can change configuration or code p
 from __future__ import annotations
 
 import hashlib
+import io
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from chainwatch.risk.addresses import InvalidAddress, parse_address
@@ -126,7 +128,7 @@ def _date(el: ET.Element | None) -> str | None:
 
 
 def parse_ofac_sdn_advanced(
-    content: bytes,
+    content: bytes | Path,
     *,
     url: str = "https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml",
     retrieved_at: float | None = None,
@@ -139,78 +141,101 @@ def parse_ofac_sdn_advanced(
     names the "Digital Currency Address - XBT" feature id; each
     ``DistinctParties/DistinctParty/Profile/Feature[@FeatureTypeID]`` carries the address in
     ``FeatureVersion/VersionDetail``; ``SanctionsEntries/SanctionsEntry[@ProfileID]`` holds the
-    entry date and programme comments. Parsing is streaming-free but bounded by
-    ``MAX_SOURCE_BYTES``; ElementTree does not resolve external entities.
-    """
-    if len(content) > MAX_SOURCE_BYTES:
-        raise ValueError("indicator source too large")
-    if b"<!DOCTYPE" in content[:4096] or b"<!ENTITY" in content[:65536]:
-        raise ValueError("DTDs/entities are not accepted in indicator sources")
-    root = ET.fromstring(content)
-    if _local(root.tag) != "Sanctions":
-        raise ValueError(f"unexpected root element {_local(root.tag)!r}")
+    entry date and programme comments.
 
-    issued = _date(next((c for c in root if _local(c.tag) == "DateOfIssue"), None))
-    feature_ids = {
-        el.get("ID")
-        for el in root.iter()
-        if _local(el.tag) == "FeatureType" and (el.text or "").strip() == OFAC_FEATURE_TYPE
-    }
+    The file is ~100 MB, so it is parsed as a stream (``iterparse``) and each party is freed
+    once read: memory stays far below the indicator service's 400 MB limit. DTDs and entity
+    declarations are refused; ElementTree never fetches external resources.
+    """
+    if isinstance(content, Path):
+        size = content.stat().st_size
+        with content.open("rb") as fh:
+            head = fh.read(65536)
+        digest = _sha256_file(content)
+        stream: Any = content.open("rb")
+    else:
+        size, head = len(content), content[:65536]
+        digest = hashlib.sha256(content).hexdigest()
+        stream = io.BytesIO(content)
+    if size > MAX_SOURCE_BYTES:
+        raise ValueError("indicator source too large")
+    if b"<!DOCTYPE" in head or b"<!ENTITY" in head:
+        raise ValueError("DTDs/entities are not accepted in indicator sources")
+
+    issued: str | None = None
+    feature_ids: set[str] = set()
+    parties: list[tuple[str, str, list[str]]] = []  # (profile id, name, raw addresses)
+    entries: dict[str, dict[str, Any]] = {}
+    root_seen = False
+    try:
+        for event, el in ET.iterparse(stream, events=("start", "end")):
+            tag = _local(el.tag)
+            if event == "start":
+                if not root_seen:
+                    root_seen = True
+                    if tag != "Sanctions":
+                        raise ValueError(f"unexpected root element {tag!r}")
+                continue
+            if tag == "DateOfIssue":
+                issued = _date(el)
+            elif tag == "FeatureType":
+                if (el.text or "").strip() == OFAC_FEATURE_TYPE:
+                    feature_ids.add(el.get("ID", ""))
+            elif tag == "DistinctParty":
+                for profile in el:
+                    if _local(profile.tag) != "Profile":
+                        continue
+                    raw = [
+                        (d.text or "").strip()
+                        for feat in profile
+                        if _local(feat.tag) == "Feature"
+                        and feat.get("FeatureTypeID") in feature_ids
+                        for d in feat.iter()
+                        if _local(d.tag) == "VersionDetail" and (d.text or "").strip()
+                    ]
+                    if raw:
+                        pid = profile.get("ID") or el.get("FixedRef") or ""
+                        parties.append((pid, _primary_name(profile), raw))
+                el.clear()
+            elif tag == "SanctionsEntry":
+                dates = [d for ev in el if _local(ev.tag) == "EntryEvent"
+                         for d in [_date(_child(ev, "Date"))] if d]  # fmt: skip
+                programs = sorted(
+                    {
+                        (c.text or "").strip()
+                        for m in el
+                        if _local(m.tag) == "SanctionsMeasure"
+                        for c in m
+                        if _local(c.tag) == "Comment" and (c.text or "").strip()
+                    }
+                )
+                entries[el.get("ProfileID", "")] = {
+                    "entry_date": min(dates) if dates else None,
+                    "programs": programs,
+                }
+                el.clear()
+    finally:
+        stream.close()
     if not feature_ids:
         raise ValueError(f"no FeatureType {OFAC_FEATURE_TYPE!r} in this file")
 
-    entries: dict[str, dict[str, Any]] = {}  # profile id -> entry facts
-    for el in root.iter():
-        if _local(el.tag) != "SanctionsEntry":
-            continue
-        dates = [
-            d
-            for ev in el
-            if _local(ev.tag) == "EntryEvent"
-            for d in [_date(_child(ev, "Date"))]
-            if d
-        ]
-        programs = sorted(
-            {
-                (c.text or "").strip()
-                for m in el
-                if _local(m.tag) == "SanctionsMeasure"
-                for c in m
-                if _local(c.tag) == "Comment" and (c.text or "").strip()
-            }
-        )
-        entries[el.get("ProfileID", "")] = {
-            "entry_date": min(dates) if dates else None,
-            "programs": programs,
-        }
-
     records: dict[str, IndicatorRecord] = {}
     rejected: list[tuple[str, str]] = []
-    for party in root.iter():
-        if _local(party.tag) != "DistinctParty":
-            continue
-        for profile in party:
-            if _local(profile.tag) != "Profile":
-                continue
-            pid = profile.get("ID") or party.get("FixedRef") or ""
-            name = _primary_name(profile)
-            entry = entries.get(pid, {})
-            for feat in profile:
-                if _local(feat.tag) != "Feature" or feat.get("FeatureTypeID") not in feature_ids:
-                    continue
-                for detail in feat.iter():
-                    if _local(detail.tag) != "VersionDetail" or not (detail.text or "").strip():
-                        continue
-                    addr = _validated(detail.text.strip(), rejected)
-                    if addr and addr not in records:
-                        records[addr] = IndicatorRecord(
-                            address=addr,
-                            category="sanctions",
-                            label=name,
-                            reference=f"OFAC SDN profile {pid}",
-                            listed_on=entry.get("entry_date"),
-                            details={"programs": entry.get("programs", []), "profile_id": pid},
-                        )
+    for pid, name, raw_addresses in parties:
+        entry = entries.get(pid, {})
+        for raw in raw_addresses:
+            addr = _validated(raw, rejected)
+            if addr and addr not in records:
+                records[addr] = IndicatorRecord(
+                    address=addr,
+                    category="sanctions",
+                    label=name,
+                    reference=f"OFAC SDN profile {pid}",
+                    listed_on=entry.get("entry_date"),
+                    details={"programs": entry.get("programs", []), "profile_id": pid},
+                )
+            if len(records) > MAX_RECORDS:
+                raise ValueError("too many records")
     return Snapshot(
         source_id=source_id,
         method="ofac-sdn-advanced-xml",
@@ -218,10 +243,18 @@ def parse_ofac_sdn_advanced(
         licence="US government work (public domain)",
         retrieved_at=time.time() if retrieved_at is None else retrieved_at,
         published_at=_iso_to_ts(issued),
-        sha256=hashlib.sha256(content).hexdigest(),
+        sha256=digest,
         records=sorted(records.values(), key=lambda r: r.address),
         rejected=rejected,
     )
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _child(el: ET.Element, name: str) -> ET.Element | None:

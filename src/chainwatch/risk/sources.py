@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -57,7 +58,9 @@ SOURCES: dict[str, SourceSpec] = {
 }
 
 
-def fetch(url: str, timeout: float = 120.0) -> bytes:
+def fetch(url: str, timeout: float = 120.0, dest: Path | None = None) -> bytes | Path:
+    """Download over HTTPS with a size cap. With ``dest`` the body is streamed to that file
+    (large sources such as the ~100 MB SDN XML never sit in memory) and the path returned."""
     if urlparse(url).scheme != "https":
         raise ValueError("indicator sources must be fetched over https")
     with (
@@ -67,17 +70,28 @@ def fetch(url: str, timeout: float = 120.0) -> bytes:
         r.raise_for_status()
         if urlparse(str(r.url)).scheme != "https":
             raise ValueError("redirected to a non-https URL")
-        chunks, size = [], 0
-        for chunk in r.iter_bytes():
-            size += len(chunk)
-            if size > MAX_SOURCE_BYTES:
-                raise ValueError("indicator source too large")
-            chunks.append(chunk)
-    return b"".join(chunks)
+        size = 0
+        chunks: list[bytes] = []
+        sink = dest.open("wb") if dest is not None else None
+        try:
+            for chunk in r.iter_bytes():
+                size += len(chunk)
+                if size > MAX_SOURCE_BYTES:
+                    raise ValueError("indicator source too large")
+                if sink is not None:
+                    sink.write(chunk)
+                else:
+                    chunks.append(chunk)
+        finally:
+            if sink is not None:
+                sink.close()
+    return dest if dest is not None else b"".join(chunks)
 
 
-def load(spec: SourceSpec, content: bytes, url: str | None = None) -> Snapshot:
+def load(spec: SourceSpec, content: bytes | Path, url: str | None = None) -> Snapshot:
     now = time.time()
+    if isinstance(content, Path) and spec.kind != "ofac-sdn-advanced-xml":
+        content = content.read_bytes()  # small text lists
     if spec.kind == "ofac-sdn-advanced-xml":
         return parse_ofac_sdn_advanced(content, url=url or spec.url, retrieved_at=now,
                                        source_id=spec.source_id)  # fmt: skip

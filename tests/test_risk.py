@@ -115,6 +115,28 @@ def test_official_sdn_xml_parser_keeps_provenance_and_rejects_non_bitcoin():
     assert snap.published_at is not None and snap.rejected[0][0].startswith("TUCs")
 
 
+def test_sdn_xml_streams_from_a_file_with_bounded_memory(tmp_path):
+    """The official file is ~100 MB: it is parsed as a stream from disk. A synthetic file
+    with 20,000 parties (most without Bitcoin addresses) must parse with modest memory."""
+    import tracemalloc
+
+    filler = "".join(
+        f'<DistinctParty FixedRef="{i}"><Profile ID="{i}"><Feature ID="f{i}" FeatureTypeID="1">'
+        f"<FeatureVersion><VersionDetail>passport {i}</VersionDetail></FeatureVersion></Feature>"
+        "</Profile></DistinctParty>"
+        for i in range(20_000)
+    )
+    big = SDN_XML.replace(b"<DistinctParties>", f"<DistinctParties>{filler}".encode())
+    path = tmp_path / "sdn_advanced.xml"
+    path.write_bytes(big)
+    tracemalloc.start()
+    snap = parse_ofac_sdn_advanced(path, retrieved_at=1.0)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert [r.address for r in snap.records] == [LISTED]
+    assert peak < 0.5 * len(big) + 5_000_000, f"peak {peak} for a {len(big)}-byte file"
+
+
 def test_xml_with_dtd_or_entities_is_refused():
     evil = b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]><Sanctions/>'
     with pytest.raises(ValueError, match="DTD"):
@@ -471,11 +493,12 @@ def test_indicator_update_falls_back_and_never_breaks_on_failure(tmp_path, monke
 
     calls = []
 
-    def fake_fetch(url, timeout=120.0):
+    def fake_fetch(url, timeout=120.0, dest=None):
         calls.append(url)
         if "treasury.gov" in url:
             raise httpx.ConnectError("blocked")
-        return f"{LISTED}\n".encode()
+        dest.write_bytes(f"{LISTED}\n".encode())
+        return dest
 
     monkeypatch.setattr(sources, "fetch", fake_fetch)
     cfg = tmp_path / "c.yaml"
@@ -488,7 +511,7 @@ def test_indicator_update_falls_back_and_never_breaks_on_failure(tmp_path, monke
     assert live_cli.main(argv) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["source_id"] == "ofac-sdn-mirror" and out["failures"][0]["source"] == "ofac-sdn"
-    monkeypatch.setattr(sources, "fetch", lambda url, timeout=120.0: (_ for _ in ()).throw(
+    monkeypatch.setattr(sources, "fetch", lambda *a, **k: (_ for _ in ()).throw(
         httpx.ConnectError("down")))  # fmt: skip
     assert live_cli.main(argv) == 1  # previous version stays in use
     assert len(calls) == 2
