@@ -189,7 +189,10 @@ def test_backoff_is_exponential_jittered_and_capped():
         d = backoff_delay(attempt, 1.0, 60.0, rng)
         assert 0.0 <= d <= min(60.0, 2**attempt)
     assert retry_after_seconds("7") == 7.0 and retry_after_seconds(None) == 60.0
-    assert retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT") == 60.0
+    # HTTP-date form: seconds until then (a date in the past means "now": the 1 s minimum)
+    assert retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT") == 1.0
+    assert retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT", now=1445412480 - 120) == 120.0
+    assert retry_after_seconds("not a date") == 60.0
     assert retry_after_seconds("100000") == 600.0
 
 
@@ -259,7 +262,7 @@ def test_fetch_outcomes_429_404_timeout_and_idempotency(tmp_path):
     col, store = asyncio.run(go())
     c = col.c
     assert (c.fetched, c.failed, c.not_found, c.rate_limited, c.timeouts) == (1, 4, 1, 1, 1)
-    assert c.malformed_payloads == 1 and c.duplicates == 1 and c.expired == 1
+    assert c.malformed_payloads == 1 and c.already_stored == 1 and c.expired == 1
     assert col._paused == 3.0  # Retry-After honoured
     reader = LiveReader(store.path)
     assert (

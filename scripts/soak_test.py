@@ -335,12 +335,12 @@ def main() -> int:
     st.stop("mock")
 
     con = sqlite3.connect(work / "live.sqlite")
-    rows = con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+    rows = con.execute("SELECT COUNT(*) FROM tx").fetchone()[0]
     outages = con.execute(
         "SELECT kind, COUNT(*), ROUND(SUM(COALESCE(ended_at, started_at) - started_at), 1) "
         "FROM outages GROUP BY kind"
     ).fetchall()
-    errors = con.execute("SELECT error, COUNT(*) FROM transactions WHERE outcome='failed' "
+    errors = con.execute("SELECT error, COUNT(*) FROM tx WHERE outcome='failed' "
                          "GROUP BY error ORDER BY 2 DESC LIMIT 10").fetchall()  # fmt: skip
     integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
     con.close()

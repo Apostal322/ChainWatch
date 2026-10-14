@@ -81,6 +81,10 @@ SUMMARY_COLS = (
 )
 
 
+def _opt_int(v: bool | None) -> int | None:
+    return None if v is None else int(v)
+
+
 class NoLiveData(Exception):
     """The live database does not exist yet (the collector has never run)."""
 
@@ -124,7 +128,7 @@ class LiveStore:
             (
                 f["txid"], f["first_seen"], f["fetched_at"], f["fee_rate"], f["fee"],
                 f["vsize"], f["n_inputs"], f["n_outputs"], f["output_value_total"],
-                int(f["rbf_signal"]), int(f["confirmed_at_fetch"]), json.dumps(flags),
+                int(f["rbf_signal"]), _opt_int(f["confirmed_at_fetch"]), json.dumps(flags),
                 json.dumps(f, separators=(",", ":")),
             ),
         )  # fmt: skip

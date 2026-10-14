@@ -25,7 +25,11 @@ from dataclasses import dataclass, field
 SUBSCRIBE = json.dumps({"track-mempool-txids": True})
 PING = json.dumps({"action": "ping"})
 TXID_RE = re.compile(r"^[0-9a-f]{64}$")
-MAX_MESSAGE_BYTES = 4_000_000  # far above a normal delta; bigger frames are refused
+# A normal delta is a few KB. When mempool's backend resyncs (mempool reload, end of
+# "mempool clear protection") one delta can list 60k+ txids (~70 bytes each), so the cap is
+# well above that; bigger frames close the connection (code 1009) and are reported as an
+# outage. Parsing 16 MB of txids costs roughly 40 MB of memory, inside MemoryMax=300M.
+MAX_MESSAGE_BYTES = 16_000_000
 
 
 def valid_txid(value: object) -> bool:

@@ -106,7 +106,7 @@ def test_clean_restart_is_labelled_and_idempotent_data_survives(tmp_path):
             await col.fetch_one(txid(f"cloud{i}"), col.clock())
 
     asyncio.run(again())
-    assert col.c.fetched == 0 and col.c.duplicates == 5
+    assert col.c.fetched == 0 and col.c.already_stored == 5
     assert LiveReader(cfg.db_path).list(limit=50)[0] == 5
 
 

@@ -11,12 +11,19 @@ Pipeline and its bounds:
 
 Nothing is backfilled: only txids announced while the collector is connected are seen, and
 only a sample of those is fetched. Coverage is therefore partial by design.
+
+Failure policy: per-transaction problems (HTTP errors, bad payloads) become ``failed`` rows;
+an unexpected exception in one item is logged and counted (``internal_errors``). If a
+pipeline task itself dies (e.g. the database cannot be written), ``run`` stops everything
+and ``fatal`` is set, so the process exits non-zero and systemd restarts it instead of
+leaving a live-looking process that no longer collects.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import email.utils
 import hashlib
 import json
 import logging
@@ -46,7 +53,9 @@ class Counters:
     malformed: int = 0
     received: int = 0  # txids announced in "added"
     invalid_txids: int = 0
-    duplicates: int = 0
+    duplicates: int = 0  # announced again while still remembered (bounded LRU)
+    already_stored: int = 0  # sampled but already in the database (e.g. after a restart)
+    gone_before_fetch: int = 0  # removed/mined before its turn: not fetched (saves budget)
     not_sampled: int = 0
     queued: int = 0
     dropped_backpressure: int = 0
@@ -57,8 +66,16 @@ class Counters:
     rate_limited: int = 0
     timeouts: int = 0
     malformed_payloads: int = 0
+    upstream_errors: int = 0  # HTTP 5xx (the fetch budget pauses briefly)
+    internal_errors: int = 0  # unexpected exceptions while processing one item
+    # Upstream mempool-txids semantics (mempool/mempool websocket-handler.ts):
+    # ``removed`` lists every txid that left the mempool in a poll (replacements, conflicts,
+    # evictions, expiry), NOT mined ones; ``mined`` comes with each new block;
+    # ``replaced`` pairs (old, by) overlap ``removed`` (the old txid is also removed) and
+    # one old txid can appear in several pairs. The counters are therefore not disjoint.
     removed: int = 0
-    replaced: int = 0
+    mined: int = 0
+    replacement_pairs: int = 0
     connects: int = 0
     reconnects: int = 0
     stale_reconnects: int = 0
@@ -81,6 +98,9 @@ class SeenSet:
         if len(self._items) > self.max_items:
             self._items.popitem(last=False)
         return True
+
+    def __contains__(self, txid: object) -> bool:
+        return txid in self._items
 
     def __len__(self) -> int:
         return len(self._items)
@@ -115,6 +135,7 @@ class TokenBucket:
     def pause(self, seconds: float) -> None:
         self.paused_until = max(self.paused_until, self.clock() + seconds)
         self.tokens = 0.0
+        self.last = self.paused_until  # no refill credit for the pause itself (no burst after)
 
     async def acquire(self) -> None:
         async with self.lock:
@@ -125,22 +146,42 @@ class TokenBucket:
                     continue
                 self.tokens = min(self.burst, self.tokens + (now - self.last) * self.rate)
                 self.last = now
-                if self.tokens >= 1.0:
-                    self.tokens -= 1.0
+                if self.tokens >= 1.0 - 1e-9:  # tolerance: float refill can land at 0.999…
+                    self.tokens = max(0.0, self.tokens - 1.0)
                     return
                 await self.sleep((1.0 - self.tokens) / self.rate)
 
 
-def retry_after_seconds(value: str | None, default: float = 60.0) -> float:
+def retry_after_seconds(
+    value: str | None, default: float = 60.0, now: float | None = None
+) -> float:
+    """Seconds to pause for a ``Retry-After`` header (delta-seconds or HTTP-date), 1-600 s."""
+    if not value:
+        return default
     try:
-        return min(600.0, max(1.0, float(value))) if value else default
+        seconds = float(value)
     except ValueError:
-        return default  # HTTP-date form: fall back to a conservative pause
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError):
+            return default
+        if when is None or when.tzinfo is None:
+            return default
+        seconds = when.timestamp() - (time.time() if now is None else now)
+    if seconds != seconds:  # NaN
+        return 1.0
+    return min(600.0, max(1.0, seconds))
 
 
 def backoff_delay(attempt: int, base: float, cap: float, rng: random.Random) -> float:
-    """Exponential backoff with full jitter."""
-    return rng.uniform(0.0, min(cap, base * 2**attempt))
+    """Exponential backoff with full jitter. ``attempt`` is clamped, so after any number of
+    failures the delay stays finite (2**1024 would overflow a float)."""
+    return rng.uniform(0.0, min(cap, base * 2 ** min(attempt, 30)))
+
+
+HEALTHY_AFTER_S = 30.0  # a connection must deliver for this long before backoff resets
+UPSTREAM_ERROR_PAUSE_S = 30.0  # fetch pause after an HTTP 5xx from the REST API
+GONE_MAX = 50_000  # remembered removed/mined txids (bounded)
 
 
 class Collector:
@@ -165,6 +206,7 @@ class Collector:
         self.clock = clock
         self.c = Counters()
         self.seen = SeenSet(cfg.dedupe_max)
+        self.gone = SeenSet(GONE_MAX)  # removed or mined: no longer worth fetching
         self.queue: asyncio.Queue[tuple[str, float]] = asyncio.Queue(maxsize=cfg.queue_max)
         self.bucket = TokenBucket(cfg.fetch_per_minute, cfg.fetch_burst)
         self.recent_fee_rates: deque[float] = deque(maxlen=500)
@@ -180,6 +222,7 @@ class Collector:
         self._conn_sequence: int | None = None
         self.first_started_at = self.started_at
         self._max_fetches: int | None = None
+        self.fatal: str | None = None  # set when a pipeline task died; the CLI exits non-zero
 
     # ---- WebSocket side ------------------------------------------------------------------
     def handle_frame(self, raw: str | bytes) -> None:
@@ -205,7 +248,10 @@ class Collector:
             self.last_sequence = d.sequence
         self.c.invalid_txids += d.invalid
         self.c.removed += len(d.removed)
-        self.c.replaced += len(d.replaced)
+        self.c.mined += len(d.mined)
+        self.c.replacement_pairs += len(d.replaced)
+        for txid in (*d.removed, *d.mined):
+            self.gone.add(txid)
         now = self.clock()
         for txid in d.added:
             self.c.received += 1
@@ -237,6 +283,7 @@ class Collector:
                     await ws.send(SUBSCRIBE)
                     self.c.connects += 1
                     self.state, self.connected_since = "connected", self.clock()
+                    self.last_error = None
                     self._conn_sequence = None  # a new connection restarts sequence tracking
                     if self._outage_id is not None:
                         self.store.close_outage(self._outage_id, self.connected_since)
@@ -263,18 +310,25 @@ class Collector:
                                 self.last_error = "no message within stale_after_s"
                             break
                         self.handle_frame(recv.result())
-                        attempt = 0  # a working stream resets the backoff
+                        if self.clock() - self.connected_since >= HEALTHY_AFTER_S:
+                            attempt = 0  # only a stream that keeps working resets the backoff
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # network errors, handshake failures, closed connections
                 self.last_error = f"{type(e).__name__}: {e}"[:200]
                 log.warning(json.dumps({"msg": "websocket error", "error": self.last_error}))
-            self.connected_since = None
+            conn_started, self.connected_since = self.connected_since, None
             if self.stop.is_set():
                 break
-            if self._outage_id is None:  # not receiving from now until the next connect
+            if self._outage_id is None:
+                # Not receiving since the last message of this connection (a half-open or
+                # silent stream is only detected later, by pings or the stale watchdog).
+                start = self.clock()
+                if conn_started is not None:
+                    last = self.last_message_at
+                    start = last if last is not None and last >= conn_started else conn_started
                 self._outage_id = self.store.open_outage(
-                    "disconnected", self.clock(), self.last_error or "connection lost"
+                    "disconnected", start, self.last_error or "connection lost"
                 )
             self.state = "reconnecting"
             self.c.reconnects += 1
@@ -291,10 +345,16 @@ class Collector:
         if now - first_seen > self.cfg.max_queue_age_s:
             self.c.expired += 1
             return
+        if txid in self.gone:  # replaced, evicted or mined while queued: a fetch would 404
+            self.c.gone_before_fetch += 1
+            return
         if self.store.has(txid):  # idempotent across restarts
-            self.c.duplicates += 1
+            self.c.already_stored += 1
             return
         await self.bucket.acquire()
+        if self.clock() - first_seen > self.cfg.max_queue_age_s:  # aged while paused
+            self.c.expired += 1
+            return
         assert self.http is not None
         error: str | None = None
         try:
@@ -312,6 +372,10 @@ class Collector:
             elif resp.status_code == 404:
                 self.c.not_found += 1  # evicted, replaced or not (yet) indexed
                 error = "not_found"
+            elif resp.status_code >= 500:
+                self.c.upstream_errors += 1
+                self.bucket.pause(UPSTREAM_ERROR_PAUSE_S)  # do not drain the queue into errors
+                error = f"http_{resp.status_code}"
             elif resp.status_code != 200:
                 error = f"http_{resp.status_code}"
             else:
@@ -336,6 +400,14 @@ class Collector:
             txid, first_seen = await self.queue.get()
             try:
                 await self.fetch_one(txid, first_seen)
+            except Exception as e:  # one bad item must not kill the worker
+                self.c.internal_errors += 1
+                self.last_error = f"internal: {type(e).__name__}: {e}"[:200]
+                log.exception(json.dumps({"msg": "item failed", "txid": txid}))
+                # if even this write fails (database unusable) the task dies -> fatal exit
+                self.store.add_failed(
+                    txid, first_seen, self.clock(), f"internal:{type(e).__name__}"
+                )
             finally:
                 self.queue.task_done()
             if (
@@ -440,25 +512,38 @@ class Collector:
             with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                 loop.add_signal_handler(sig, self.stop.set)
         tasks = [asyncio.create_task(self._ws_loop(), name="ws")]
-        tasks += [asyncio.create_task(self._worker()) for _ in range(self.cfg.fetch_concurrency)]
+        tasks += [
+            asyncio.create_task(self._worker(), name=f"worker-{i}")
+            for i in range(self.cfg.fetch_concurrency)
+        ]
         tasks.append(asyncio.create_task(self._heartbeat(), name="heartbeat"))
+        stopper = asyncio.ensure_future(self.stop.wait())
         try:
-            if duration is None:
-                await self.stop.wait()
-            else:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self.stop.wait(), timeout=duration)
+            # Supervise: return on stop, on the duration, or as soon as any pipeline task
+            # ends (they only end by raising). A dead task means the process must restart.
+            done, _ = await asyncio.wait(
+                {stopper, *tasks}, timeout=duration, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in tasks:
+                if t in done and not self.stop.is_set():
+                    exc = t.exception() if not t.cancelled() else None
+                    self.fatal = f"task {t.get_name()} died: {type(exc).__name__}: {exc}"[:300]
+                    log.critical(json.dumps({"msg": "pipeline task died", "error": self.fatal}))
+                    break
         finally:
+            stopper.cancel()
             self.stop.set()
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            self.state = "stopped"
+            self.state = "failed" if self.fatal else "stopped"
+            self.last_error = self.fatal or self.last_error
             self.connected_since = None
-            if self._outage_id is not None:
-                self.store.close_outage(self._outage_id, self.clock())
-                self._outage_id = None
-            self.flush()
+            with contextlib.suppress(Exception):  # the database may be what failed
+                if self._outage_id is not None:
+                    self.store.close_outage(self._outage_id, self.clock())
+                    self._outage_id = None
+                self.flush()
             if self._own_http:
                 await self.http.aclose()
             for sig in (signal.SIGINT, signal.SIGTERM):

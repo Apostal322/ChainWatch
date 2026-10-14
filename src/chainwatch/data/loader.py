@@ -16,8 +16,9 @@ import numpy as np
 import pandas as pd
 
 from chainwatch.data import schema as S
-from chainwatch.data.download import verify_raw_dir
-from chainwatch.utils import get_logger, read_json, write_json
+from chainwatch.data.download import REMOTE_FILES
+from chainwatch.data.synthetic import SYNTHETIC_MARKER
+from chainwatch.utils import get_logger, read_json, sha256_file, write_json
 
 log = get_logger(__name__)
 
@@ -217,6 +218,29 @@ def build_dataset(features: pd.DataFrame, classes: pd.DataFrame, edges: pd.DataF
     return Dataset(transactions=tx, edges=e.reset_index(drop=True))
 
 
+MANIFEST_VERSION = 2
+
+
+def raw_file_provenance(raw_dir: Path) -> dict[str, dict]:
+    """Fingerprint each raw file actually on disk and compare it with the published one.
+
+    ``sha256``/``size_bytes`` describe the file that was read; ``published_sha256`` is the
+    upstream LFS object id; ``matches_published`` is True only if both size and digest agree.
+    """
+    out: dict[str, dict] = {}
+    for rf in REMOTE_FILES:
+        path = raw_dir / rf.name
+        actual = sha256_file(path)
+        size = path.stat().st_size
+        out[rf.name] = {
+            "sha256": actual,
+            "size_bytes": size,
+            "published_sha256": rf.sha256,
+            "matches_published": actual == rf.sha256 and size == rf.size,
+        }
+    return out
+
+
 def prepare(raw_dir: Path, processed_dir: Path) -> ValidationReport:
     """Validate raw files and write the canonical Parquet cache plus a manifest."""
     features, classes, edges = read_raw(raw_dir)
@@ -226,22 +250,22 @@ def prepare(raw_dir: Path, processed_dir: Path) -> ValidationReport:
     ds.transactions.to_parquet(processed_dir / TRANSACTIONS_PARQUET, index=False)
     ds.edges.to_parquet(processed_dir / EDGES_PARQUET, index=False)
 
-    from chainwatch.data.download import REMOTE_FILES
-
-    verified = verify_raw_dir(raw_dir)
+    raw_files = raw_file_provenance(raw_dir)
     write_json(
         processed_dir / MANIFEST_JSON,
         {
+            "manifest_version": MANIFEST_VERSION,
             "source": "Elliptic++ transactions dataset (git-disl/EllipticPlusPlus)",
-            "raw_files": {
-                rf.name: {"sha256": rf.sha256, "matches_published": verified[rf.name]}
-                for rf in REMOTE_FILES
-            },
+            "synthetic": (raw_dir / SYNTHETIC_MARKER).exists(),
+            "raw_files": raw_files,
             "validation": report.to_dict(),
         },
     )
-    if not all(verified.values()):
-        log.warning("Raw files do not match published hashes: %s", verified)
+    if not all(v["matches_published"] for v in raw_files.values()):
+        log.warning(
+            "Raw files do not match published hashes: %s",
+            {k: v["matches_published"] for k, v in raw_files.items()},
+        )
     log.info("Wrote processed dataset to %s", processed_dir)
     return report
 
