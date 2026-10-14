@@ -301,12 +301,15 @@ def test_disconnect_outage_starts_at_the_last_message(tmp_path):
             port = srv.sockets[0].getsockname()[1]
             cfg = _cfg(tmp_path, ws_url=f"ws://127.0.0.1:{port}", stale_after_s=1.0)
             col = Collector(cfg, LiveStore(cfg.db_path), http=_rest())
-            await col.run(duration=1.6)
+            # long enough for a slow runner to connect, receive, and let the watchdog fire
+            # (1.6 s failed on Windows CI); reconnects add outages, each starting at its last
+            # message
+            await col.run(duration=4.0)
             return cfg
 
     cfg = asyncio.run(go())
     disc = [o for o in LiveReader(cfg.db_path).outages(0) if o["kind"] == "disconnected"]
-    assert disc and disc[0]["ended_at"] - disc[0]["started_at"] >= 0.9
+    assert disc and all(o["ended_at"] - o["started_at"] >= 0.9 for o in disc)
 
 
 # ---- backup / restore -------------------------------------------------------------------
