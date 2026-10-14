@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.5.0: live Bitcoin mempool monitor MVP (2026-10)
+
+- **Collector** (`chainwatch live-collect`, `src/chainwatch/live/`): asynchronous pipeline
+  from the mempool.space WebSocket (`track-mempool-txids`) through REST details to
+  observation-time features and SQLite.
+  - reconnection with exponential backoff and jitter, plus a staleness watchdog;
+  - bounded dedupe, queue and retention; deterministic sampling;
+  - token-bucket request limit that honours HTTP 429 `Retry-After`;
+  - timeouts, idempotent storage, graceful shutdown and metrics.
+- **API** (`/v1/live/status|transactions|transactions/{txid}|stats|events`): read-only,
+  with SSE streaming. Disabled (404 `live_disabled`) unless `live.enabled`; the API never
+  contacts mempool.space.
+- **Dashboard:** "Live monitor" tab with connection state, throughput and fee-rate charts,
+  a filterable feed, a detail panel with mempool.space links, and explicit labels for
+  real, synthetic and mock data.
+- **Features and indicators** respect Bitcoin semantics (change outputs, no ownership
+  inference). Indicators are rule-based, not predictions. No Elliptic++ model is applied
+  to live data.
+- **Tests:** 44 new Python tests (local WebSocket and REST mocks), 3 frontend helper tests;
+  `scripts/live_load_test.py`; `scripts/mock_mempool.py`.
+- **Not verified:** real mempool.space ingestion. The build environment's proxy refused
+  every connection (HTTP 403).
+- The public demo image and `render.yaml` (0.4.1) are unchanged. No research result
+  changed.
+
 ## v0.4.1: deployable on Render Free (2026-10)
 
 - **Fix:** the first Render deployment failed after 2 h (exit 143), because Render's

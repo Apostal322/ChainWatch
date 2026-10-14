@@ -13,6 +13,7 @@ export interface Info {
   scoring_assumption: string;
   disclaimer: string;
   n_models: number;
+  live_enabled: boolean;
 }
 
 export interface StepSummary {

@@ -119,3 +119,20 @@ tbody tr[aria-selected="true"] { background: var(--surface-2); box-shadow: inset
 .chart-tooltip .row { display: flex; align-items: center; gap: 6px; }
 .chart-tooltip .row b { min-width: 46px; text-align: right; }
 .chart-tooltip .key { width: 12px; height: 2px; display: inline-block; }
+
+/* ---- live monitor (real network data; distinct from the synthetic banner) ---- */
+.live-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px; font-size: 12.5px; }
+.badge.real { background: var(--surface-2); color: var(--ink); font-weight: 600; border-color: var(--ink-2); }
+.badge.conn i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); }
+.badge.conn.ok i { background: var(--s3); }
+.badge.conn.warn i { background: var(--warn-ink); }
+.badge.conn.off { color: var(--ink-2); }
+pre.code { background: var(--surface-2); border-radius: 8px; padding: 8px 10px; overflow-x: auto; font-size: 12px; }
+.small { font-size: 12px; }
+.chip.flag { margin: 0 4px 2px 0; color: var(--ink-2); }
+.filters label.inline { display: flex; align-items: center; gap: 6px; }
+.filters input[type="number"] { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; color: inherit; }
+ul.refs { columns: 2; padding-left: 18px; font-size: 12px; margin: 4px 0; }
+.scroll.feed { max-height: 560px; overflow-y: auto; }
+.scroll.feed thead th { position: sticky; top: 0; background: var(--surface); }
+code.nowrap, td.nowrap { white-space: nowrap; }

@@ -3,7 +3,7 @@
 [![CI](https://github.com/Apostal322/ChainWatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Apostal322/ChainWatch/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Python 3.11–3.13](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)
-![Tests](https://img.shields.io/badge/tests-265%20Python%20%2B%203%20frontend-brightgreen)
+![Tests](https://img.shields.io/badge/tests-309%20Python%20%2B%206%20frontend-brightgreen)
 
 **How well does an illicit-transaction ranking model hold up when behaviour changes over
 time, and does retraining on newly arriving labels help?**
@@ -13,9 +13,10 @@ Bitcoin dataset (203,769 transactions, 49 time steps, 77% unlabelled) with a
 leakage-guarded, pre-registered temporal study. It then serves the frozen research models
 through a FastAPI and React replay application that reproduces the research scores exactly.
 
-> **Scope.** A *historical replay* of a research dataset, not live blockchain monitoring.
-> Scores rank transactions by similarity to past *labelled* illicit activity; they are not
-> calibrated probabilities, evidence of crime, or validated for current transactions.
+> **Scope.** The research and its replay are *historical*. Scores rank transactions by
+> similarity to past *labelled* illicit activity; they are not calibrated probabilities,
+> evidence of crime, or validated for current transactions. A separate, opt-in
+> [live monitor](docs/LIVE_MONITOR.md) observes real mempool data and applies **no** model.
 
 ![ChainWatch replay dashboard on synthetic demo data](docs/images/demo_replay.png)
 <sub>Replay dashboard running the synthetic demo (every screenshot in this repository uses
@@ -107,6 +108,31 @@ Research numbers are guaranteed for the recorded library versions (scikit-learn 
 xgboost 3.4.1, Python 3.13); every artifact records its config, seed, data hashes and
 git commit.
 
+## Live Bitcoin monitor (Phase 5, local and opt-in)
+
+A zero-cost asynchronous pipeline:
+1. the mempool.space WebSocket (`track-mempool-txids`) announces new txids;
+2. they are validated and deduplicated, and a 5% hash sample is taken;
+3. details are fetched over REST, rate-limited (30 requests/min, pauses on HTTP 429) with
+   bounded queues;
+4. observation-time features and **rule-based** indicators are computed;
+5. results go to SQLite, then to a read-only FastAPI (`/v1/live/*`, server-sent events)
+   and the "Live monitor" tab.
+
+```bash
+chainwatch --config configs/live.yaml live-collect     # separate process; talks to mempool.space
+chainwatch --config configs/live.yaml serve            # dashboard reads the SQLite file
+```
+
+* Live mode is **disabled** in the public demo and in every other config.
+* The tab labels real network data separately from synthetic data, and labels any
+  non-mempool.space source as a mock.
+* Output sums are never treated as payment amounts, and no ownership is inferred.
+* Real ingestion has **not** been verified from the build environment (its proxy blocks
+  mempool.space). Verification status, measurements and limitations are in
+  [docs/LIVE_MONITOR.md](docs/LIVE_MONITOR.md), and a plan for a properly evaluated live
+  model in [docs/LIVE_ML_PROPOSAL.md](docs/LIVE_ML_PROPOSAL.md).
+
 ## Limitations
 
 - **No untouched holdout.** Steps 35–49 were inspected in Phase 1, so the retraining gains
@@ -122,13 +148,13 @@ git commit.
 ## Repository layout
 
 ```text
-src/chainwatch/   data, features, training, evaluation, backtest, analysis, serving (API)
+src/chainwatch/   data, features, training, evaluation, backtest, analysis, serving (API), live
 frontend/         React + TypeScript dashboard
-configs/          default.yaml (real data), demo.yaml, public-demo.yaml (hosted demo)
-tests/            265 tests: leakage canaries, metrics, backtest causality, API contract
+configs/          default.yaml (real data), demo.yaml, public-demo.yaml (hosted demo), live.yaml
+tests/            309 tests: leakage canaries, metrics, backtest causality, API contract
 reports/          committed aggregate results and figures (no row-level data)
 docs/             case study, protocols, results, inference contract, deployment, audit
-scripts/          screenshot capture, demo smoke test
+scripts/          screenshot capture, demo smoke test, mock mempool, live load test
 ```
 
 ## Documentation
@@ -139,7 +165,8 @@ scripts/          screenshot capture, demo smoke test
 | [Temporal robustness](docs/TEMPORAL_ROBUSTNESS.md) · [protocol](docs/PHASE2_PROTOCOL.md) | Phase 2 research, CIs and negative results |
 | [Results](docs/RESULTS.md) · [evaluation](docs/EVALUATION.md) · [dataset card](docs/DATASET.md) | Phase 1 baselines, metrics, data provenance and licensing |
 | [Inference contract](docs/INFERENCE_CONTRACT.md) · [architecture](docs/ARCHITECTURE.md) | what the service may claim and how it is built |
-| [Deployment](docs/DEPLOYMENT.md) · [audit](docs/AUDIT.md) · [release readiness](docs/RELEASE_READINESS.md) · [changelog](CHANGELOG.md) | hosting, security review, release checklist, v0.4.0 notes |
+| [Deployment](docs/DEPLOYMENT.md) · [audit](docs/AUDIT.md) · [release readiness](docs/RELEASE_READINESS.md) · [changelog](CHANGELOG.md) | hosting, security review, release checklist, release notes |
+| [Live monitor](docs/LIVE_MONITOR.md) · [live ML proposal](docs/LIVE_ML_PROPOSAL.md) | Phase 5 data pipeline, API contract, limits, measurements |
 | [Interview guide](docs/INTERVIEW_GUIDE.md) · [portfolio material](docs/PORTFOLIO.md) | explanations and verified resume bullets |
 
 ## Development
@@ -151,8 +178,10 @@ scripts/smoke_demo.sh http://localhost:8000      # end-to-end check of a running
 ```
 
 **Status.** Completed: data pipeline, Phase 1 baselines, Phase 2 pre-registered backtest
-and shift diagnostics, replay service and dashboard, Docker, CI. Planned (not
-implemented): pickle-free model format, label-efficiency study, probability calibration
+and shift diagnostics, replay service and dashboard, Docker, CI, live mempool monitor MVP
+(no model). Planned (not
+implemented): a properly evaluated live-data model, pickle-free model format,
+label-efficiency study, probability calibration
 under prior shift, and a graph-model comparison only after a cheaper graph-feature
 baseline. ChainWatch contains no graph neural network.
 

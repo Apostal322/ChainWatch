@@ -1,0 +1,13 @@
+# LOCAL live Bitcoin monitor (docs/LIVE_MONITOR.md). Opt-in; never used by the public demo.
+# Terminal 1:  chainwatch --config configs/live.yaml live-collect     (talks to mempool.space)
+# Terminal 2:  chainwatch --config configs/live.yaml serve            (reads the SQLite file)
+# The replay tabs keep showing the SYNTHETIC demo (demo-setup first); live data is real and
+# labelled separately in the "Live monitor" tab.
+extends: demo.yaml
+
+live:
+  enabled: true
+  db_path: data/live/live.sqlite
+  sample_rate: 0.05         # ~5% of announced txids: about 18 detail requests/min at 6 tx/s
+  fetch_per_minute: 30      # well below the 200 req/min in mempool's sample nginx config
+  fetch_concurrency: 2

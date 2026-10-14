@@ -203,6 +203,48 @@ class ServingConfig:
 
 
 @dataclass
+class LiveConfig:
+    """Phase 5 live Bitcoin monitor (docs/LIVE_MONITOR.md). Disabled unless opted in.
+
+    ``enabled`` only exposes the read-only /v1/live API over ``db_path``; the collector that
+    talks to mempool.space is a separate process (``chainwatch live-collect``).
+    """
+
+    enabled: bool = False
+    db_path: Path = field(default_factory=lambda: _resolve("data/live/live.sqlite"))
+    ws_url: str = "wss://mempool.space/api/v1/ws"
+    rest_base: str = "https://mempool.space/api"
+    explorer_tx_url: str = "https://mempool.space/tx/"
+    sample_rate: float = 0.05  # fraction of announced txids whose details are fetched
+    fetch_per_minute: int = 30  # REST detail requests per minute (hard cap)
+    fetch_burst: int = 5
+    fetch_concurrency: int = 2
+    request_timeout_s: float = 10.0
+    queue_max: int = 200  # pending detail fetches; newer txids are dropped when full
+    max_queue_age_s: float = 300.0  # skip queued txids older than this (no stale backfill)
+    dedupe_max: int = 200_000  # txids remembered for deduplication (bounded LRU)
+    retention_rows: int = 20_000  # stored transactions kept in SQLite
+    reconnect_base_s: float = 1.0
+    reconnect_max_s: float = 60.0
+    stale_after_s: float = 90.0  # reconnect if no message arrives for this long
+    heartbeat_s: float = 5.0
+    sse_max_clients: int = 20
+    sse_max_seconds: float = 300.0  # clients reconnect automatically after this
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LiveConfig:
+        d = dict(d)
+        if "db_path" in d:
+            d["db_path"] = _resolve(d["db_path"])
+        cfg = cls(**d)
+        if not 0.0 < cfg.sample_rate <= 1.0:
+            raise ValueError("live.sample_rate must be in (0, 1]")
+        if cfg.fetch_per_minute < 1 or cfg.fetch_concurrency < 1 or cfg.queue_max < 1:
+            raise ValueError("live fetch limits and queue_max must be positive")
+        return cfg
+
+
+@dataclass
 class Config:
     seed: int
     paths: PathsConfig
@@ -214,6 +256,7 @@ class Config:
     tracking: TrackingConfig
     backtest: BacktestConfig | None = None
     serving: ServingConfig | None = None
+    live: LiveConfig = field(default_factory=LiveConfig)
     source_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -229,10 +272,11 @@ class Config:
         d = asdict(self)
         d["paths"] = {k: str(v) for k, v in d["paths"].items()}
         d["source_path"] = str(self.source_path) if self.source_path else None
-        if d.get("serving"):
-            d["serving"] = {
-                k: str(v) if isinstance(v, Path) else v for k, v in d["serving"].items()
-            }
+        for section in ("serving", "live"):
+            if d.get(section):
+                d[section] = {
+                    k: str(v) if isinstance(v, Path) else v for k, v in d[section].items()
+                }
         return d
 
 
@@ -280,5 +324,6 @@ def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None
         tracking=TrackingConfig(**raw.get("tracking", {})),
         backtest=BacktestConfig.from_dict(raw["backtest"]) if raw.get("backtest") else None,
         serving=ServingConfig.from_dict(raw["serving"]) if raw.get("serving") else None,
+        live=LiveConfig.from_dict(raw.get("live") or {}),
         source_path=path.resolve(),
     )

@@ -147,7 +147,7 @@ but I can only say my results are consistent with that, not confirm it.
    publisher and cannot be computed for new data.
 
 ### How was it tested?
-- **Python (265 tests):** schema and join, split and leakage guards, label-latency
+- **Python (309 tests):** schema and join, split and leakage guards, label-latency
   canaries, schedule causality (parametrised over strategies, origins and latencies),
   metrics against hand-computed values (including tie-aware P@K), block bootstrap,
   registry integrity (tampering, version mismatch, path traversal, per-card provenance),

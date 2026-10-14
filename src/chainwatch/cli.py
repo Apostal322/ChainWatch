@@ -189,6 +189,33 @@ def _cmd_verify_replay(args, cfg) -> None:
         raise SystemExit(1)
 
 
+def _cmd_live_collect(args, cfg) -> None:
+    """Run the live mempool collector (talks to mempool.space; writes cfg.live.db_path)."""
+    import asyncio
+    import dataclasses
+    import json
+
+    from chainwatch.live.collector import Collector
+    from chainwatch.live.store import LiveStore
+
+    live = cfg.live
+    if args.db:
+        live = dataclasses.replace(live, db_path=args.db.resolve())
+    if args.sample_rate is not None:
+        live = dataclasses.replace(live, sample_rate=args.sample_rate)
+    if not live.enabled and not args.force:
+        raise SystemExit(
+            "live monitoring is disabled in this config; use configs/live.yaml "
+            "(or pass --force for a one-off bounded run)"
+        )
+    store = LiveStore(live.db_path)
+    try:
+        c = asyncio.run(Collector(live, store).run(args.duration, args.max_fetches))
+    finally:
+        store.close()
+    print(json.dumps({"db": str(live.db_path), **dataclasses.asdict(c)}, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="chainwatch", description=__doc__)
     p.add_argument(
@@ -279,6 +306,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("backtest-report", help="tables, CIs and figures -> reports/phase2/backtest")
     s.set_defaults(func=_cmd_backtest_report)
+
+    # ---- Phase 5 ----------------------------------------------------------------
+    s = sub.add_parser(
+        "live-collect", help="collect REAL mempool observations from mempool.space (opt-in)"
+    )
+    s.add_argument("--duration", type=float, default=None, help="stop after N seconds")
+    s.add_argument("--max-fetches", type=int, default=None, help="stop after N detail requests")
+    s.add_argument("--db", type=Path, default=None, help="override live.db_path")
+    s.add_argument("--sample-rate", type=float, default=None, help="override live.sample_rate")
+    s.add_argument("--force", action="store_true", help="run even if live.enabled is false")
+    s.set_defaults(func=_cmd_live_collect)
     return p
 
 
