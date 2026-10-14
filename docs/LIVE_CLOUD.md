@@ -108,7 +108,8 @@ happens and you accept the card risk.
 | `configs/live-cloud.yaml` | VM settings: 2 % sample, 12 requests/min, 50k rows, 7 days |
 | `configs/public-demo-live.yaml` | Render dashboard in remote mode (URL and token from environment variables) |
 | `requirements/live.lock.txt` | hash-locked VM dependencies (x86-64 and ARM64) |
-| `deploy/oracle/*.service`, `*.timer` | systemd units: collector, edge API, daily backup |
+| `deploy/oracle/*.service`, `*.timer` | systemd units: collector, edge API, daily backup, daily indicator refresh (`chainwatch-indicators`: official OFAC XML, falling back to the mirror) |
+| `src/chainwatch/risk/` | risk engine run inside the collector: address screening, observed-graph relations, anomaly detector, supervised gate, alerts ([RISK_ENGINE.md](RISK_ENGINE.md)) |
 | `deploy/oracle/Caddyfile.template` | HTTPS reverse proxy, everything except the edge routes answers 404 |
 | `deploy/oracle/install.sh` | idempotent installer (packages, user, directories, venv, token, units, Caddy, firewall) |
 | `deploy/oracle/smoke_live.sh` | post-deployment smoke test |
@@ -127,7 +128,9 @@ happens and you accept the card risk.
 | Health metrics | heartbeat every 5 s, about 20 counters, `/health/ready` (200 only when connected with a fresh heartbeat), `chainwatch-live report` |
 | Outage and gap tracking | `outages` table: `collector_down`, `disconnected` (WebSocket; starts at the last received message, so watchdog latency counts as down time), `sequence_gap`. A sequence gap is recorded when mempool's `sequence` (+1 per update, every update sent to every subscriber) jumps by more than 1 within one connection. These feed availability in `/v1/live/status` and the dashboard |
 | Retention and bounded growth | ≤ 50,000 transactions (pruned every 60 s, so up to one minute of fetches, ≤ 12 rows here, above the cap while running; pruned again on a clean stop) and ≤ 7 days, 24 h of per-minute counters, 30 days of outages; hourly `wal_checkpoint(TRUNCATE)`; journald capped at 200 MB; 7 rotated backups |
-| Resource caps | systemd `MemoryMax=300M` / `250M`, `CPUQuota=50%`, `TasksMax=64` |
+| Resource caps | systemd `MemoryMax=300M` / `250M`, `CPUQuota=50%`, `TasksMax=64`; indicator refresh `MemoryMax=400M` (the 122 MB official XML is streamed: 16 MB peak Python memory measured) |
+| Indicator freshness | the refresh runs daily (04:41 + up to 15 min, and 5 min after boot). A failed refresh keeps the previous version and exits 1 (visible in `systemctl --failed`); a source older than 7 days is reported `stale` in the API and the dashboard. The collector reloads new versions on its next heartbeat and raises retrospective alerts for stored transactions |
+| Risk assessment cost | about 2 ms per fetched transaction with a full anomaly window and 531 indicators (§8 measurement environment); the observation and its assessment are committed together |
 
 ## 6. Security model
 

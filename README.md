@@ -3,7 +3,7 @@
 [![CI](https://github.com/Apostal322/ChainWatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Apostal322/ChainWatch/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Python 3.11–3.13](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)
-![Tests](https://img.shields.io/badge/tests-376%20Python%20%2B%2020%20frontend-brightgreen)
+![Tests](https://img.shields.io/badge/tests-410%20Python%20%2B%2041%20frontend-brightgreen)
 
 **How well does an illicit-transaction ranking model hold up when behaviour changes over
 time, and does retraining on newly arriving labels help?**
@@ -17,7 +17,9 @@ through a FastAPI and React replay application that reproduces the research scor
 > **Scope.** The research and its replay are *historical*. Scores rank transactions by
 > similarity to past *labelled* illicit activity; they are not calibrated probabilities,
 > evidence of crime, or validated for current transactions. A separate, opt-in
-> [live monitor](docs/LIVE_MONITOR.md) observes real mempool data and applies **no** model.
+> [live monitor](docs/LIVE_MONITOR.md) observes real mempool data and applies **no** trained
+> model: it screens addresses against sourced lists (OFAC SDN) and flags statistically unusual
+> transactions, each reported by its own layer and never as evidence of fraud.
 
 ![ChainWatch replay dashboard on synthetic demo data](docs/images/demo_replay.png)
 <sub>Replay dashboard running the synthetic demo (every screenshot in this repository uses
@@ -130,8 +132,10 @@ chainwatch --config configs/live.yaml serve            # dashboard reads the SQL
 * The tab labels real network data separately from synthetic data, and labels any
   non-mempool.space source as a mock.
 * Output sums are never treated as payment amounts, and no ownership is inferred.
-* Real ingestion has **not** been verified from the build environment (its proxy blocks
-  mempool.space). Verification status, measurements and limitations are in
+* The build environment cannot reach mempool.space. The maintainer reported a run against
+  the real network from Windows: 471 txids received in 120 s, 16 fetched, no rate-limit
+  errors and no reconnections. That shows the pipeline works on real data; it says nothing
+  about continuous reliability. Verification status, measurements and limitations are in
   [docs/LIVE_MONITOR.md](docs/LIVE_MONITOR.md), and a plan for a properly evaluated live
   model in [docs/LIVE_ML_PROPOSAL.md](docs/LIVE_ML_PROPOSAL.md).
 
@@ -151,6 +155,30 @@ idempotent `install.sh` and `smoke_live.sh`.
 Nothing has been deployed, and no 24/7 reliability is claimed. See
 [docs/LIVE_CLOUD.md](docs/LIVE_CLOUD.md) for provider limits, Oracle's idle-reclamation
 risk, the manual activation steps and the 24-hour test plan.
+
+### Risk intelligence (v0.7.0, live monitor)
+
+Every fetched transaction is assessed by separate layers that are never blended into one
+score ([contracts](docs/RISK_ENGINE.md)):
+
+| Layer | Output | Means | Does not mean |
+|---|---|---|---|
+| A. Screening | `SCREENING_MATCH` + provenance, or `NO_KNOWN_SCREENING_MATCH`, `SCREENING_DATA_UNAVAILABLE`, `INSUFFICIENT_INFORMATION` | an enabled source (OFAC SDN, refreshed daily, versioned) lists an input or output address | fraud, or who controls the funds |
+| A'. Observed graph | `RELATION_FOUND` (distance 2, observed data only) | the tx spends an output of an observed tx that spent from a listed address | ownership or culpability |
+| B. Behavioural anomaly | `ANOMALY` with per-measurement explanations | tail of recent sampled traffic (empirical p ≤ 0.002 and robust z ≥ 3) | wrongdoing (batch payouts and CoinJoins are unusual) |
+| C. Supervised | `NO_VALIDATED_MODEL`, always | no labelled data maps to live features ([feasibility](docs/RISK_DATA_FEASIBILITY.md)) | |
+
+* Screening is point in time: a listing counts only from when this deployment fetched it,
+  and matches found later are separate retrospective alerts that never rewrite records.
+* Alerts are grouped and deduplicated in a review queue (new, under review, dismissed,
+  resolved, insufficient evidence). Statuses change only via the collector's CLI, and
+  nothing is sent externally.
+* The Layer C decision was tested offline. Restricted to the 16 Elliptic++ features a
+  collector could compute, XGBoost keeps AP 0.646 against 0.797 with all 182 features, and
+  collapses after step 42 like every model. Exploratory only; rejected for promotion
+  ([results](docs/LIVE_FEATURE_SUBSET_RESULTS.md)).
+* Verified with real OFAC data: the official XML (516 addresses, streamed in 16 MB) and the
+  mirror (531). Anomaly behaviour on real traffic has **not** been measured yet.
 
 ## Limitations
 
@@ -174,7 +202,7 @@ risk, the manual activation steps and the 24-hour test plan.
 src/chainwatch/   data, features, training, evaluation, backtest, analysis, serving (API), live
 frontend/         React + TypeScript dashboard
 configs/          default.yaml (real data), demo.yaml, public-demo.yaml (hosted demo), live.yaml
-tests/            376 tests: leakage canaries, metrics, backtest causality, API contract
+tests/            410 tests: leakage canaries, metrics, backtest causality, API contract, risk
 reports/          committed aggregate results and figures (no row-level data)
 docs/             case study, protocols, results, inference contract, deployment, audit
 deploy/oracle/     always-on collector: systemd units, Caddy, install and smoke scripts
@@ -192,6 +220,7 @@ scripts/          screenshot capture, demo smoke test, mock mempool (with fault 
 | [Inference contract](docs/INFERENCE_CONTRACT.md) · [architecture](docs/ARCHITECTURE.md) | what the service may claim and how it is built |
 | [Deployment](docs/DEPLOYMENT.md) · [audit](docs/AUDIT.md) · [release readiness](docs/RELEASE_READINESS.md) · [changelog](CHANGELOG.md) | hosting, security review, release checklist, release notes |
 | [Live monitor](docs/LIVE_MONITOR.md) · [always-on cloud kit](docs/LIVE_CLOUD.md) · [live ML proposal](docs/LIVE_ML_PROPOSAL.md) | Phase 5 data pipeline, API contract, limits, measurements; 24/7 deployment plan |
+| [Risk engine](docs/RISK_ENGINE.md) · [data feasibility](docs/RISK_DATA_FEASIBILITY.md) · [feature-subset results](docs/LIVE_FEATURE_SUBSET_RESULTS.md) | screening, anomaly and supervised-gate contracts; dataset decision gate; Layer C experiment |
 | [Interview guide](docs/INTERVIEW_GUIDE.md) · [portfolio material](docs/PORTFOLIO.md) | explanations and verified resume bullets |
 
 ## Development

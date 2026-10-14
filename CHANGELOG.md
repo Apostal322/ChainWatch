@@ -1,5 +1,69 @@
 # Changelog
 
+## v0.7.0: risk intelligence for the live monitor (2026-10, not deployed)
+
+- **Separate assessment layers.** Every fetched transaction is assessed by separate layers
+  that are never blended into one score (`src/chainwatch/risk/`, [RISK_ENGINE.md](docs/RISK_ENGINE.md)):
+  - **A. Source-backed screening**:
+    - address extraction (`live-features/2`);
+    - base58check / bech32 / bech32m validation;
+    - versioned OFAC SDN snapshots: the official XML is streamed, and a third-party
+      mirror is the fallback;
+    - point-in-time matching with full provenance;
+    - outcomes `SCREENING_MATCH`, `NO_KNOWN_SCREENING_MATCH`,
+      `SCREENING_DATA_UNAVAILABLE`, `INSUFFICIENT_INFORMATION`.
+  - **A'. Observed-graph relations** at distance 2, within this collector's observations
+    only.
+  - **B. Behavioural anomalies** (`robust-tail/1`):
+    - empirical tail probability and robust z over 8 measurements, against the previous
+      2,000 fetched transactions;
+    - `INSUFFICIENT_BASELINE` below 500;
+    - per-measurement explanations.
+  - **C. Supervised gate**: a model card must prove live validation, so the layer returns
+    `NO_VALIDATED_MODEL`.
+- **Engine behaviour.**
+  - Each layer runs in its own guard, so one failure does not stop the others.
+  - An ordinal review priority (P1–P4) that is not a probability.
+  - `insufficient_evidence` abstention.
+  - About 2 ms per transaction.
+- **Alerts.**
+  - Grouped and deduplicated review queue; a repeat of a dismissed alert is suppressed, a
+    repeat of a resolved one reopens it.
+  - Retrospective alerts when a later snapshot lists an earlier observed address; the
+    original record is never rewritten.
+  - Statuses change through the CLI only (`chainwatch-live alerts`), with an audit log.
+  - No external notifications.
+- **Lifecycle.** mined / removed / replaced states are tracked for display only.
+- **API.**
+  - New routes: `/v1/live/risk/summary`, `/v1/live/findings`, `/v1/live/alerts`.
+  - `risk` and `lifecycle` in the transaction detail; `risk_priority` and `risk_assessed`
+    in feed rows.
+  - Proxied by the remote backend.
+- **Dashboard.** Risk overview, investigation queue, recent findings, a per-transaction
+  assessment with evidence and limitations, and a priority column. Mock data is labelled
+  everywhere, and the wording is checked by tests.
+- **Deploy.**
+  - `chainwatch-indicators.service` / `.timer`: daily refresh, `MemoryMax=400M`.
+  - `chainwatch-live indicators update|status` with `--fallback` and `--file`.
+- **Data feasibility and Layer C decision** ([RISK_DATA_FEASIBILITY.md](docs/RISK_DATA_FEASIBILITY.md)):
+  - no labelled dataset maps to live features under usable terms, so no live model is
+    trained;
+  - a pre-registered offline diagnostic ([results](docs/LIVE_FEATURE_SUBSET_RESULTS.md))
+    restricted Elliptic++ to the 16 live-computable features;
+  - XGBoost AP fell from 0.797 to 0.646 (paired Δ −0.151, 95% [−0.216, −0.089]) and
+    collapses after step 42;
+  - rejected for promotion.
+- **Verification.**
+  - 34 risk tests, 410 Python and 41 frontend tests in total.
+  - The browser end-to-end test now covers TEST indicator list → matches → UI.
+  - The soak test now refreshes indicators mid-run and checks that every row is
+    assessed.
+  - Real OFAC data parsed: official XML 516 addresses, mirror 531.
+  - Audit findings: [AUDIT.md](docs/AUDIT.md#v070-risk-intelligence-audit).
+- **Not done.**
+  - No measurement of the anomaly layer on real traffic.
+  - Nothing deployed.
+
 ## v0.6.0: always-on collector kit (2026-10, prepared, not deployed)
 
 - **`chainwatch-live`** is a lightweight entry point with no ML imports. Commands:

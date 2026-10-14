@@ -1,7 +1,36 @@
 # Engineering audits
 
+* [v0.7.0 risk intelligence audit](#v070-risk-intelligence-audit) (2026-10): screening, indicator parsing, anomaly detector, engine, alerts, dashboard.
 * [v0.6.0 audit](#v060-engineering-audit-live-monitor-cloud-kit-research-claims) (2026-10): live collector, edge API and remote proxy, deployment kit, dashboard, research claims.
 * [Phase 4 audit](#phase-4-engineering-audit-release-readiness): serving layer and release.
+
+## v0.7.0 risk intelligence audit
+
+Problems found while building and testing the risk layers. Sources of evidence:
+* the real OFAC files (official XML of 2026-01-30, mirror);
+* a dashboard built against the API, which surfaced several API problems;
+* the browser end-to-end and soak tests.
+
+None of these problems was deployed.
+
+| # | Sev | Component | Problem | Fix | Evidence |
+|---|---|---|---|---|---|
+| R1 | P1 | indicator parser | Parsing the official XML as a tree peaked at 457 MB on an 85 MB file, above the service's 400 MB cap (the real file is 122 MB), so the refresh would have been OOM-killed. A first streaming version still used 206 MB on the real file because the Locations and other list sections were never cleared | streaming parse that clears each finished record of the list sections: 16 MB peak | `test_sdn_xml_streams_from_a_file_with_bounded_memory`; real file measured |
+| R2 | P1 | indicator parser | DTD/ENTITY declarations were refused only in the first 64 KB; a padded file could bypass the check | whole-file scan with overlapping chunks | `test_xml_with_dtd_or_entities_is_refused` (3 MB padding) |
+| R3 | P1 | screening | Availability used the latest snapshot's retrieval time, so addresses listed long ago looked unavailable before each refresh | `available_at` = the first snapshot that contained the address | `test_screening_is_point_in_time` |
+| R4 | P2 | indicator parser | An address shared by two SDN parties kept only the first party (real case: profiles 38419 and 38420) | parties merged into `details.parties`, labels joined | authentic excerpt test |
+| R5 | P2 | indicator semantics | The OFAC entry date (the *party's* designation) was shown as the address listing date | `listed_on` null for OFAC; `party_designated_on` as context | `test_official_sdn_xml_parser_keeps_provenance_and_rejects_non_bitcoin` |
+| R6 | P2 | anomaly detector | Default `min_reference` 200 could never reach `alpha` 0.002 (the smallest tail probability is 1/(n+1)), so no anomaly could ever be flagged | default 500; the configuration is validated | `test_detector_config_must_be_able_to_reach_alpha` |
+| R7 | P2 | collector | The fetched row and its risk record were separate commits, so the event stream could deliver a row before its assessment (priority shown as null) | one transaction; risk writes in a savepoint, so a failed write keeps the observation | `test_failed_risk_write_keeps_the_observation_…`; e2e "every fetched row is assessed" |
+| R8 | P3 | API | `risk_priority: null` was ambiguous; no source staleness or anomaly settings in the summary (the UI hardcoded them); retrospective alerts lacked label/programs; mirror titles repeated the source; "illicit" in layer text | `risk_assessed`, `stale`/`age_s`, settings, full retrospective evidence, source display names, the mirror carries no per-address label, wording | `test_risk_routes_…`, `test_alert_titles_…`, `test_retrospective_screening_…` |
+| R9 | P3 | indicator refresh | The official source cannot be fetched from the build environment (proxy 403) | `--fallback` to the mirror; failures reported, previous version kept, exit 1 | `test_indicator_update_falls_back_and_never_breaks_on_failure` |
+| R10 | P3 | address validation | OFAC files a TRON address under XBT | strict Bitcoin validation; rejected with a reason | real file: 1 rejected entry |
+
+Accepted, not changed:
+* The alert status history (with operator notes) is CLI-only, by design.
+* `available_at` is this deployment's retrieval time, so it lags OFAC's publication by up
+  to a day.
+* Graph relations see only the sampled parents (coverage is reported).
 
 ## v0.6.0 engineering audit (live monitor, cloud kit, research claims)
 
