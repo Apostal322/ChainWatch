@@ -110,7 +110,8 @@ def test_official_sdn_xml_parser_keeps_provenance_and_rejects_non_bitcoin():
     assert len(snap.records) == 1
     r = snap.records[0]
     assert r.address == LISTED and r.label == "EXAMPLE EXCHANGE LTD"
-    assert r.reference == "OFAC SDN profile 9001" and r.listed_on == "2022-04-05"
+    assert r.reference == "OFAC SDN profile 9001" and r.listed_on is None  # not per address
+    assert r.details["party_designated_on"] == "2022-04-05"
     assert r.details["programs"] == ["CYBER2"]
     assert snap.published_at is not None and snap.rejected[0][0].startswith("TUCs")
 
@@ -515,3 +516,21 @@ def test_indicator_update_falls_back_and_never_breaks_on_failure(tmp_path, monke
         httpx.ConnectError("down")))  # fmt: skip
     assert live_cli.main(argv) == 1  # previous version stays in use
     assert len(calls) == 2
+
+
+def test_authentic_sdn_excerpt_parses_with_real_structure():
+    """A byte-identical excerpt of the official sdn_advanced.xml (DateOfIssue 2026-01-30;
+    US government work, public domain; provenance in the file's header comment)."""
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures" / "ofac" / "sdn_advanced_excerpt.xml"
+    snap = parse_ofac_sdn_advanced(path, retrieved_at=0.0)
+    import datetime as dt
+
+    assert dt.datetime.fromtimestamp(snap.published_at, dt.UTC).date().isoformat() == "2026-01-30"
+    programs = {p for r in snap.records for p in r.details["programs"]}
+    assert programs == {"CYBER2", "ILLICIT-DRUGS-EO14059", "RUSSIA-EO14024"}
+    assert len(snap.records) == 5 and all(r.listed_on is None for r in snap.records)
+    assert all(r.details["party_designated_on"] for r in snap.records)
+    # the TRON-style address OFAC filed under "Digital Currency Address - XBT" is rejected
+    assert [raw for raw, _ in snap.rejected] == ["TUCsTq7TofTCJRRoHk6RvhMoS2mJLm5Yzq"]

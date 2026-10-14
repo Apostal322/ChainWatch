@@ -34,7 +34,11 @@ class IndicatorRecord:
     category: str  # e.g. "sanctions"
     label: str  # human-readable listing, e.g. the SDN party name; "" if the source has none
     reference: str  # source-specific identifier, e.g. "SDN profile 12345"
-    listed_on: str | None = None  # the source's own listing date (ISO), when it states one
+    # The source's own date for THIS address listing (ISO), only when the source states one
+    # per address. OFAC does not: its entry date belongs to the party (an address can be
+    # added to a party years later), so it goes to details["party_designated_on"] instead.
+    # Point-in-time screening uses ChainWatch's first snapshot containing the address.
+    listed_on: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -166,16 +170,16 @@ def parse_ofac_sdn_advanced(
     feature_ids: set[str] = set()
     parties: list[tuple[str, str, list[str]]] = []  # (profile id, name, raw addresses)
     entries: dict[str, dict[str, Any]] = {}
-    root_seen = False
+    stack: list[str] = []  # open element names: Sanctions / section / record / ...
     try:
         for event, el in ET.iterparse(stream, events=("start", "end")):
             tag = _local(el.tag)
             if event == "start":
-                if not root_seen:
-                    root_seen = True
-                    if tag != "Sanctions":
-                        raise ValueError(f"unexpected root element {tag!r}")
+                if not stack and tag != "Sanctions":
+                    raise ValueError(f"unexpected root element {tag!r}")
+                stack.append(tag)
                 continue
+            stack.pop()
             if tag == "DateOfIssue":
                 issued = _date(el)
             elif tag == "FeatureType":
@@ -196,7 +200,6 @@ def parse_ofac_sdn_advanced(
                     if raw:
                         pid = profile.get("ID") or el.get("FixedRef") or ""
                         parties.append((pid, _primary_name(profile), raw))
-                el.clear()
             elif tag == "SanctionsEntry":
                 dates = [d for ev in el if _local(ev.tag) == "EntryEvent"
                          for d in [_date(_child(ev, "Date"))] if d]  # fmt: skip
@@ -213,29 +216,52 @@ def parse_ofac_sdn_advanced(
                     "entry_date": min(dates) if dates else None,
                     "programs": programs,
                 }
+            if len(stack) == 2 and stack[1] in _LIST_SECTIONS:
+                # a whole record of a list section (a Location, IDRegDocument, DistinctParty,
+                # SanctionsEntry, ...) has been read: free it. Every section, not only the
+                # ones used, or the unused ones pile up: the real 122 MB file peaked at
+                # 206 MB of Python memory before this, 10 MB after.
                 el.clear()
     finally:
         stream.close()
     if not feature_ids:
         raise ValueError(f"no FeatureType {OFAC_FEATURE_TYPE!r} in this file")
 
-    records: dict[str, IndicatorRecord] = {}
+    # One address can be listed under several parties (e.g. 1H939dom... under profiles 38419
+    # and 38420 in the 2026-01-30 file): keep every party, not just the first.
+    by_addr: dict[str, list[dict[str, Any]]] = {}
     rejected: list[tuple[str, str]] = []
     for pid, name, raw_addresses in parties:
         entry = entries.get(pid, {})
         for raw in raw_addresses:
             addr = _validated(raw, rejected)
-            if addr and addr not in records:
-                records[addr] = IndicatorRecord(
-                    address=addr,
-                    category="sanctions",
-                    label=name,
-                    reference=f"OFAC SDN profile {pid}",
-                    listed_on=entry.get("entry_date"),
-                    details={"programs": entry.get("programs", []), "profile_id": pid},
-                )
-            if len(records) > MAX_RECORDS:
+            if addr is None:
+                continue
+            party = {"profile_id": pid, "name": name,
+                     "party_designated_on": entry.get("entry_date"),
+                     "programs": entry.get("programs", [])}  # fmt: skip
+            if party not in by_addr.setdefault(addr, []):
+                by_addr[addr].append(party)
+            if len(by_addr) > MAX_RECORDS:
                 raise ValueError("too many records")
+    records = {
+        addr: IndicatorRecord(
+            address=addr,
+            category="sanctions",
+            label="; ".join(pt["name"] for pt in ps if pt["name"])[:300],
+            reference="; ".join(f"OFAC SDN profile {pt['profile_id']}" for pt in ps)[:300],
+            listed_on=None,
+            details={
+                "parties": ps,
+                "programs": sorted({p for pt in ps for p in pt["programs"]}),
+                "party_designated_on": min(
+                    (pt["party_designated_on"] for pt in ps if pt["party_designated_on"]),
+                    default=None,
+                ),
+            },
+        )
+        for addr, ps in by_addr.items()
+    }
     return Snapshot(
         source_id=source_id,
         method="ofac-sdn-advanced-xml",
@@ -247,6 +273,17 @@ def parse_ofac_sdn_advanced(
         records=sorted(records.values(), key=lambda r: r.address),
         rejected=rejected,
     )
+
+
+_LIST_SECTIONS = {
+    "DistinctParties",
+    "SanctionsEntries",
+    "Locations",
+    "IDRegDocuments",
+    "ProfileRelationships",
+    "SanctionsEntryLinks",
+    "ReferenceValueSets",
+}
 
 
 def _sha256_file(path: Path) -> str:

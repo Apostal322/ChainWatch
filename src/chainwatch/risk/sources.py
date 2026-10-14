@@ -63,8 +63,12 @@ def fetch(url: str, timeout: float = 120.0, dest: Path | None = None) -> bytes |
     (large sources such as the ~100 MB SDN XML never sit in memory) and the path returned."""
     if urlparse(url).scheme != "https":
         raise ValueError("indicator sources must be fetched over https")
+    # OFAC's sanctions list service answers 403 to requests without a User-Agent
+    headers = {
+        "user-agent": "ChainWatch-indicator-refresh (+https://github.com/Apostal322/ChainWatch)"
+    }
     with (
-        httpx.Client(timeout=timeout, follow_redirects=True) as client,
+        httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as client,
         client.stream("GET", url) as r,
     ):
         r.raise_for_status()

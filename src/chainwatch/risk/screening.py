@@ -124,6 +124,7 @@ class Screener:
                                 "listed_on": lst.listed_on,
                                 "available_at": lst.available_at,
                                 "programs": lst.details.get("programs", []),
+                                "party_designated_on": lst.details.get("party_designated_on"),
                             }
                         )
         if matches:

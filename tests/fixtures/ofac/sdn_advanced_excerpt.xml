@@ -1,0 +1,649 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+Excerpt of the official OFAC SDN list in ADVANCED_XML format (sdn_advanced.xml), DateOfIssue 2026-01-30.
+Source copy: https://media.githubusercontent.com/media/keithrozario/sanctions-checker/main/sdn_advanced.xml
+  (Git LFS object sha256 9ada1b25ec51909b25ddb37c04d6ca22425a8202d406aa92d21e467aee662928, 122273646 bytes),
+  a copy of https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml.
+Public domain: work of the U.S. Government (17 U.S.C. 105).
+Trimmed by whole elements only; every retained element is byte-identical to the source.
+Selected profiles: 26137 (CYBER2), 38665 (RUSSIA-EO14024), 45404 (ILLICIT-DRUGS-EO14059; includes a TRON-style
+  "T..." address filed under "Digital Currency Address - XBT", a known data-quality pitfall).
+Only ReferenceValueSets values referenced by the kept elements (plus all "Digital Currency Address - *" feature
+  types) are kept. Locations, IDRegDocuments and ProfileRelationships are emptied (LocationID refs dangle). Not for compliance use; fetch the live list from OFAC.
+-->
+<Sanctions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Version="3" xsi:schemaLocation="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/ADVANCED_XML https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/ADVANCED_XML.xsd" xmlns="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/ADVANCED_XML">
+  <DateOfIssue CalendarTypeID="1">
+    <Year>2026</Year>
+    <Month>1</Month>
+    <Day>30</Day>
+  </DateOfIssue>
+  <ReferenceValueSets>
+    <AliasTypeValues>
+      <AliasType ID="1400">A.K.A.</AliasType>
+      <AliasType ID="1403">Name</AliasType>
+    </AliasTypeValues>
+    <AreaCodeTypeValues>
+      <AreaCodeType ID="1">ISO 3166 (2)</AreaCodeType>
+    </AreaCodeTypeValues>
+    <CalendarTypeValues>
+      <CalendarType ID="1">Gregorian</CalendarType>
+    </CalendarTypeValues>
+    <DecisionMakingBodyValues>
+      <DecisionMakingBody ID="1" OrganisationID="1">United States Treasury Department</DecisionMakingBody>
+    </DecisionMakingBodyValues>
+    <DetailReferenceValues>
+      <DetailReference ID="91473">Subject to Secondary Sanctions</DetailReference>
+      <DetailReference ID="91526">Male</DetailReference>
+      <DetailReference ID="92764">See Section 11 of Executive Order 14024.</DetailReference>
+    </DetailReferenceValues>
+    <DetailTypeValues>
+      <DetailType ID="1430">DATE</DetailType>
+      <DetailType ID="1431">LOOKUP</DetailType>
+      <DetailType ID="1432">TEXT</DetailType>
+      <DetailType ID="1433">COUNTRY</DetailType>
+    </DetailTypeValues>
+    <DocNameStatusValues>
+      <DocNameStatus ID="1">Primary Latin</DocNameStatus>
+      <DocNameStatus ID="2">Others</DocNameStatus>
+    </DocNameStatusValues>
+    <EntryEventTypeValues>
+      <EntryEventType ID="1">Created</EntryEventType>
+    </EntryEventTypeValues>
+    <FeatureTypeValues>
+      <FeatureType ID="1" FeatureTypeGroupID="1">Vessel Call Sign</FeatureType>
+      <FeatureType ID="2" FeatureTypeGroupID="1">VESSEL TYPE</FeatureType>
+      <FeatureType ID="3" FeatureTypeGroupID="1">Vessel Flag</FeatureType>
+      <FeatureType ID="4" FeatureTypeGroupID="1">Vessel Owner</FeatureType>
+      <FeatureType ID="8" FeatureTypeGroupID="1">Birthdate</FeatureType>
+      <FeatureType ID="9" FeatureTypeGroupID="1">Place of Birth</FeatureType>
+      <FeatureType ID="10" FeatureTypeGroupID="1">Nationality Country</FeatureType>
+      <FeatureType ID="11" FeatureTypeGroupID="1">Citizenship Country</FeatureType>
+      <FeatureType ID="21" FeatureTypeGroupID="1">Email Address</FeatureType>
+      <FeatureType ID="25" FeatureTypeGroupID="1">Location</FeatureType>
+      <FeatureType ID="125" FeatureTypeGroupID="1">Additional Sanctions Information -</FeatureType>
+      <FeatureType ID="224" FeatureTypeGroupID="1">Gender</FeatureType>
+      <FeatureType ID="344" FeatureTypeGroupID="1">Digital Currency Address - XBT</FeatureType>
+      <FeatureType ID="345" FeatureTypeGroupID="1">Digital Currency Address - ETH</FeatureType>
+      <FeatureType ID="444" FeatureTypeGroupID="1">Digital Currency Address - XMR</FeatureType>
+      <FeatureType ID="504" FeatureTypeGroupID="1">Secondary sanctions risk:</FeatureType>
+      <FeatureType ID="566" FeatureTypeGroupID="1">Digital Currency Address - LTC</FeatureType>
+      <FeatureType ID="686" FeatureTypeGroupID="1">Digital Currency Address - ZEC</FeatureType>
+      <FeatureType ID="687" FeatureTypeGroupID="1">Digital Currency Address - DASH</FeatureType>
+      <FeatureType ID="688" FeatureTypeGroupID="1">Digital Currency Address - BTG</FeatureType>
+      <FeatureType ID="689" FeatureTypeGroupID="1">Digital Currency Address - ETC</FeatureType>
+      <FeatureType ID="706" FeatureTypeGroupID="1">Digital Currency Address - BSV</FeatureType>
+      <FeatureType ID="726" FeatureTypeGroupID="1">Digital Currency Address - BCH</FeatureType>
+      <FeatureType ID="746" FeatureTypeGroupID="1">Digital Currency Address - XVG</FeatureType>
+      <FeatureType ID="887" FeatureTypeGroupID="1">Digital Currency Address - USDT</FeatureType>
+      <FeatureType ID="907" FeatureTypeGroupID="1">Digital Currency Address - XRP</FeatureType>
+      <FeatureType ID="992" FeatureTypeGroupID="1">Digital Currency Address - TRX</FeatureType>
+      <FeatureType ID="998" FeatureTypeGroupID="1">Digital Currency Address - USDC</FeatureType>
+      <FeatureType ID="1007" FeatureTypeGroupID="1">Digital Currency Address - ARB</FeatureType>
+      <FeatureType ID="1008" FeatureTypeGroupID="1">Digital Currency Address - BSC</FeatureType>
+      <FeatureType ID="1167" FeatureTypeGroupID="1">Digital Currency Address - SOL</FeatureType>
+    </FeatureTypeValues>
+    <FeatureTypeGroupValues>
+      <FeatureTypeGroup ID="1">Unknown</FeatureTypeGroup>
+    </FeatureTypeGroupValues>
+    <IdentityFeatureLinkTypeValues>
+      <IdentityFeatureLinkType ID="1">Unknown</IdentityFeatureLinkType>
+    </IdentityFeatureLinkTypeValues>
+    <LegalBasisValues>
+      <LegalBasis ID="1" LegalBasisShortRef="Unknown" LegalBasisTypeID="1" SanctionsProgramID="1">Unknown</LegalBasis>
+      <LegalBasis ID="91711" LegalBasisShortRef="Executive Order 13694 (Cyber)" LegalBasisTypeID="1" SanctionsProgramID="1">Executive Order 13694 (Cyber)</LegalBasis>
+      <LegalBasis ID="91904" LegalBasisShortRef="Executive Order 14059 (Illicit Drugs)" LegalBasisTypeID="1" SanctionsProgramID="1">Executive Order 14059 (Illicit Drugs)</LegalBasis>
+      <LegalBasis ID="92049" LegalBasisShortRef="Executive Order 14024 (Russia)" LegalBasisTypeID="1" SanctionsProgramID="1">Executive Order 14024 (Russia)</LegalBasis>
+    </LegalBasisValues>
+    <LegalBasisTypeValues>
+      <LegalBasisType ID="1">Unknown</LegalBasisType>
+    </LegalBasisTypeValues>
+    <ListValues>
+      <List ID="1550">SDN List</List>
+    </ListValues>
+    <LocPartTypeValues>
+      <LocPartType ID="1">Unknown</LocPartType>
+    </LocPartTypeValues>
+    <LocPartValueStatusValues>
+      <LocPartValueStatus ID="1">Main</LocPartValueStatus>
+    </LocPartValueStatusValues>
+    <LocPartValueTypeValues>
+      <LocPartValueType ID="1">Unknown</LocPartValueType>
+    </LocPartValueTypeValues>
+    <NamePartTypeValues>
+      <NamePartType ID="1520">Last Name</NamePartType>
+      <NamePartType ID="1521">First Name</NamePartType>
+      <NamePartType ID="1525">Entity Name</NamePartType>
+      <NamePartType ID="1528">Nickname</NamePartType>
+    </NamePartTypeValues>
+    <OrganisationValues>
+      <Organisation ID="1" CountryID="11212">State</Organisation>
+    </OrganisationValues>
+    <PartySubTypeValues>
+      <PartySubType ID="1" PartyTypeID="4">Vessel</PartySubType>
+      <PartySubType ID="2" PartyTypeID="4">Aircraft</PartySubType>
+      <PartySubType ID="3" PartyTypeID="2">Unknown</PartySubType>
+      <PartySubType ID="4" PartyTypeID="1">Unknown</PartySubType>
+    </PartySubTypeValues>
+    <PartyTypeValues>
+      <PartyType ID="1">Individual</PartyType>
+      <PartyType ID="2">Entity</PartyType>
+      <PartyType ID="3">Location</PartyType>
+      <PartyType ID="4">Transport</PartyType>
+    </PartyTypeValues>
+    <RelationQualityValues>
+      <RelationQuality ID="1">Unknown</RelationQuality>
+    </RelationQualityValues>
+    <ReliabilityValues>
+      <Reliability ID="1560">Confirmed</Reliability>
+      <Reliability ID="1">Unknown</Reliability>
+    </ReliabilityValues>
+    <SanctionsProgramValues>
+      <SanctionsProgram ID="1" SubsidiaryBodyID="1">Unknown</SanctionsProgram>
+    </SanctionsProgramValues>
+    <SanctionsTypeValues>
+      <SanctionsType ID="1705">Block</SanctionsType>
+      <SanctionsType ID="1">Program</SanctionsType>
+    </SanctionsTypeValues>
+    <ScriptValues>
+      <Script ID="501" ScriptCode="Hans">Chinese Simplified</Script>
+      <Script ID="220" ScriptCode="Cyrl">Cyrillic</Script>
+      <Script ID="125" ScriptCode="Hebrew">Hebrew</Script>
+      <Script ID="215" ScriptCode="Latin">Latin</Script>
+    </ScriptValues>
+    <ScriptStatusValues>
+      <ScriptStatus ID="1">Unknown</ScriptStatus>
+    </ScriptStatusValues>
+    <SubsidiaryBodyValues>
+      <SubsidiaryBody ID="1" Notional="false" DecisionMakingBodyID="1">Office of Foreign Assets Control</SubsidiaryBody>
+    </SubsidiaryBodyValues>
+    <ValidityValues>
+      <Validity ID="1">Valid</Validity>
+      <Validity ID="2">Fraudulent</Validity>
+    </ValidityValues>
+  </ReferenceValueSets>
+  <Locations />
+  <IDRegDocuments />
+  <DistinctParties>
+    <DistinctParty FixedRef="26137">
+      <Comment />
+      <Profile ID="26137" PartySubTypeID="4">
+        <Identity ID="17841" FixedRef="26137" Primary="true" False="false">
+          <Alias FixedRef="26137" AliasTypeID="1403" Primary="true" LowQuality="false">
+            <DocumentedName ID="34915" FixedRef="26137" DocNameStatusID="1">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="67600" ScriptID="215" ScriptStatusID="1" Acronym="false">Khorashadizadeh</NamePartValue>
+              </DocumentedNamePart>
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="67601" ScriptID="215" ScriptStatusID="1" Acronym="false">Ali</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <Alias FixedRef="26137" AliasTypeID="1400" Primary="false" LowQuality="true">
+            <DocumentedName ID="34916" FixedRef="26137" DocNameStatusID="2">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="67519" ScriptID="215" ScriptStatusID="1" Acronym="false">Mastercartaria</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <Alias FixedRef="26137" AliasTypeID="1400" Primary="false" LowQuality="true">
+            <DocumentedName ID="34917" FixedRef="26137" DocNameStatusID="2">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="67518" ScriptID="215" ScriptStatusID="1" Acronym="false">Iranvisacart</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <NamePartGroups>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="67518" NamePartTypeID="1528" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="67519" NamePartTypeID="1528" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="67600" NamePartTypeID="1520" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="67601" NamePartTypeID="1521" />
+            </MasterNamePartGroup>
+          </NamePartGroups>
+        </Identity>
+        <Feature ID="30460" FeatureTypeID="8">
+          <FeatureVersion ID="28199" ReliabilityID="1560">
+            <Comment />
+            <DatePeriod CalendarTypeID="1" YearFixed="false" MonthFixed="false" DayFixed="false">
+              <Start Approximate="false" YearFixed="false" MonthFixed="false" DayFixed="false">
+                <From>
+                  <Year>1979</Year>
+                  <Month>9</Month>
+                  <Day>21</Day>
+                </From>
+                <To>
+                  <Year>1979</Year>
+                  <Month>9</Month>
+                  <Day>21</Day>
+                </To>
+              </Start>
+              <End Approximate="false" YearFixed="false" MonthFixed="false" DayFixed="false">
+                <From>
+                  <Year>1979</Year>
+                  <Month>9</Month>
+                  <Day>21</Day>
+                </From>
+                <To>
+                  <Year>1979</Year>
+                  <Month>9</Month>
+                  <Day>21</Day>
+                </To>
+              </End>
+            </DatePeriod>
+            <VersionDetail DetailTypeID="1430" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30461" FeatureTypeID="9">
+          <FeatureVersion ID="28200" ReliabilityID="1560">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">Tehran, Iran</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30462" FeatureTypeID="224">
+          <FeatureVersion ID="28201" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1431" DetailReferenceID="91526" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30463" FeatureTypeID="10">
+          <FeatureVersion ID="28202" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1433" />
+            <VersionLocation LocationID="186109" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30464" FeatureTypeID="344">
+          <FeatureVersion ID="28203" ReliabilityID="1560">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">149w62rY42aZBox8fGcmqNsXUzSStKeq8C</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30467" FeatureTypeID="21">
+          <FeatureVersion ID="28206" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">iranvisacart@yahoo.com</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30468" FeatureTypeID="21">
+          <FeatureVersion ID="28207" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">mastercartaria@yahoo.com</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30469" FeatureTypeID="21">
+          <FeatureVersion ID="28208" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">alikhorashadi@yahoo.com</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30470" FeatureTypeID="21">
+          <FeatureVersion ID="28209" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">toppglasses@gmail.com</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30471" FeatureTypeID="21">
+          <FeatureVersion ID="28210" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">iranian_boy5@yahoo.com</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="30510" FeatureTypeID="125">
+          <FeatureVersion ID="28249" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1431" DetailReferenceID="91473" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="189596" FeatureTypeID="25">
+          <FeatureVersion ID="239596" ReliabilityID="1">
+            <Comment />
+            <VersionLocation LocationID="39596" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="17841" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+      </Profile>
+    </DistinctParty>
+    <DistinctParty FixedRef="38665">
+      <Comment />
+      <Profile ID="38665" PartySubTypeID="3">
+        <Identity ID="30289" FixedRef="38665" Primary="true" False="false">
+          <Alias FixedRef="38665" AliasTypeID="1403" Primary="true" LowQuality="false">
+            <DocumentedName ID="57011" FixedRef="38665" DocNameStatusID="1">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="104643" ScriptID="215" ScriptStatusID="1" Acronym="false">Task Force Rusich</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <Alias FixedRef="38665" AliasTypeID="1400" Primary="false" LowQuality="false">
+            <DocumentedName ID="57012" FixedRef="38665" DocNameStatusID="2">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="104644" ScriptID="215" ScriptStatusID="1" Acronym="false">Rusich sabotage and assault reconnaissance group</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <Alias FixedRef="38665" AliasTypeID="1400" Primary="false" LowQuality="false">
+            <DocumentedName ID="57013" FixedRef="38665" DocNameStatusID="2">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="104645" ScriptID="215" ScriptStatusID="1" Acronym="false">Sabotage and Assault Reconnaissance Group Rusich</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <Alias FixedRef="38665" AliasTypeID="1400" Primary="false" LowQuality="false">
+            <DocumentedName ID="57014" FixedRef="38665" DocNameStatusID="2">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="104646" ScriptID="215" ScriptStatusID="1" Acronym="false">Rusich Task Force</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <Alias FixedRef="38665" AliasTypeID="1400" Primary="false" LowQuality="false">
+            <DocumentedName ID="57015" FixedRef="38665" DocNameStatusID="2">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="104647" ScriptID="215" ScriptStatusID="1" Acronym="false">Military-Patriotic Club Rusich</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <Alias FixedRef="38665" AliasTypeID="1400" Primary="false" LowQuality="true">
+            <DocumentedName ID="57016" FixedRef="38665" DocNameStatusID="2">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="104648" ScriptID="215" ScriptStatusID="1" Acronym="false">DShRG Rusich</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+            <DocumentedName ID="57017" FixedRef="38665" DocNameStatusID="2">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="104649" ScriptID="220" ScriptStatusID="1" Acronym="false">ДШРГ Русич</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <NamePartGroups>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="104643" NamePartTypeID="1525" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="104644" NamePartTypeID="1525" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="104645" NamePartTypeID="1525" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="104646" NamePartTypeID="1525" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="104647" NamePartTypeID="1525" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="104648" NamePartTypeID="1525" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="104649" NamePartTypeID="1525" />
+            </MasterNamePartGroup>
+          </NamePartGroups>
+        </Identity>
+        <Feature ID="54508" FeatureTypeID="345">
+          <FeatureVersion ID="52187" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">0xc2a3829F459B3Edd87791c74cD45402BA0a20Be3</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="30289" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="54509" FeatureTypeID="887">
+          <FeatureVersion ID="52188" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">TX5GV4DyfxNB3rPkzZJhmqZ1efVmL4rEqG</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="30289" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="54510" FeatureTypeID="344">
+          <FeatureVersion ID="52189" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">bc1ql7dlyh8xz6tpqk92vztrhqh88dmjvcwrmsemrm</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="30289" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="55028" FeatureTypeID="344">
+          <FeatureVersion ID="52707" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">bc1q2lpgjntr348pfvxhfy33ehmdzy3gmx8w4052z6</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="30289" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="55029" FeatureTypeID="345">
+          <FeatureVersion ID="52708" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">0x3AD9dB589d201A710Ed237c829c7860Ba86510Fc</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="30289" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="74701" FeatureTypeID="504">
+          <FeatureVersion ID="72360" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1431" DetailReferenceID="92764" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="30289" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="207723" FeatureTypeID="25">
+          <FeatureVersion ID="257723" ReliabilityID="1">
+            <Comment />
+            <VersionLocation LocationID="57723" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="30289" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="207724" FeatureTypeID="25">
+          <FeatureVersion ID="257724" ReliabilityID="1">
+            <Comment />
+            <VersionLocation LocationID="57724" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="30289" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+      </Profile>
+    </DistinctParty>
+    <DistinctParty FixedRef="45404">
+      <Comment />
+      <Profile ID="45404" PartySubTypeID="4">
+        <Identity ID="37028" FixedRef="45404" Primary="true" False="false">
+          <Alias FixedRef="45404" AliasTypeID="1403" Primary="true" LowQuality="false">
+            <DocumentedName ID="68112" FixedRef="45404" DocNameStatusID="1">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="120060" ScriptID="215" ScriptStatusID="1" Acronym="false">Wang</NamePartValue>
+              </DocumentedNamePart>
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="120061" ScriptID="215" ScriptStatusID="1" Acronym="false">Mingming</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+            <DocumentedName ID="68113" FixedRef="45404" DocNameStatusID="2">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="120062" ScriptID="501" ScriptStatusID="1" Acronym="false">王</NamePartValue>
+              </DocumentedNamePart>
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="120063" ScriptID="501" ScriptStatusID="1" Acronym="false">明明</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+          <NamePartGroups>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="120060" NamePartTypeID="1520" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="120061" NamePartTypeID="1521" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="120062" NamePartTypeID="1520" />
+            </MasterNamePartGroup>
+            <MasterNamePartGroup>
+              <NamePartGroup ID="120063" NamePartTypeID="1521" />
+            </MasterNamePartGroup>
+          </NamePartGroups>
+        </Identity>
+        <Feature ID="65910" FeatureTypeID="8">
+          <FeatureVersion ID="63589" ReliabilityID="1">
+            <Comment />
+            <DatePeriod CalendarTypeID="1" YearFixed="false" MonthFixed="false" DayFixed="false">
+              <Start Approximate="false" YearFixed="false" MonthFixed="false" DayFixed="false">
+                <From>
+                  <Year>1989</Year>
+                  <Month>3</Month>
+                  <Day>12</Day>
+                </From>
+                <To>
+                  <Year>1989</Year>
+                  <Month>3</Month>
+                  <Day>12</Day>
+                </To>
+              </Start>
+              <End Approximate="false" YearFixed="false" MonthFixed="false" DayFixed="false">
+                <From>
+                  <Year>1989</Year>
+                  <Month>3</Month>
+                  <Day>12</Day>
+                </From>
+                <To>
+                  <Year>1989</Year>
+                  <Month>3</Month>
+                  <Day>12</Day>
+                </To>
+              </End>
+            </DatePeriod>
+            <VersionDetail DetailTypeID="1430" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="65913" FeatureTypeID="9">
+          <FeatureVersion ID="63592" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">Hebei, China</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="65916" FeatureTypeID="11">
+          <FeatureVersion ID="63595" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1433" />
+            <VersionLocation LocationID="186065" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="65918" FeatureTypeID="10">
+          <FeatureVersion ID="63597" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1433" />
+            <VersionLocation LocationID="186065" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="65919" FeatureTypeID="224">
+          <FeatureVersion ID="63598" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1431" DetailReferenceID="91526" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="65920" FeatureTypeID="344">
+          <FeatureVersion ID="63599" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">1MLPqwaFFUBZePTjpR3nxRoK19Cv9mPCc7</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="65923" FeatureTypeID="344">
+          <FeatureVersion ID="63602" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">3HePkztPU6UsdENxnyQHFrdZA6eVKeMtvz</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="65924" FeatureTypeID="344">
+          <FeatureVersion ID="63603" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">TUCsTq7TofTCJRRoHk6RvhMoS2mJLm5Yzq</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="65925" FeatureTypeID="887">
+          <FeatureVersion ID="63604" ReliabilityID="1">
+            <Comment />
+            <VersionDetail DetailTypeID="1432">0xfac583c0cf07ea434052c49115a4682172ab6b4f</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="217574" FeatureTypeID="25">
+          <FeatureVersion ID="267574" ReliabilityID="1">
+            <Comment />
+            <VersionLocation LocationID="67574" />
+          </FeatureVersion>
+          <IdentityReference IdentityID="37028" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+      </Profile>
+    </DistinctParty>
+  </DistinctParties>
+  <ProfileRelationships />
+  <SanctionsEntries>
+    <SanctionsEntry ID="26137" ProfileID="26137" ListID="1550">
+      <EntryEvent ID="26137" EntryEventTypeID="1" LegalBasisID="91711">
+        <Comment />
+        <Date CalendarTypeID="1">
+          <Year>2018</Year>
+          <Month>11</Month>
+          <Day>28</Day>
+        </Date>
+      </EntryEvent>
+      <SanctionsMeasure ID="18235" SanctionsTypeID="1705">
+        <DatePeriod CalendarTypeID="1" YearFixed="true" MonthFixed="true" DayFixed="true" />
+      </SanctionsMeasure>
+      <SanctionsMeasure ID="152733" SanctionsTypeID="1">
+        <Comment>CYBER2</Comment>
+        <DatePeriod CalendarTypeID="1" YearFixed="true" MonthFixed="true" DayFixed="true" />
+      </SanctionsMeasure>
+    </SanctionsEntry>
+    <SanctionsEntry ID="38665" ProfileID="38665" ListID="1550">
+      <EntryEvent ID="38665" EntryEventTypeID="1" LegalBasisID="92049">
+        <Comment />
+        <Date CalendarTypeID="1">
+          <Year>2022</Year>
+          <Month>9</Month>
+          <Day>15</Day>
+        </Date>
+      </EntryEvent>
+      <SanctionsMeasure ID="31203" SanctionsTypeID="1705">
+        <DatePeriod CalendarTypeID="1" YearFixed="true" MonthFixed="true" DayFixed="true" />
+      </SanctionsMeasure>
+      <SanctionsMeasure ID="166709" SanctionsTypeID="1">
+        <Comment>RUSSIA-EO14024</Comment>
+        <DatePeriod CalendarTypeID="1" YearFixed="true" MonthFixed="true" DayFixed="true" />
+      </SanctionsMeasure>
+    </SanctionsEntry>
+    <SanctionsEntry ID="45404" ProfileID="45404" ListID="1550">
+      <EntryEvent ID="45404" EntryEventTypeID="1" LegalBasisID="91904">
+        <Comment />
+        <Date CalendarTypeID="1">
+          <Year>2023</Year>
+          <Month>10</Month>
+          <Day>3</Day>
+        </Date>
+      </EntryEvent>
+      <SanctionsMeasure ID="37963" SanctionsTypeID="1705">
+        <DatePeriod CalendarTypeID="1" YearFixed="true" MonthFixed="true" DayFixed="true" />
+      </SanctionsMeasure>
+      <SanctionsMeasure ID="173670" SanctionsTypeID="1">
+        <Comment>ILLICIT-DRUGS-EO14059</Comment>
+        <DatePeriod CalendarTypeID="1" YearFixed="true" MonthFixed="true" DayFixed="true" />
+      </SanctionsMeasure>
+    </SanctionsEntry>
+  </SanctionsEntries>
+  <SanctionsEntryLinks />
+</Sanctions>
