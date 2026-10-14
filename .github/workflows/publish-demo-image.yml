@@ -1,0 +1,74 @@
+name: Publish demo image
+
+# Builds the synthetic-demo image once on GitHub's runners (where training the synthetic
+# models takes minutes), validates it, and publishes it to GHCR so that Render pulls a
+# prebuilt image instead of training during its own build (which exceeded Render's limit).
+# Only synthetic data and synthetic-trained models are in this image (scripts/check_demo_image.sh).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# least privilege by default; only the publish job may write packages
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-demo-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Image name and version
+        id: meta
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          echo "image=ghcr.io/${owner}/chainwatch-demo" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build synthetic demo image (linux/amd64; hash-locked deps, digest-pinned bases)
+        run: |
+          docker build --platform linux/amd64 --target demo \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label org.opencontainers.image.version="${{ steps.meta.outputs.version }}" \
+            --label org.opencontainers.image.licenses=MIT \
+            --label org.opencontainers.image.description="ChainWatch public demo: synthetic data and synthetic-trained models only" \
+            -t chainwatch-demo:candidate .
+
+      - name: Gate - synthetic contents, no start-up training, smoke test at 512 MB / 0.1 CPU
+        run: scripts/check_demo_image.sh chainwatch-demo:candidate 8000
+
+      - name: Publish (immutable sha tag; version tag only if new)
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag chainwatch-demo:candidate "$IMAGE:sha-$GITHUB_SHA"
+          docker push "$IMAGE:sha-$GITHUB_SHA"
+          # version tags are never overwritten: bump the version in pyproject.toml to publish a new one
+          if docker manifest inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+            echo "::notice::$IMAGE:$VERSION already exists; not overwritten (published sha-$GITHUB_SHA only)"
+          else
+            docker tag chainwatch-demo:candidate "$IMAGE:$VERSION"
+            docker push "$IMAGE:$VERSION"
+          fi
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:sha-$GITHUB_SHA")
+          docker logout ghcr.io
+          {
+            echo "### Published synthetic demo image"
+            echo "- digest (immutable): \`$digest\`"
+            echo "- tags: \`sha-$GITHUB_SHA\`, \`$VERSION\` (if new)"
+            echo "- Render: image URL in render.yaml, then Manual Deploy (docs/DEPLOYMENT.md)"
+          } >> "$GITHUB_STEP_SUMMARY"
