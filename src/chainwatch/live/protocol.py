@@ -7,6 +7,10 @@ checked at upstream commit 4cf96d2, 2026-10-13):
     server -> {"mempool-txids": {"sequence": int, "added": [txid], "removed": [txid],
                                  "mined": [txid], "replaced": [{"replaced": txid, "by": txid}]}}
 
+``sequence`` is the server's ``mempoolSequence``: +1 per mempool update or new block while
+the server's mempool is in sync, and every subscribed client receives every update. A jump
+of more than 1 within one connection therefore means missed updates (``sequence_gap``).
+
 Other keys can share a message (e.g. ``pong``); they are ignored. Every field is validated:
 a malformed message yields ``None`` and invalid txids are dropped, so nothing from the
 network reaches storage unchecked.

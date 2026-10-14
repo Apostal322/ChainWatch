@@ -30,7 +30,7 @@ def build_app(tps: float, seed: int = 0) -> FastAPI:
     app = FastAPI(title="LOCAL MOCK mempool (not real data)")
     rng = random.Random(seed)
     known: dict[str, dict] = {}
-    counter = {"n": 0}
+    counter = {"n": 0, "seq": 0}  # seq: +1 per mempool update, like mempool's backend
 
     def make(tid: str) -> dict:
         n_out = rng.choice([1, 2, 2, 2, 3, 5, 60]) if rng.random() < 0.97 else 120
@@ -63,7 +63,8 @@ def build_app(tps: float, seed: int = 0) -> FastAPI:
                     tid = txid(f"mock-{seed}-{counter['n']}")
                     known[tid] = make(tid)
                     batch.append(tid)
-                await socket.send_text(delta(batch, seq=counter["n"]))
+                counter["seq"] += 1
+                await socket.send_text(delta(batch, seq=counter["seq"]))
                 await asyncio.sleep(2.0)
         except WebSocketDisconnect:
             return

@@ -43,7 +43,8 @@ async def main(seconds: float, tps: float) -> dict:
             while True:
                 batch = [txid(f"load{counter['n'] + k}") for k in range(int(tps * 2))]
                 counter["n"] += len(batch)
-                await ws.send(delta(batch, seq=counter["n"]))
+                counter["seq"] = counter.get("seq", 0) + 1  # one per update, as upstream
+                await ws.send(delta(batch, seq=counter["seq"]))
                 await asyncio.sleep(2.0)  # mempool.space pushes deltas on mempool updates
 
     def rest(request: httpx.Request) -> httpx.Response:
