@@ -39,7 +39,7 @@ fi
 note "packages"
 export DEBIAN_FRONTEND=noninteractive
 run apt-get update -q
-run apt-get install -y -q --no-install-recommends python3 python3-venv git sqlite3 openssl ca-certificates
+run apt-get install -y -q --no-install-recommends python3 python3-venv git sqlite3 openssl ca-certificates curl
 [ "$SKIP_CADDY" = "1" ] || run apt-get install -y -q caddy
 
 note "service user and directories"
