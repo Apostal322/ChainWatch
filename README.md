@@ -10,7 +10,8 @@ time, and does retraining on newly arriving labels help?**
 
 ChainWatch answers this on the public [Elliptic++](https://github.com/git-disl/EllipticPlusPlus)
 Bitcoin dataset (203,769 transactions, 49 time steps, 77% unlabelled) with a
-leakage-guarded, pre-registered temporal study. It then serves the frozen research models
+leakage-guarded temporal study whose protocol was fixed before the runs (author's record;
+not verifiable from the published git history). It then serves the frozen research models
 through a FastAPI and React replay application that reproduces the research scores exactly.
 
 > **Scope.** The research and its replay are *historical*. Scores rank transactions by
@@ -27,8 +28,9 @@ synthetic data; real-data results appear only as aggregate figures under `report
 | Finding | Result | Evidence status |
 |---|---|---|
 | Strong baseline hides a collapse | XGBoost pooled test AP **0.797**, but **0.917** on steps 35–42 vs **0.043** on 43–49 | one-time test evaluation |
-| Ranking itself degrades, not just the base rate | ROC-AUC 0.97 → 0.70 after step 42 | diagnostic |
-| Retraining as labels arrive | late-period AP **0.050 → 0.458** (+0.41, 95% CI 0.16–0.62) | **exploratory**: period seen before |
+| Ranking itself degrades, not just the base rate | same XGBoost model: ROC-AUC 0.97 → 0.69 after step 42 | diagnostic |
+| Retraining as labels arrive (protocol's primary comparison: pooled AP, steps 35–49) | expanding vs static: AP 0.807 → 0.892, Δ **+0.085** [95% CI 0.024, 0.229] | **exploratory**: period seen before |
+| …concentrated after the shift (sub-period 43–49; its boundary came from Phase 1 inspection) | AP 0.050 → 0.458 (+0.41 [0.16, 0.62]); expanding beats static at all 7 late steps (exact one-sided sign test p = 1/128) | **exploratory**; the CI comes from a block bootstrap over only 7 steps (few distinct resamples), so its coverage is likely below 95% |
 | Slower labels shrink the gain | label latency 3: Δ AP +0.065 [0.013, 0.173] | exploratory sensitivity |
 | Unlabelled transactions crowd the review budget | known illicit in top 20 per step ≈ 0 on 43–49 when unknowns compete | exploratory |
 
@@ -45,7 +47,7 @@ in [the temporal robustness report](docs/TEMPORAL_ROBUSTNESS.md).
 |---|---|
 | **Leakage-safe, reproducible experiments**: chronological splits, label-latency canaries, configs, seeds and data hashes recorded per run | [evaluation protocol](docs/EVALUATION.md), `tests/test_splits_and_leakage.py` |
 | **Distribution-shift analysis**: prior vs covariate vs class-conditional shift, within-period learnability, calibration | [temporal robustness §3](docs/TEMPORAL_ROBUSTNESS.md) |
-| **Adaptive retraining under delayed labels**: pre-registered rolling-origin backtest, 5 strategies, block bootstrap over time | [protocol](docs/PHASE2_PROTOCOL.md) (committed before the experiments) |
+| **Adaptive retraining under delayed labels**: rolling-origin backtest, 5 strategies, block bootstrap over time | [protocol](docs/PHASE2_PROTOCOL.md) (written before the runs per the author's record; it first appears in git alongside the results, so the timing is not independently verifiable) |
 | **Training/serving consistency**: one `FeatureStore`; 234,596 replayed scores equal the research predictions (max diff **0.0**), natively and in Docker | `chainwatch verify-replay`, [report](reports/phase3/replay_consistency.json) |
 | **API engineering**: typed FastAPI contract, provenance-checked model registry, TreeSHAP explanations, size limits, rate limiting, security headers | [inference contract](docs/INFERENCE_CONTRACT.md), [architecture](docs/ARCHITECTURE.md) |
 | **Docker and CI/CD**: hash-locked dependencies, digest-pinned images, read-only non-root demo; CI on Ubuntu and Windows plus a container smoke test | [`Dockerfile`](Dockerfile), [CI](.github/workflows/ci.yml) |
@@ -154,6 +156,10 @@ risk, the manual activation steps and the 24-hour test plan.
 
 - **No untouched holdout.** Steps 35–49 were inspected in Phase 1, so the retraining gains
   are exploratory. The label latency is an assumption.
+- **Protocol timing is not verifiable.** The Phase 2 protocol was written before the runs
+  according to the author's record, but the pre-release history is not published.
+- **Publisher-computed features.** The 72 aggregate features cannot be verified to use
+  only within-step, pre-step-end information ([dataset card](docs/DATASET.md)).
 - **Unknown labels.** 77% of transactions are unlabelled and labels are heuristic;
   labelled-only metrics overstate operational value (the dashboard shows the gap).
 - **Historical model.** The features are anonymised by the publisher and need each step's
@@ -195,7 +201,7 @@ cd frontend && npm ci && npm run typecheck && npm test && npm run build
 scripts/smoke_demo.sh http://localhost:8000      # end-to-end check of a running public demo
 ```
 
-**Status.** Completed: data pipeline, Phase 1 baselines, Phase 2 pre-registered backtest
+**Status.** Completed: data pipeline, Phase 1 baselines, Phase 2 retraining backtest (protocol fixed before the runs, author's record)
 and shift diagnostics, replay service and dashboard, Docker, CI, live mempool monitor MVP
 (no model), always-on collector deployment kit (not deployed). Planned (not
 implemented): a properly evaluated live-data model, pickle-free model format,

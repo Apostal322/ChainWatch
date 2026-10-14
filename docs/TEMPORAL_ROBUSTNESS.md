@@ -6,17 +6,24 @@ investigation budgets?
 
 **Short answer.** The collapse after step 42 is mainly a **stale-model problem**, not an
 unlearnable one. A model fitted on recent labels ranks late-period transactions well,
-while the model fitted on the past does not. Retraining as labels arrive raises pooled AP
-on steps 43–49 from 0.05 to 0.42–0.49, and the gain is consistent across seeds,
-strategies and bootstrap schemes. It shrinks with longer label latency and cannot help
-the first steps after the change, before any new labels exist. Steps 35–49 were inspected
-in Phase 1, so every number on that period is **exploratory**.
+while the model fitted on the past does not. Over the whole confirm period 35–49, the
+protocol's primary comparison, retraining as labels arrive raises pooled AP from 0.807
+to 0.892 (expanding; ΔAP +0.085 [0.024, 0.229]). The gain is concentrated after the
+shift: on steps 43–49 (a sub-period whose boundary was chosen from Phase 1 inspection)
+pooled AP rises from 0.05 to 0.39–0.49 for the four selected strategies (expanding 0.46),
+and the direction is consistent across seeds, strategies and bootstrap schemes. That
+sub-period has only 7 steps, so its intervals are imprecise. The gain shrinks with longer
+label latency and cannot help the first steps after the change, before any new labels
+exist. Steps 35–49 were inspected in Phase 1, so every number on that period is
+**exploratory**.
 
 Every number in this report comes from generated files. The main sources are
 [`reports/phase2/backtest/README.md`](../reports/phase2/backtest/README.md),
 [`reports/phase2/shift/summary.json`](../reports/phase2/shift/summary.json) and
-[`reports/phase2/audit.json`](../reports/phase2/audit.json). The pre-registered protocol,
-with its list of deviations, is [PHASE2_PROTOCOL.md](PHASE2_PROTOCOL.md).
+[`reports/phase2/audit.json`](../reports/phase2/audit.json). The protocol, with its list
+of deviations, is [PHASE2_PROTOCOL.md](PHASE2_PROTOCOL.md). It was fixed before the runs
+according to the author's record; the published git history cannot verify this (see its
+status note), so "pre-registered" below means "fixed before the runs (author's record)".
 
 ---
 
@@ -40,7 +47,7 @@ metrics with plain scikit-learn.
   the period, which is the very information Phase 1 excluded by dropping `Time step`.
   §4.3 tests whether this matters. It does not, materially.
 
-## 2. Setup (pre-registered)
+## 2. Setup (fixed before the runs; author's record)
 
 * **Prediction-time model.** Each step is scored at its end. A label from step *u* becomes
   available at the end of step *u + L*. **Primary analysis L = 1**; sensitivity L = 3.
@@ -73,14 +80,14 @@ expanding). The optimum may lie beyond the grid. The grid was not extended after
 | aspect | evidence | interpretation |
 |---|---|---|
 | **Prior shift**, P(y) | Illicit share of labelled transactions: 0.109 (steps 1–29), 0.168 (30–34), 0.092 (35–42), **0.025 (43–49)**; per step it ranges from 0.003 to 0.36 | Large, and it lowers AP mechanically. |
-| …but not only prior shift | Static model ROC-AUC (prevalence-invariant): 0.97 on 35–42, **0.70** on 43–49. AP standardised to prevalence 0.109: 0.92 versus **0.17** | Ranking quality itself collapses. |
+| …but not only prior shift | Past-only XGBoost (labels of steps 1–34, the within-period diagnostic's "past" model): ROC-AUC (prevalence-invariant) 0.97 on 35–42, **0.70** on 43–49; AP standardised to prevalence 0.109: 0.93 versus **0.18**. Other "static" models agree: Phase 1 XGBoost/all (labels 1–29) ROC-AUC 0.97 → **0.69** (`audit.json`); Phase 2 backtest static (refit at step 34, L = 1) 0.97 → **0.73**, standardised AP 0.93 → 0.19 | Ranking quality itself collapses. |
 | **Covariate shift**, P(x) | A step-level domain classifier separates *every* step from steps 1–29 with AUC ≈ 1.0, even with the time proxies removed (per-step minimum 0.997, period means 0.9985–0.99997). Period means of the median per-feature KS against steps 1–29 lie between 0.075 and 0.094 for local and aggregate features in every period, with **no jump at step 43** | Each step is identifiable from its features, so domain AUC cannot measure *how much* shift matters (a negative result for this diagnostic). Bulk marginal shift does not coincide with the collapse. |
 | Missingness | Labelled missing-feature rate: 0.6% (1–29), 1.0% (30–34), **2.9% (35–42)**, 1.0% (43–49) | Peaks before the collapse, not during it. Not an explanation. |
 | **Class-conditional shift**, P(x\|y) | Per-class domain classifiers are saturated as well (AUC ≥ 0.99) | Uninformative at this resolution. |
-| **Signs of concept shift**, P(y\|x) | On 43–49, the past-only model scores AP 0.053 (ROC 0.70). A leave-one-step-out model fitted only on *other late steps* scores **AP 0.811** (ROC 0.98). Past plus late scores 0.753, worse than late alone. On 35–42 all three models are similar (0.92 / 0.95 / 0.95) | Late illicit transactions are **predictable from these features**, but not by the boundary learned from the past, and adding past data slightly hurts. This fits concept shift, or class-conditional shift into regions the training data never covered. The data cannot separate the two, and no causal claim is made. (LOSO uses later steps, so this is diagnostic only.) |
+| **Signs of concept shift**, P(y\|x) | On 43–49, the past-only model (labels 1–34) scores AP 0.053 (ROC 0.70). A leave-one-step-out model fitted only on *other late steps* scores **AP 0.811** (ROC 0.98). Past plus late scores 0.753, worse than late alone. On 35–42 all three models are similar (0.92 / 0.95 / 0.95) | Late illicit transactions are **predictable from these features**, but not by the boundary learned from the past, and adding past data slightly hurts. This fits concept shift, or class-conditional shift into regions the training data never covered. The data cannot separate the two, and no causal claim is made. (LOSO uses later steps, so this is diagnostic only.) |
 | **Scores** | Median static score of illicit transactions is ≥ 0.994 on every step from 35 to 42, and ≤ 0.008 on steps 43–49 except step 46 (2 illicit) | Late illicit transactions look licit to the old model. |
-| **Calibration** (Platt fitted on 30–34) | ECE 0.010 (30–34), 0.018 (35–42), 0.047 (43–49), reaching 0.138 at step 49; mean predicted 0.029 against observed 0.118 at step 49 | Calibration degrades and the model under-predicts late. |
-| **Budgets** | Static P@20 per step averages 1.00 on 35–42, and on 43–49 it is between 0.00 and 0.25 (0 at four of seven steps) (see `static_model_by_step.csv`) | The operational failure is total, not just a metric artefact. |
+| **Calibration** (Phase 1 XGBoost/all, Platt fitted on 30–34) | ECE 0.010 (30–34, **in-sample**: the calibrator was fitted on these steps), 0.018 (35–42), 0.047 (43–49), reaching 0.138 at step 49; mean predicted 0.029 against observed 0.118 at step 49. Period ECE and Brier values are means of per-step values, not pooled | Calibration degrades and the model under-predicts late. |
+| **Budgets** | Phase 1 XGBoost/all P@20 per step is 1.00 at every step of 35–42, and on 43–49 it is between 0.00 and 0.25 (0 at three of seven steps: 43, 45, 47) (see `static_model_by_step.csv`) | The operational failure is near-total, not just a metric artefact. |
 
 Weber et al. (2019) attribute the regime change after step 43 in the original Elliptic
 data to the shutdown of a dark market. Our data are consistent with a change in what
@@ -105,7 +112,15 @@ Seed standard deviation of pooled AP is ≤ 0.003 on dev and confirm overall, an
 on 43–49. Training stochasticity is negligible next to temporal uncertainty.
 
 On steps 35–42 the gains are small: +0.008 to +0.016 AP, with the CIs of expanding,
-recency h = 10 and sliding W = 10 touching 0.
+recency h = 10 and sliding W = 10 including or touching 0 (periodic f = 2: +0.008
+[0.001, 0.014]).
+
+Per step, all four selected strategies beat static at every one of the seven steps
+43–49 (seed means, `per_step_confirm.csv`). For expanding this gives an exact one-sided
+sign test p = 1/128 ≈ 0.008; this is a descriptive check on an exploratory period, not
+a pre-specified test. The 43–49 intervals come from a block bootstrap over only 7 steps
+(block length 3), which has few distinct resamples, so their coverage is probably below
+the nominal 95%.
 
 ### 4.2 Investigation budgets (confirm 43–49; seed means)
 
@@ -123,7 +138,8 @@ transactions:
 
 **Important caveat.** When **all** transactions are ranked, with the unknown class
 competing for the same budget and counted as misses, every strategy finds **0–2** known
-illicit transactions at K = 10–20 per step in 43–49, and 14–20 at K = 50. The top of the
+illicit transactions *in total* over steps 43–49 with K = 10–20 reviews per step. At
+K = 50 the retrained strategies find 14–20 in total and static finds 0.4. The top of the
 ranking is dominated by unlabelled transactions. They could be unlabelled illicit
 activity or false positives; the dataset cannot tell. Labelled-only budget metrics
 therefore overstate deployable value.
@@ -131,7 +147,7 @@ therefore overstate deployable value.
 On 35–42, all strategies find 366–368 of 373 possible at K = 50: a ceiling, with no room
 to differ.
 
-### 4.3 Pre-registered robustness verdicts (protocol §5)
+### 4.3 Robustness verdicts (protocol §5)
 
 | strategy | pooled AP | hits@50 |
 |---|---|---|
@@ -143,7 +159,12 @@ to differ.
 "Robust" means the 95% CI excludes 0 with the same sign in dev and confirm, and both
 confirm sub-periods share that sign. For hits@50, the rule fails only because the 35–42
 difference is 0.0 to −0.8 at the ceiling described above. That is a ceiling effect, not
-a reversal. The rule is reported as pre-registered and was not relaxed.
+a reversal. The rule is reported as specified in the protocol and was not relaxed.
+Two cautions: the dev half of the rule is evaluated on the parameter that won the dev
+selection, so for periodic, sliding and recency its dev interval carries a
+winner's-curse bias (static and expanding have no tuned parameter; for every strategy
+the confirm interval is the more informative half); and the sub-period sign check rests on the 43–49 boundary,
+which was chosen from Phase 1 inspection.
 
 ### 4.4 Sensitivity
 
@@ -155,9 +176,13 @@ a reversal. The rule is reported as pre-registered and was not relaxed.
   [0.016, 0.191], recency h = 10 +0.059 [0.012, 0.159], and sliding W = 10 +0.048
   [−0.003, 0.160]. **The value of adaptation depends on how quickly labels arrive.**
 * **Time-proxy ablation (exploratory).** Removing the five clock-like features changes
-  pooled AP by at most ±0.004 overall. On 43–49 it is unchanged for static (0.050) and
-  slightly lower for the adaptive strategies (−0.020 to −0.038, every CI including 0 or
-  touching it). The clock features neither cause the collapse nor drive the recovery.
+  pooled AP by at most ±0.004 overall. On dev it *raises* pooled AP slightly for every
+  strategy (+0.001 to +0.004; the CIs exclude 0 except expanding, whose CI touches 0).
+  On confirm overall it changes pooled AP by at most 0.002 (every CI includes 0). On
+  43–49 it is unchanged for static (0.050) and lower for the adaptive strategies (−0.020
+  to −0.038, every CI including 0 or touching it). The proxies were identified from
+  features of steps ≤ 34, which includes the dev-scored steps. The clock features
+  neither cause the collapse nor drive the recovery.
 
 ### 4.5 Per-period behaviour and failure cases
 
@@ -196,9 +221,12 @@ reason to stay static.
    step is identifiable from its features, with or without the time proxies, so it
    cannot rank how much the shift matters. KS statistics show no change in bulk
    marginal shift at the collapse. A drift detector built on feature marginals would
-   probably not have warned about step 43.
-2. **Removing time-proxy features did not help**, and slightly hurt the adaptive models
-   late.
+   probably not have warned about step 43, though no such detector was actually run.
+2. **Removing time-proxy features made little difference.** It gave a small but
+   consistent gain on dev (+0.001 to +0.004 pooled AP, CIs excluding or touching 0), no
+   change on confirm overall, and lower point estimates for the adaptive models on 43–49
+   (−0.020 to −0.038, CIs including or touching 0). The proxies were selected using
+   steps ≤ 34, so the dev comparison is not fully independent of that choice.
 3. **No strategy improves meaningfully over static on 35–42**, where the static model is
    already near its ceiling.
 4. **Recency weighting is not reliably better than plain expanding retraining.** The
@@ -206,7 +234,7 @@ reason to stay static.
    overlap heavily. No paired recency-versus-expanding test was pre-registered, so no
    difference is claimed. Short half-lives (h = 2) had lower pooled AP than expanding in every
    period.
-5. **The budget-metric gains are not robust** under the pre-registered rule (a ceiling
+5. **The budget-metric gains are not robust** under the protocol's rule (a ceiling
    effect), and they mostly disappear when unlabelled transactions compete for review
    slots.
 6. **Calibration** was diagnosed, not fixed. Recalibration under prior shift is open.
@@ -251,7 +279,8 @@ schedule, not the architecture, drives the temporal gains.
 expanding-window, L = 1 backtest and bootstrap. Compare it first against a cheaper
 control, XGBoost plus multi-hop graph features (for example two-hop aggregates and
 neighbour-score propagation). Pre-register steps 43–45 as the primary target and a new
-holdout rule. Alternatives that the evidence supports at least as strongly: label
+holdout rule, and publish that protocol (a timestamped commit or registry entry) before
+any run, so that its timing can be verified. Alternatives that the evidence supports at least as strongly: label
 latency and labelling strategy (active or prioritised labelling to shorten effective L),
 and recalibration under prior shift.
 

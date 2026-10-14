@@ -55,7 +55,11 @@ For XGBoost with all features:
 | 35 to 42 | 914 | 0.092 | 0.917 | 0.852 |
 | 43 to 49 | 169 | 0.025 | **0.043** | **0.018** |
 
-After step 42, every model is close to random. The timing coincides with the regime
+After step 42, every model degrades sharply, though not uniformly to chance. For
+XGBoost/all, per-step AP is 0.007–0.049 at steps 43, 44, 45 and 47 (prevalence
+0.004–0.026), and 0.18–0.23 at steps 46, 48 and 49 (prevalence 0.003–0.12), against
+0.77–0.99 at steps 35–42; per-step ROC-AUC on 43–49 is 0.62–0.94
+(`reports/baseline_per_time_step.csv`). The timing coincides with the regime
 change that Weber et al. (2019) observed in the original Elliptic data and attributed to
 a dark-market shutdown; our data cannot confirm that cause. Better feature sets do not
 help, because all six models collapse together. This motivated the Phase 2 question of
@@ -72,8 +76,8 @@ trend but do not establish one.
 
 ### 5. Investigation-budget view
 With 20 reviews per two-week window, XGBoost/all averages a precision of 0.56 across the
-15 test steps. It is near 1.0 for steps 35 to 42 and near 0 afterwards (mean per-step
-P@20 for LR/all: 0.08).
+15 test steps. It is 1.0 at every step from 35 to 42 and 0.00–0.25 afterwards (0 at
+three of the seven steps: 43, 45 and 47). Mean per-step P@20 for LR/all is 0.08.
 
 ### 6. Latency
 All models score a transaction in single-digit milliseconds in-process (p50 2 to 6 ms

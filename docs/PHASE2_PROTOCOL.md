@@ -1,8 +1,14 @@
 # Phase 2 protocol: temporal robustness and adaptive retraining
 
-**Status: written and committed before any Phase 2 experiment was run.** The git history
-of this file is the record of what was decided in advance. Any later change is listed
-under "Deviations" at the end, with its reason.
+**Status: written before the Phase 2 runs, according to the author's record. This
+repository cannot verify that timing.** The pre-release history was not published: the
+file first appears in commit `7caf60f`, the same commit that adds the Phase 2 results,
+and the result directories it describes (`dev_L1_20261012-213405`,
+`confirm_L1_20261012-222153`) carry earlier timestamps than that commit. Read
+"pre-registered" in these documents as "fixed before the runs (author's record, not
+independently verifiable)". Changes the author made after the runs started are listed
+under "Deviations" at the end, with their reasons. A future study should publish its
+protocol (for example as a tagged commit or a timestamped registry entry) before running.
 
 ## 0. Audit of Phase 1 (summary)
 
@@ -33,8 +39,15 @@ Methodological weaknesses that Phase 2 must address or document:
 ## 1. Prediction-time assumptions
 
 * **Features.** All features of transactions in step *s*, including neighbourhood
-  aggregates within *s*, become available at the end of step *s*. That is when step *s*
-  is scored. There are no cross-step edges, so no future structure enters.
+  aggregates within *s*, are assumed to be available at the end of step *s*. That is
+  when step *s* is scored. The published edge list has no cross-step edges, so the edges
+  we use carry no future structure. **Caveat:** the 72 aggregate features were computed
+  by the publisher over a neighbourhood that is not fully documented; they cannot be
+  verified to use only within-step, pre-step-end information. A partial check is
+  possible: recompute one-hop aggregates (mean, max, min, std of the local features over
+  in- and out-neighbours) from the published edge list and test how closely they match
+  the published aggregate columns. A close match would support the within-step reading;
+  a poor match would leave the provenance open. This check has not been run.
 * **Publisher standardisation.** Local and aggregate features were standardised by the
   publisher using all 49 steps. For XGBoost this leaks nothing: standardisation is a
   strictly increasing per-feature map, and histogram tree splits are invariant to such
@@ -90,7 +103,8 @@ column subsampling only. They measure training stochasticity, not data uncertain
 prevalence is 0.109, the Phase 1 training prevalence); mean per-step AP; P@K and R@K
 per step for K ∈ {10, 20, 50, 100}; detections when ranking **all** transactions with
 unknowns as non-detections (a conservative lower bound); per-step detection rate;
-sub-period results (35–42 versus 43–49); fit time and number of fits.
+sub-period results (35–42 versus 43–49; the 42/43 boundary was taken from the Phase 1
+per-step results, that is, from inspecting the test period); fit time and number of fits.
 
 **Selection rule (dev):** within each family, choose the parameter with the highest
 seed-averaged pooled AP on dev. Ties within 0.002 go to the cheaper option (fewer fits,
@@ -112,6 +126,11 @@ then the larger window or longer half-life). The selection is written to
 * With only 15 scored steps and a regime change inside the confirm period, intervals
   will be wide. A difference is called **robust** only if its 95% interval excludes 0 in
   both the dev and confirm backtests and the sign holds in both sub-periods of confirm.
+* Caveat on the dev half of this rule (added after the runs): for periodic, sliding and
+  recency the dev interval is computed for the parameter that won the dev selection, so
+  it is subject to a winner's curse (the selected parameter's dev effect is biased
+  upward). Static and expanding have no tuned parameter and are not affected. The confirm interval is the
+  meaningful half of the rule; the dev half is a weaker check than it looks.
 
 ## 6. Distribution-shift diagnostics
 
@@ -137,8 +156,9 @@ Computed by `chainwatch shift`, using the Phase 1 static model and the data:
 
 ## Deviations
 
-All deviations are listed here. None of them changed a pre-registered metric, split,
-strategy grid, selection rule or seed set.
+All deviations the author recorded are listed here. According to that record, none of
+them changed a pre-specified metric, split, strategy grid, selection rule or seed set
+(see the status note at the top: this cannot be checked from the published history).
 
 1. **Time-proxy features (not pre-registered; exploratory).** The first shift-diagnostic
    run produced a domain-classifier AUC of 1.000 for *every* step, including steps inside

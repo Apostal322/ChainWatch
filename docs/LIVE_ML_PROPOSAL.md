@@ -20,12 +20,14 @@ within *k* blocks (for example k = 1, 3, 6), or whether it is replaced or evicte
 
 * **Labels arrive later, for free.** Re-query the collected txids after *k* blocks (or
   subscribe to `mined` and `replaced` events) and store the outcome in a separate table
-  with its own timestamp. Features are never updated after `fetched_at`, so nothing leaks.
+  with its own timestamp. Features are never updated after `fetched_at`, but `fetched_at`
+  is not the first observation (see "Collector gaps" below), so the observation time
+  must be fixed explicitly.
 * **The label latency is explicit:** a label for *t* becomes usable after *t + k* blocks.
   This is exactly Phase 2's setting.
 * **Baselines to beat:** the fee rate relative to the mempool's projected-block minimum fee
-  at time *t* (available from mempool.space `projected-block` data, recorded at observation
-  time), and logistic regression on fee rate.
+  at time *t* (available from mempool.space `projected-block` data; the collector does
+  **not** record it yet), and logistic regression on fee rate.
 * **Evaluation:**
   * a rolling-origin backtest over days, with block bootstrap over time;
   * calibration (reliability, ECE), because a probability of confirmation is useful only if
@@ -33,6 +35,29 @@ within *k* blocks (for example k = 1, 3, 6), or whether it is replaced or evicte
   * analysis of fee-market regime shifts (fee spikes) as distribution shift.
 * **Value:** it validates the pipeline, label joins and temporal evaluation end to end on
   real data without any claims about crime.
+
+### Collector gaps to close before a Stage A study
+
+The current collector (Phase 5) was built for monitoring, not for this study:
+
+* **`confirmed_at_fetch` leaks the label.** It is the status at `fetched_at`, which can be
+  up to `max_queue_age_s` (300 s by default) after `first_seen`. For a "confirms within
+  *k* blocks of *t*" task, either exclude it from the features, or define *t* as
+  `fetched_at` (not `first_seen`) and count blocks from there.
+* **No per-row feature-schema version.** Rows do not record which feature code produced
+  them; add a version column before collecting study data.
+* **`fee_rate_outlier` is not reproducible from stored rows.** It depends on the
+  collector's in-memory rolling window (the last 500 fee rates), which is not persisted
+  and resets on restart. Exclude it, or persist the window statistic per row.
+* **Retention is too short.** Defaults keep 7 days (and 20,000 rows locally, 50,000 rows
+  in `configs/live-cloud.yaml`); `minute_stats` keeps 24 h. A study of at least 4 weeks
+  needs these raised (and disk sized) for its duration.
+* **Selection bias from drops.** Back-pressure drops, queue expiry and fetch failures
+  cluster in time (bursts, fee spikes, outages), so busy periods, the regimes of most
+  interest, are under-sampled. Persist per-minute drop and coverage counts for the
+  study period and report coverage by period.
+* **No projected-block minimum fee** is recorded, so the main baseline cannot be computed
+  from collected data yet.
 
 ## 3. Stage B: risk-related labels (only with careful sourcing)
 
@@ -60,7 +85,8 @@ Possible label sources, all sparse, delayed and biased:
 ## 4. Protocol (applies to both stages)
 
 1. Freeze the feature set and code version and **pre-register** the splits, metrics and
-   decision rules before looking at the outcomes.
+   decision rules before looking at the outcomes, and publish that protocol (a
+   timestamped commit or registry entry) so its timing can be verified.
 2. Collect at least 4 weeks of observations. Reserve the **last week as a sealed holdout**
    that is not inspected until the final evaluation. This avoids repeating Phase 1, where
    the test period became exploratory.

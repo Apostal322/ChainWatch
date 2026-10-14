@@ -107,7 +107,7 @@ Verified before pushing (commands in §6):
   guide. Until the repository with that name exists, the CI badge shows as broken.
 - **Description:**
   > Leakage-aware ranking of illicit Bitcoin transactions under temporal distribution
-  > shift (Elliptic++): pre-registered retraining backtests with label latency, plus a
+  > shift (Elliptic++): retraining backtests with label latency, plus a
   > FastAPI + React replay service that reproduces research scores exactly. Synthetic
   > Docker demo.
 - **Topics:** `machine-learning`, `distribution-shift`, `concept-drift`,
