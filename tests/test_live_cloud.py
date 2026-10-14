@@ -371,7 +371,9 @@ def test_remote_mode_requires_https_and_a_token(monkeypatch):
 # ---- configs, isolation, units ---------------------------------------------------------------
 def test_cloud_configs():
     cloud = load_config(REPO_ROOT / "configs" / "live-cloud.yaml").live
-    assert cloud.enabled and str(cloud.db_path).startswith("/var/lib/chainwatch/")
+    # as_posix + endswith: on Windows the absolute VM path resolves to <drive>:/var/lib/...
+    assert cloud.enabled
+    assert cloud.db_path.as_posix().endswith("/var/lib/chainwatch/live.sqlite")
     assert cloud.fetch_per_minute <= 12 and cloud.sample_rate <= 0.05 and cloud.retention_days <= 7
     assert load_config(REPO_ROOT / "configs" / "public-demo.yaml").live.enabled is False
 
