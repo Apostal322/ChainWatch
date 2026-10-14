@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "default.yaml"
 RAW_DIR_ENV_VAR = "CHAINWATCH_RAW_DIR"
 
-FEATURE_SETS = ("local", "local_aggregate", "all")
+FEATURE_SETS = ("local", "local_aggregate", "all", "augmented", "live_computable")
 THRESHOLD_STRATEGIES = ("max_f1", "fixed")
 
 
