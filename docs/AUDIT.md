@@ -1,3 +1,43 @@
+# Engineering audits
+
+* [v0.6.0 audit](#v060-engineering-audit-live-monitor-cloud-kit-research-claims) (2026-10): live collector, edge API and remote proxy, deployment kit, dashboard, research claims.
+* [Phase 4 audit](#phase-4-engineering-audit-release-readiness): serving layer and release.
+
+## v0.6.0 engineering audit (live monitor, cloud kit, research claims)
+
+Four independent read-only reviews (ingestion correctness against mempool's backend source,
+security and API, frontend with fault injection in a browser, ML scientific claims),
+followed by fixes. Every fixed item has a regression test or a recorded check; nothing
+was deployed. Severity: P0 critical, P1 high, P2 medium, P3 low. **No P0 was found.**
+
+| # | Sev | Component | Problem | Root cause | Fix | Evidence |
+|---|---|---|---|---|---|---|
+| 1 | P1 | collector | After about 1,024 failed reconnects (~8.5 h of upstream outage) the WebSocket task died for good while the process stayed up; systemd never restarted it | `base * 2**attempt` overflows a float at attempt 1024; the call was outside the try block | exponent clamped at 30 | `test_backoff_never_overflows_after_many_failures` |
+| 2 | P1 | collector | A worker or the heartbeat that hit an unexpected exception (SQLite locked or full, an out-of-range integer) died silently: the process looked alive, every new txid was dropped | tasks were only awaited at shutdown; `gather(return_exceptions=True)` hid errors | per-item exception handling (`internal_errors`); `run()` supervises the tasks, sets `fatal`, state `failed`, exit code 1 → systemd restart | `test_worker_survives_…`, `test_dead_pipeline_task_stops_…`, `test_cli_collect_exits_nonzero_on_fatal`; systemd container: 25 s exclusive lock → exit 1 → restarted |
+| 3 | P1 | dashboard API (Render) | Concurrent `/v1/live/events` opens bypassed the stream cap; ~40 streams filled uvicorn's concurrency limit and `/health/ready` returned 503 (Render marks the service unhealthy) | cap checked before an `await`, counter incremented after it; no per-client cap | slot reserved synchronously, released in the response wrapper; 2 per client; 10 total (< 32) | `test_stream_slots_are_reserved_before_any_await`, `test_per_client_stream_cap_…` |
+| 4 | P1 | dashboard UI | Mock data was labelled "REAL BITCOIN NETWORK DATA" whenever the status call failed or returned an unreadable body; the badge stayed "Connected" with the API unreachable | REAL was the fallback for a null status; last good status never aged | badge is REAL only when the status says so; "Status unknown" on errors or status older than 20 s; "Connected, no new data" after 2 min without observations | 13 frontend tests; Playwright before/after (API down, truncated body, server killed) |
+| 5 | P1 | dashboard UI | Live feed rows were not reachable by keyboard | `onClick` on `<tr>` only | row buttons, WAI-ARIA tabs | Playwright keyboard checks |
+| 6 | P1 | research docs | "Pre-registered / committed before the experiments" cannot be verified: the protocol first appears in git in the same commit as the results | pre-release history not published | wording: fixed before the runs per the author's record, not independently verifiable | docs diff; `git log -- docs/PHASE2_PROTOCOL.md` |
+| 7 | P2 | remote proxy | Cache stampede (20 concurrent misses → 20 upstream calls), failures not cached, unbounded key space, whole cache cleared at 512 keys | lock released before the fetch; errors raised before caching | single flight, negative cache, LRU 256, upstream token bucket 3/s, streamed byte cap, invalid JSON → 502 | `tests/test_live_security.py` (5 tests) |
+| 8 | P2 | edge API | Unauthenticated requests drained the per-IP bucket shared with the token holder (Render's egress IP is shared) | rate limit ran before auth | valid token exempt from the per-IP limit | `test_edge_rate_limit` |
+| 9 | P2 | collector | Replaced/evicted/mined txids still fetched (404s waste ~20 % of the budget) | `removed`/`mined` only counted | skipped before fetch (`gone_before_fetch`); `mined` counted; `replaced` → `replacement_pairs` with documented overlap | `test_removed_or_mined_txids_are_skipped_before_fetch` |
+| 10 | P2 | collector | Disconnect outages started at detection, under-reporting up to `stale_after_s` per incident | outage opened when the watchdog fired | starts at the last received message | `test_disconnect_outage_starts_at_the_last_message` |
+| 11 | P2 | features | Negative or > 2^63 amounts accepted; the latter crashed the SQLite insert (finding 2) | no range checks | amounts in [0, MAX_MONEY], weight ≤ 4M, locktime/version ranges | `test_out_of_range_*` (7) |
+| 12 | P2 | store | At the 50k-row cap: `stats(60)` 92 ms, fee-filtered list 69 ms, COUNT full scans | `ORDER BY fee_rate` forced a fee-index walk; no covering index | `(outcome, fee_rate)` index, sort in Python, `+column` planner hints | before/after table in LIVE_CLOUD.md §8 |
+| 13 | P2 | dashboard UI | Horizontal scroll at 390 px; stale-response races (live detail, replay paging); EventSource gave up for good after an HTTP error; partial minute plotted as a drop; errors shown as "no gaps" | `1fr` grid track; effects without cancellation; no manual reconnect | `minmax(0,1fr)`; ignore-late-response guards; backoff reconnect with `?since=`; complete minutes only, gaps as breaks; per-panel error states | Playwright before/after at 390/768/1440 |
+| 14 | P2 | research code | Run metadata recorded the *published* Elliptic++ hashes even for synthetic runs, so the "data changed" check could never fire | the published constant was written as the file hash | actual raw-file hashes + `matches_published` + processed fingerprint; evaluate warns on change | `tests/test_data_provenance.py` (4) |
+| 15 | P2 | research docs | Misquoted or overstated numbers (43–49 range, 0.92→0.17, P@20 zero-steps, "no gain before the shift", "close to random"); headline used a sub-period instead of the primary comparison | — | corrected against `reports/`; primary pooled result first; CI-coverage caveat | docs diff (no result changed) |
+| 16 | P3 | collector | HTTP-date `Retry-After` ignored; burst right after a 429 pause; no pause on 5xx; queued items not re-aged after waiting; backoff reset after one frame; token-bucket float spin; 4 MB frame cap below resync deltas; `timelocked` on non-enforced locktimes; missing status read as unconfirmed | — | each fixed | `tests/test_live_faults.py` |
+| 17 | P3 | deploy | `CHAINWATCH_HOST` unvalidated (a bad value emptied the Caddyfile); moving `main` installed as root; token readable by the collector's user; no syscall filter or loopback-only rule | — | host/REF validation, `EXPECTED_SHA`, Caddyfile validated before replace, token 0600 root:root, `SystemCallFilter`, `IPAddressDeny`; exposure 3.0 → 1.3 / 1.1 | systemd container test (LIVE_CLOUD.md §11) |
+| 18 | P3 | API | Hostile `Last-Event-ID` → 500; 429/413 without security headers; IPv6 rate-limit rotation within a /64; shutdown waited up to 300 s for SSE | — | strict parsing; headers on every error; /64 keys; `timeout_graceful_shutdown=10` | `tests/test_live_security.py` |
+
+Accepted, not changed: the collector and edge API share a service user (a compromised
+collector could read the edge's environment via `/proc`); `render.yaml` pulls a version tag
+rather than a digest (changing it is a production change); CI installs unlocked dev
+dependencies; public `/v1/live/status` passes collector error strings (no secrets).
+
+---
+
 # Phase 4 engineering audit (release readiness)
 
 An independent review of the serving layer (findings 1–15) and a release review (16–18), carried out by a separate reviewer working

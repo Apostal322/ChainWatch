@@ -80,7 +80,8 @@ mempool.space WS ─► parse + validate txids ─► dedupe (LRU 200k) ─► s
 | Sampling | deterministic SHA-256 hash of the txid below `sample_rate` (default 5%): reproducible and independent of fee or arrival order |
 | Idempotency | dedupe LRU plus `store.has(txid)` before fetching plus `UNIQUE(txid)` with `INSERT OR IGNORE` (safe across restarts) |
 | Memory | bounded dedupe set, queue, fee-rate window (500), at most 25 stored outputs and input references per transaction; SQLite retention of 20k rows and 24 h of per-minute counters |
-| Metrics | received, duplicates, invalid txids, malformed frames, not sampled, queued, dropped, expired, fetched, failed, not found, rate limited, timeouts, malformed payloads, removed, replaced, connects, reconnects, stale reconnects |
+| Metrics | received, duplicates, already stored, invalid txids, malformed frames, not sampled, queued, dropped, expired, gone before fetch, fetched, failed, not found, rate limited, timeouts, malformed payloads, upstream (5xx) errors, internal errors, removed, mined, replacement pairs, connects, reconnects, stale reconnects, sequence gaps |
+| Counter semantics | From mempool's backend source: `removed` lists every txid that left the mempool in one poll (replacements, conflicts, evictions, expiry) but **not** mined ones; `mined` arrives with each block; each `replaced` pair's old txid is also in `removed`, and one old txid can appear in several pairs (A→B, then A→C and B→C). So `removed` and `replacement_pairs` overlap and are not separate outcomes: equal counts in a short window without a block simply mean every removal was a replacement. Removed or mined txids still queued are not fetched (`gone_before_fetch`) |
 
 ## 4. Features (`src/chainwatch/live/features.py`)
 
@@ -170,8 +171,8 @@ were not measured here; check the `received` and `dropped` counters in `/v1/live
 * `first_seen` is the collector's receipt time. Network-wide first-seen time is
   unavailable.
 * **Replacements and confirmations after the fetch are not tracked** (by design, so that
-  no post-observation information leaks into features). `removed` and `replaced` events
-  are only counted.
+  no post-observation information leaks into features). `removed`, `mined` and `replaced`
+  events are counted, and used only to skip fetching txids that already left the mempool.
 * **Prevout-derived fields** depend on the REST payload. Values that are missing make
   `input_value_total` unknown.
 * **Indicator thresholds are conventions** (dust 546 sat, fan-out 50, …), not tuned or

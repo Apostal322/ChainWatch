@@ -34,6 +34,52 @@
 - **Tests:** 24 new Python tests in `tests/test_live_cloud.py`, plus 1 frontend test. The
   install was also tested in a fresh Ubuntu 24.04 container, including a `kill -9`
   restart; see `docs/LIVE_CLOUD.md` §11.
+- **Engineering audit** (four independent reviews; table in `docs/AUDIT.md`; no P0):
+  - **P1 fixed:**
+    - the reconnect backoff overflowed after ~8.5 h of outage and silently stopped
+      reconnecting;
+    - a dead worker or heartbeat left a live-looking process that no longer collected
+      (now fatal exit 1, so systemd restarts it);
+    - concurrent event-stream opens bypassed the cap and could take the Render app's health
+      check down;
+    - the dashboard labelled mock data as real, and showed "Connected", whenever the
+      status call failed;
+    - feed rows were not reachable by keyboard;
+    - the protocol-timing claim in the research docs is now stated as unverifiable.
+  - **Remote proxy:** single flight, cached failures, LRU, upstream request budget,
+    bounded reads.
+  - **Edge API:** the token holder is exempt from the per-IP limit.
+  - **Collector:**
+    - removed and mined txids are not fetched;
+    - outages start at the last message;
+    - payload amounts are range-checked;
+    - `Retry-After` dates are honoured; 5xx pauses fetching;
+    - `restore` command.
+  - **Store:** a covering index and planner hints: at 50k rows, `stats(60)` 92 → 14 ms and
+    the default page 15.7 → 2.8 ms.
+  - **Deploy:**
+    - token file 0600 root:root;
+    - host, REF and `EXPECTED_SHA` checks;
+    - Caddyfile validated before replacing;
+    - `SystemCallFilter`, loopback-only edge API (systemd exposure 3.0 → 1.3 / 1.1).
+  - **Dashboard:**
+    - honest source and connection states;
+    - stale-response guards;
+    - event-stream reconnect after HTTP errors;
+    - WCAG AA colours;
+    - no horizontal scroll at 390 px;
+    - charts without a fake final-minute drop.
+  - **Research:**
+    - `manifest.json` records the actual raw-file hashes; it used to record the
+      published constants, even for synthetic data;
+    - misquoted numbers corrected against `reports/`, and the README leads with the
+      primary pooled result. No result changed.
+- **Verification:**
+  - 33 new regression tests (`tests/test_live_faults.py`, `tests/test_live_security.py`)
+    plus 13 frontend tests.
+  - A real-systemd container test of `install.sh` and the units: crash restart,
+    lock-contention fatal exit, backup/restore, upgrade, input validation, reboot.
+  - Fault-injection soak runs with `scripts/soak_test.py`.
 - **Not done:** no cloud resource has been created, real mempool.space ingestion is
   still unverified (the build proxy blocks it), and no 24/7 reliability is claimed.
   `render.yaml` and the public demo are unchanged.

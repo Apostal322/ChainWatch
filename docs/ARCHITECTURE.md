@@ -5,6 +5,32 @@ one container. Research code (Phases 1–2) and serving code (Phase 3) share the
 loading, feature and training functions, and the service is tested to reproduce the
 research predictions exactly.
 
+## System boundaries
+
+Four parts share one package but never share data:
+
+| Part | Runs where | Data | Models | Entry point |
+|---|---|---|---|---|
+| Historical ML research (Phases 1–2) | your machine | Elliptic++ CSVs you download (never committed) | trained here; results committed as aggregates in `reports/` | `chainwatch prepare / train / backtest` |
+| Synthetic demonstration (Phase 3) | Render (public), Docker | generated synthetic data baked into the image | trained on that synthetic data at image build | `chainwatch serve` with `public-demo.yaml` |
+| Local live monitoring (Phase 5) | your machine | real mempool.space observations in a local SQLite file | **none** (rule-based indicators only) | `chainwatch live-collect` + `serve` with `live.yaml` |
+| Persistent cloud monitoring (v0.6.0, prepared) | a small VM (Oracle Always Free target) | the same, designed to be collected continuously (not deployed) | **none**; the VM has no ML packages | `chainwatch-live collect / serve-edge` (systemd) |
+
+* The Elliptic++ models are never applied to live transactions: their anonymised features
+  cannot be computed for new transactions.
+* Live rows never enter the synthetic replay. The two modes have separate routes
+  (`/v1/replay/*` vs `/v1/live/*`), storage and dashboard tabs, and every live response
+  says where its data came from.
+* In remote mode the public dashboard proxies `/v1/live/*` to the VM's edge API server to
+  server. It never opens the database or contacts mempool.space, and the browser never
+  sees the token. See [LIVE_CLOUD.md](LIVE_CLOUD.md) for the deployment and
+  [LIVE_MONITOR.md](LIVE_MONITOR.md) for the pipeline.
+
+Why SQLite for live data: one writer (the collector) and a few readers on one machine;
+WAL gives concurrent reads; the whole store is one file to back up; retention keeps it
+bounded at about 60 MB. A second collector, or readers on other machines, would need a
+server database. That is outside the current scope and documented as a scaling limit.
+
 ## Components
 
 ```mermaid

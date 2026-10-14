@@ -24,7 +24,8 @@ mempool.space (public)                     Oracle Cloud Always Free VM (Ubuntu 2
                                              ▲
             HTTPS + Authorization: Bearer ───┘  (server-to-server; the token never reaches browsers)
 Render Free web service (existing demo image, remote live mode)
-  /v1/live/* proxy with a 2 s shared cache ──► browser "Live monitor" tab (SSE)
+  /v1/live/* proxy: 2 s shared cache, single flight, ──► browser "Live monitor" tab (SSE)
+  cached failures, ≤3 upstream req/s
   /v1/replay/* synthetic demo + research results (unchanged)
 ```
 
@@ -116,14 +117,15 @@ happens and you accept the card risk.
 
 | Requirement | Implementation |
 |---|---|
-| WebSocket reconnection, exponential backoff | full-jitter backoff (1 s → 60 s), reset after a working stream; 90 s staleness watchdog; protocol pings every 20 s |
+| WebSocket reconnection, exponential backoff | full-jitter backoff (1 s → 60 s; exponent clamped, so it never overflows however long the outage), reset only after 30 s of healthy stream; 90 s staleness watchdog; protocol pings every 20 s |
+| No silent stalls | `run()` supervises its tasks: if the WebSocket loop, a worker or the heartbeat dies (e.g. the database cannot be written), the collector stops, records state `failed` and exits 1, so systemd restarts it. A bad single item is logged, counted (`internal_errors`) and stored as a failed row instead |
 | Bounded queues, deduplication | 100-entry fetch queue (drops are counted); 200k-txid LRU; `UNIQUE(txid)` with `INSERT OR IGNORE` |
-| Conservative request limits | token bucket, 12 requests/min with a burst of 3, one at a time; pause on HTTP 429 for `Retry-After` |
+| Conservative request limits | token bucket, 12 requests/min with a burst of 3, one at a time; pause on HTTP 429 for `Retry-After` (seconds or HTTP-date, no burst after the pause); 30 s pause after HTTP 5xx; txids that were removed or mined before their turn are not fetched (`gone_before_fetch`); queue age re-checked after waiting |
 | Persistent state and restart recovery | SQLite on the boot volume. At start-up the collector records the time since the previous heartbeat as a `collector_down` gap, labelled "clean stop" or "unclean exit", and closes outages left open by a crash. Stored txids are not fetched again |
 | Graceful shutdown | SIGTERM → final heartbeat `stopped`, open outage closed, HTTP client closed (`TimeoutStopSec=30`) |
 | Crash restart / boot start | `Restart=always`, `StartLimitIntervalSec=0`, `RestartSteps`/`RestartMaxDelaySec` (10 s → 5 min); `WantedBy=multi-user.target` |
 | Health metrics | heartbeat every 5 s, about 20 counters, `/health/ready` (200 only when connected with a fresh heartbeat), `chainwatch-live report` |
-| Outage and gap tracking | `outages` table: `collector_down`, `disconnected` (WebSocket), `sequence_gap`. A sequence gap is recorded when mempool's `sequence` (+1 per update, every update sent to every subscriber) jumps by more than 1 within one connection. These feed availability in `/v1/live/status` and the dashboard |
+| Outage and gap tracking | `outages` table: `collector_down`, `disconnected` (WebSocket; starts at the last received message, so watchdog latency counts as down time), `sequence_gap`. A sequence gap is recorded when mempool's `sequence` (+1 per update, every update sent to every subscriber) jumps by more than 1 within one connection. These feed availability in `/v1/live/status` and the dashboard |
 | Retention and bounded growth | ≤ 50,000 transactions and ≤ 7 days, 24 h of per-minute counters, 30 days of outages; hourly `wal_checkpoint(TRUNCATE)`; journald capped at 200 MB; 7 rotated backups |
 | Resource caps | systemd `MemoryMax=300M` / `250M`, `CPUQuota=50%`, `TasksMax=64` |
 
@@ -134,19 +136,36 @@ happens and you accept the card risk.
 * **Authentication:**
   * every `/v1/live/*` call needs `Authorization: Bearer <token>`;
   * the token is 64 hex characters generated **on the VM** by `install.sh` (`openssl rand -hex
-    32`) and stored in `/etc/chainwatch/live.env` (0640 root:chainwatch);
+    32`) and stored in `/etc/chainwatch/live.env` (**0600 root:root**: systemd reads it
+    before dropping privileges, so the service user, and with it the collector that parses
+    internet data, cannot read the file);
   * on Render it is a secret environment variable; it is never in Git and never sent to
     browsers.
+  * Residual risk (accepted): both services run as `chainwatch`, so a compromised collector
+    could read the edge process's environment through `/proc`. A separate user for the edge
+    API would remove this, at the cost of shared-group permissions on the SQLite WAL files.
 * **Limits:**
-  * edge API: 240 requests/min per client (keyed on the address Caddy appends), 64 KB
-    bodies, `limit ≤ 200`, GET only, no docs or OpenAPI schema;
-  * dashboard: its existing 120/min public limit plus a 2 s shared cache, so the number of
-    browsers does not multiply edge load.
+  * edge API: 240 requests/min per client for **unauthenticated** traffic (keyed on the
+    address Caddy appends; IPv6 by /64). The token holder is not rate limited, so floods
+    from a shared egress IP (Render's) cannot lock the dashboard out. 64 KB bodies,
+    `limit ≤ 200`, GET only, no docs or OpenAPI schema; uvicorn `limit_concurrency=32`.
+  * dashboard: its existing 120/min public limit; the remote backend fetches each query at
+    most once per 2 s (single flight for concurrent misses), caches failures for the same
+    period, and caps all upstream traffic at 3 requests/s (burst 20), so neither visitor
+    count nor varied query parameters multiply edge load.
+  * event streams: at most 10 on Render (below its 32-connection limit) and 2 per client;
+    slots are reserved before any await and always released; each stream ends after 300 s.
 * **Sandbox:** units run as the `chainwatch` user with `ProtectSystem=strict`,
-  `NoNewPrivileges`, an empty capability set and only `/var/lib/chainwatch` writable.
-  `systemd-analyze security` exposure scores: collector 3.0, API 3.0, backup 2.3 (all "OK").
+  `NoNewPrivileges`, an empty capability set, `SystemCallFilter=@system-service` (minus
+  privileged, resource, mount and debug calls), `ProtectProc=invisible`, `RemoveIPC`, and
+  only `/var/lib/chainwatch` writable. The edge API may only talk to loopback
+  (`IPAddressDeny=any`, `IPAddressAllow=localhost`). `systemd-analyze security` exposure:
+  collector **1.3**, API **1.1**, backup 2.3 (all "OK"; previously 3.0 / 3.0 / 2.3).
 * **Supply chain:** hash-locked pip install (`--require-hashes`); code is cloned from the
-  public repository at a chosen ref.
+  public repository at a chosen ref (validated); `EXPECTED_SHA` pins the exact commit.
+  Recommended: install a release tag, e.g. `REF=v0.6.0 EXPECTED_SHA=<commit>`.
+* **Installer input:** `CHAINWATCH_HOST` must be a bare hostname; the Caddyfile is rendered
+  to a temporary file and checked with `caddy validate` before it replaces the current one.
 * **Logs:** JSON lines with no request bodies, tokens or client addresses.
 
 ## 7. Activate it: manual steps (owner)
@@ -171,7 +190,7 @@ happens and you accept the card risk.
 IP=$(curl -s https://ifconfig.me); HOST="${IP//./-}.sslip.io"     # e.g. 203-0-113-7.sslip.io
 curl -fsSLO https://raw.githubusercontent.com/Apostal322/ChainWatch/main/deploy/oracle/install.sh
 less install.sh                                  # read it before running it as root
-sudo CHAINWATCH_HOST="$HOST" bash install.sh
+sudo CHAINWATCH_HOST="$HOST" REF=<release tag> EXPECTED_SHA=<its commit> bash install.sh
 sudo cat /etc/chainwatch/live.env                # copy the token once; keep it secret
 ```
 
@@ -207,6 +226,21 @@ the edge API every 2 s:
 | Database at the retention cap | **62.7 MB** for 50,000 rows (1,253 bytes per row) |
 | Virtualenv on the VM | 68 MB |
 
+Edge API latency at the 50,000-row cap (synthetic rows, one persistent client like the
+Render proxy; p50). The audit found three slow read paths; the fix is a covering
+`(outcome, fee_rate)` index plus planner hints, measured before and after:
+
+| Request | Before | After |
+|---|---|---|
+| store `list` (default page, `outcome=fetched`) | 15.7 ms | 2.8 ms |
+| store `list` with `min_fee_rate`, sorted by fee | 69.2 ms | 3.0 ms |
+| store `stats(60)` | 91.8 ms | 14.4 ms |
+| store `list` with `flag=` | 26.4 ms | 27.3 ms (unchanged: every row's flags are read) |
+| HTTP `/v1/live/status`, `/transactions?limit=50`, `/stats` | — | 3.0 / 5.6 / 18.8 ms |
+
+(A first soak run reported ~55 ms per edge request: that was the probe opening a new HTTP
+client, and loading a CA bundle, per request, not the server.)
+
 Monthly estimates (derived, not measured on the network):
 * **Requests to mempool.space:** ≤ 12 per minute ⇒ ≤ 17,300 per day ⇒ ≤ 520k per month,
   plus one long-lived WebSocket.
@@ -226,9 +260,13 @@ Monthly estimates (derived, not measured on the network):
 | VM rebooted | nothing: the units and Caddy start at boot |
 | VM stopped or reclaimed by Oracle | Console → Instances → Start. Data is on the boot volume, and the gap is recorded on start-up |
 | mempool.space down or rate-limited | automatic backoff; `disconnected` gaps and `rate_limited` counters show it. Lower `fetch_per_minute` if 429s persist |
-| Restore a backup | `sudo systemctl stop chainwatch-collector chainwatch-live-api`; `sudo -u chainwatch cp /var/backups/chainwatch/live-<stamp>.sqlite /var/lib/chainwatch/live.sqlite`; `sudo rm -f /var/lib/chainwatch/live.sqlite-wal /var/lib/chainwatch/live.sqlite-shm`; start both units |
-| Rotate the token | edit `/etc/chainwatch/live.env` (`openssl rand -hex 32`), `systemctl restart chainwatch-live-api`, update the Render secret |
-| Upgrade | `sudo REF=<tag-or-branch> CHAINWATCH_HOST=$HOST bash /opt/chainwatch/app/deploy/oracle/install.sh` |
+| Collector state `failed` / dashboard "Collector failed" | the process hit a fatal internal error (e.g. database unwritable) and exited 1; systemd restarts it. `journalctl -u chainwatch-collector \| grep "pipeline task died"` names the cause; check `df -h /var/lib/chainwatch` |
+| Dashboard "Connected, no new data" | the WebSocket is up but nothing was fetched for 2 min: check the report's `failures` (429 → lower `fetch_per_minute`; `http_5xx` → mempool.space trouble) |
+| Dashboard "Status unknown" | Render cannot reach the edge API: `curl https://$HOST/health/live`, then `systemctl status caddy chainwatch-live-api`, then the Render logs (`live_upstream_unavailable`) |
+| Restore a backup | `sudo systemctl stop chainwatch-collector chainwatch-live-api`; `sudo -u chainwatch /opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml restore /var/backups/chainwatch/live-<stamp>.sqlite` (integrity-checked; refuses while the collector runs; keeps the replaced files as `*.pre-restore-<stamp>`); start both units |
+| Rotate the token | 1. `sudo sh -c 'umask 077; printf "CHAINWATCH_LIVE_TOKEN=%s\n" "$(openssl rand -hex 32)" > /etc/chainwatch/live.env'`; 2. `sudo systemctl restart chainwatch-live-api`; 3. update the Render secret and redeploy. Between steps 2 and 3 the dashboard shows "Status unknown" (502s): about a minute |
+| Upgrade | `sudo REF=<new tag> EXPECTED_SHA=<commit> CHAINWATCH_HOST=$HOST bash /opt/chainwatch/app/deploy/oracle/install.sh` (idempotent; keeps the token and data; schema migrations run at start-up) |
+| Roll back | the same command with the previous tag. Schema changes so far only add columns and indexes, so an older collector still opens a newer database; take a backup first anyway |
 | Uninstall | `systemctl disable --now chainwatch-*`; remove `/opt/chainwatch`, `/var/lib/chainwatch`, `/etc/chainwatch`; then terminate the VM in the Console |
 
 ## 10. 24-hour reliability test plan (before any 24/7 claim)
@@ -256,11 +294,13 @@ Monthly estimates (derived, not measured on the network):
 
 | Test | Result |
 |---|---|
-| Python unit and integration tests | see the PR. Cloud-specific tests (`tests/test_live_cloud.py`, 24): crash and clean restart recovery, dangling outages, disconnect outage and sequence gap against a local WebSocket server, availability merging, v0.5.0 schema migration, row and age retention, WAL checkpoint, backup integrity and rotation, reliability report, edge auth (missing, wrong and malformed token), health checks, docs off, GET-only, limits, rate limit, weak token refused, dashboard to edge in remote mode (auth header, shared cache, transactions, detail, outages, stats, SSE), clean 502 when the edge rejects or is down, https-only remote URL, configs, no ML imports on the VM, lock without ML packages, systemd unit invariants |
-| `systemd-analyze verify` (systemd 255, as on Ubuntu 24.04) | all 4 units OK; security exposure 3.0 / 3.0 / 2.3 ("OK") |
+| Real systemd (Ubuntu 24.04 container booted with systemd 255 as PID 1; real `install.sh`; units pointed at a local mock by drop-ins) | **all 10 sections PASS**: install 20 s; token file 0600 root:root and unreadable by the service user; units enabled; no seccomp kills under `SystemCallFilter`; `smoke_live.sh` PASS; SIGKILL → restarted by systemd after 10 s, 15.4 s `collector_down` "unclean exit"; another process holding an exclusive SQLite lock for 25 s → edge reads continue (WAL) → collector `task heartbeat died: OperationalError: database is locked` → exit 1 → restarted; backup through `chainwatch-backup.service`; `restore` refused while running, works after stop; re-running `install.sh` keeps token and data; bad host / REF / `EXPECTED_SHA` rejected; `caddy validate` (2.6.2) on the rendered template; exposure 1.3 / 1.1 / 2.3; container reboot → all units back, 0.9 s "clean stop" gap |
+| Fault-injection soak, 6 min, one fault every 25 s (`scripts/soak_test.py`) | **11/11 checks PASS**: REST 429 / 500 / malformed JSON / schema drift / slow, WebSocket drop / 40 s silence / 5,000-txid burst / sequence gap, collector SIGKILL, edge restart, 5 SSE clients dropped mid-stream. Recovery: WS drop 4.6 s, kill 5.6 s, edge restart 0.6 s, silence 23 s (watchdog 20 s). Edge and dashboard availability 100 % (169 probes each), integrity ok, 0 tracebacks, clean SIGTERM for every process |
+| Python unit and integration tests | see the PR. Regression tests from the audit: `tests/test_live_faults.py` (20) and `tests/test_live_security.py` (13). Cloud-specific tests (`tests/test_live_cloud.py`, 24): crash and clean restart recovery, dangling outages, disconnect outage and sequence gap against a local WebSocket server, availability merging, v0.5.0 schema migration, row and age retention, WAL checkpoint, backup integrity and rotation, reliability report, edge auth (missing, wrong and malformed token), health checks, docs off, GET-only, limits, rate limit, weak token refused, dashboard to edge in remote mode (auth header, shared cache, transactions, detail, outages, stats, SSE), clean 502 when the edge rejects or is down, https-only remote URL, configs, no ML imports on the VM, lock without ML packages, systemd unit invariants |
+| `systemd-analyze verify` (systemd 255, as on Ubuntu 24.04) | all 4 units OK; security exposure 1.3 / 1.1 / 2.3 ("OK") |
 | `install.sh` in a fresh `ubuntu:24.04` container (no systemd or Caddy) | exit 0 in 41–55 s; user, directories and token permissions correct; no ML packages; re-run idempotent with the token kept |
 | Same container, real processes against a local mock source | `smoke_live.sh` **PASS** (health, 401 ×2, status, transactions, limits, no DB/docs exposure); `kill -9` → restart → one 21 s `collector_down` gap "unclean exit"; backup OK; SIGTERM → `stopped` |
 | 10-minute resource run (real processes, mock at 6 tx/s, client polling every 2 s) | collector 0.08 % CPU / 39 MB, edge 0.43 % CPU / 57 MB; 3,600 txids, 0 dropped, 0 sequence gaps (§8) |
 | Dashboard in remote mode, real processes (`public-demo-live.yaml` → edge API with a 64-hex token → collector) | status `via remote collector (edge API)`; a 36 s restart gap appears in the gaps table and in the 24-hour observed share (94.7 %); SSE, detail panel and the mock-source label work; Replay tab still shows the synthetic banner; 0 browser console errors (Playwright) |
 | Wheels for ARM64 and x86-64 | all 26 locked wheels downloaded with hash verification for both |
-| Not tested here | real mempool.space traffic, Oracle itself, Caddy and Let's Encrypt issuance, systemd restart and boot behaviour on a real VM, a 24-hour run |
+| Not tested here | real mempool.space traffic, Oracle itself (shape, network, reclamation), Caddy serving and Let's Encrypt issuance, a real VM reboot, a 24-hour run on the public network |
