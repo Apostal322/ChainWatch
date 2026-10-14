@@ -4,7 +4,7 @@ FastAPI and uvicorn, so the VM never needs pandas, scikit-learn or XGBoost.
     chainwatch-live --config configs/live-cloud.yaml collect        # systemd: chainwatch-collector
     chainwatch-live --config configs/live-cloud.yaml serve-edge     # systemd: chainwatch-live-api
     chainwatch-live --config configs/live-cloud.yaml backup --dest /var/backups/chainwatch
-    chainwatch-live --config configs/live-cloud.yaml restore /var/backups/chainwatch/live-<stamp>.sqlite
+    chainwatch-live --config configs/live-cloud.yaml restore <backup>.sqlite  # services stopped
     chainwatch-live --config configs/live-cloud.yaml report --hours 24
 """
 
