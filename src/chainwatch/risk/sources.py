@@ -32,6 +32,18 @@ class SourceSpec:
     note: str
 
 
+DISPLAY_NAMES = {"ofac-sdn": "OFAC SDN", "ofac-sdn-mirror": "OFAC SDN (third-party mirror)"}
+
+
+def source_title(source_id: str, label: str | None) -> str:
+    """'<source name> (<party>)' for alert titles. A label equal to the source's own label
+    describes the source, not a party, and is not repeated."""
+    name = DISPLAY_NAMES.get(source_id, source_id)
+    spec = SOURCES.get(source_id)
+    party = label if label and (spec is None or label != spec.label) else None
+    return f"{name} ({party})" if party else name
+
+
 SOURCES: dict[str, SourceSpec] = {
     "ofac-sdn": SourceSpec(
         "ofac-sdn",
@@ -50,7 +62,7 @@ SOURCES: dict[str, SourceSpec] = {
         "lists/sanctioned_addresses_XBT.txt",
         "Data: OFAC SDN (US government work, public domain); extraction tool: MIT (0xB10C)",
         "sanctions",
-        "OFAC SDN (third-party nightly extraction)",
+        "",  # the list names no parties: a per-address label would only repeat the source
         "Nightly extraction of the XBT addresses from sdn_advanced.xml by a third party. Same "
         "addresses, but no per-address party names or dates. Fallback when the official "
         "file cannot be fetched.",

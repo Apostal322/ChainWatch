@@ -353,8 +353,9 @@ class LiveReader:
                     )
                 except sqlite3.OperationalError:  # database from before v0.7.0
                     prio = {}
-                for r in out:
+                for r in out:  # null priority + assessed: assessed, nothing to review
                     r["risk_priority"] = prio.get(r["id"])
+                    r["risk_assessed"] = r["id"] in prio
         return total, out
 
     def get(self, txid: str) -> dict[str, Any] | None:

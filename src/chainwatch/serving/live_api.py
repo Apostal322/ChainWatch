@@ -16,6 +16,7 @@ Isolation from the research service:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hmac
 import json
 import os
@@ -34,6 +35,7 @@ from chainwatch.config import LiveConfig
 from chainwatch.live.features import INDICATORS
 from chainwatch.live.protocol import valid_txid
 from chainwatch.live.store import SORTABLE, LiveReader, NoLiveData
+from chainwatch.risk.anomaly import DetectorConfig
 from chainwatch.serving.security import client_key
 
 LIVE_NOTICE = (
@@ -62,7 +64,8 @@ RISK_LAYERS = {
     "graph": "Relations within this collector's observed data (distance 2). Proximity is "
     "not ownership or culpability; unobserved parents are not checked.",
     "anomaly": "Behavioural anomalies: measurements in the tail of recently sampled "
-    "traffic. Unusual is not illicit (batch payouts, consolidations, CoinJoins).",
+    "traffic. Unusual is not evidence of wrongdoing: batch payouts, consolidations and "
+    "CoinJoins are unusual and legitimate.",
     "supervised": "No supervised model is validated for live transactions; this layer abstains.",
 }
 
@@ -157,9 +160,18 @@ class LocalBackend:
         return self.reader.list(limit=RECENT_WINDOW, sort="id", descending=True, outcome=None)[1]
 
     def risk_summary(self, hours: float) -> dict[str, Any]:
-        summary = self.reader.risk_summary(time.time() - hours * 3600)
+        now = time.time()
+        summary = self.reader.risk_summary(now - hours * 3600)
         st = self.reader.status() or {}
         counters = st.get("counters") or {}
+        settings = st.get("settings") or {}
+        max_age_days = settings.get("indicator_max_age_days", LiveConfig().indicator_max_age_days)
+        anomaly_cfg = settings.get("anomaly") or dataclasses.asdict(DetectorConfig())
+        if summary is not None:
+            for src in summary["sources"]:  # same staleness rule as the screening layer
+                checked = src.get("checked_at") or src.get("retrieved_at")
+                src["age_s"] = round(now - checked, 1) if checked else None
+                src["stale"] = checked is None or now - checked > max_age_days * 86400
         return {
             "enabled": summary is not None,
             "window_hours": hours,
@@ -171,6 +183,10 @@ class LocalBackend:
                 "risk_errors": counters.get("risk_errors"),
                 "layer_errors": counters.get("layer_errors"),
                 "supervised": counters.get("supervised_state"),
+                "indicator_max_age_days": max_age_days,
+                "anomaly_min_reference": anomaly_cfg.get("min_reference"),
+                "anomaly_window": anomaly_cfg.get("window"),
+                "anomaly_alpha": anomaly_cfg.get("alpha"),
             },
             "layers": RISK_LAYERS,
         }

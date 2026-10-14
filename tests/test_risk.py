@@ -408,6 +408,42 @@ def test_collector_screens_relates_and_tracks_lifecycle(tmp_path):
     assert kinds == {"source_match", "spends_output_of_tx_funded_by_listed_address"}
     assert col.c.screening_matches == 1 and col.c.graph_relations == 1
     assert col.c.risk_assessed == 3 and col.c.risk_errors == 0
+    rows = reader.list(limit=10, sort="id", descending=True, outcome=None)[1]
+    assert all(r["risk_assessed"] for r in rows)  # committed with the observation
+
+
+def test_failed_risk_write_keeps_the_observation_and_leaves_no_partial_record(
+    tmp_path, monkeypatch
+):
+    cfg = _cfg(tmp_path)
+    store = LiveStore(cfg.db_path)
+    _ingest(store, [LISTED], at=1.0)
+    col = Collector(cfg, store, http=httpx.AsyncClient(), rng=random.Random(0))
+    col._build_engine()
+    f, tx = _features("boom", out_addresses=[LISTED])
+
+    def fail(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(rp, "save_risk", fail)
+    col._store_and_assess(f, [], tx)
+    reader = LiveReader(cfg.db_path)
+    row = reader.get(f["txid"])
+    assert row is not None and row["risk"] is None  # observation kept, no record
+    assert store.db.execute("SELECT COUNT(*) FROM tx_address").fetchone()[0] == 0  # rolled back
+    assert reader.alerts(None, 10) == []
+    assert col.c.fetched == 1 and col.c.risk_errors == 1 and col.c.risk_assessed == 0
+    listed = reader.list(limit=5, sort="id", descending=True, outcome=None)[1][0]
+    assert listed["risk_assessed"] is False and listed["risk_priority"] is None
+
+
+def test_alert_titles_name_the_source_without_repeating_a_mirror_label():
+    from chainwatch.risk.sources import SOURCES, source_title
+
+    assert SOURCES["ofac-sdn-mirror"].label == ""  # the mirror names no parties
+    assert source_title("ofac-sdn-mirror", "") == "OFAC SDN (third-party mirror)"
+    assert source_title("ofac-sdn", "LAZARUS GROUP") == "OFAC SDN (LAZARUS GROUP)"
+    assert source_title("local-list", None) == "local-list"
 
 
 def test_retrospective_screening_does_not_rewrite_history(tmp_path):
@@ -424,6 +460,10 @@ def test_retrospective_screening_does_not_rewrite_history(tmp_path):
     assert rp.retro_screen(store.db, report["version_id"], 51.0) == 1
     alert = rp.alerts(store.db)[0]
     assert alert["retrospective"] is True and alert["kind"] == "retrospective_source_match"
+    assert alert["title"].endswith("later listed by test-src (TEST LIST)")
+    ev = alert["evidence"]
+    assert ev["label"] == "TEST LIST" and ev["category"] == "sanctions"  # like a live match
+    assert {"programs", "party_designated_on"} <= set(ev)
     # the point-in-time record keeps what was known at evaluation time
     assert rp.risk_record(store.db, f["txid"])["screening"]["status"] == "NO_KNOWN_SCREENING_MATCH"
 
@@ -464,16 +504,22 @@ def test_risk_routes_on_the_edge_and_through_the_remote_proxy(tmp_path):
     assert (
         s["summary"]["by_priority"] == {"1": 1} and "not proof of fraud" in s["layers"]["screening"]
     )
-    assert s["summary"]["sources"][0]["source_id"] == "test-src"
+    src = s["summary"]["sources"][0]
+    assert src["source_id"] == "test-src" and src["stale"] is True and src["age_s"] > 86400
+    assert s["engine"]["indicator_max_age_days"] == 7.0
+    assert s["engine"]["anomaly_min_reference"] == 500
+    assert s["summary"]["alerts_by_status_scope"] == "all_time"
+    assert "illicit" not in json.dumps(s["layers"])
     fd = edge.get("/v1/live/findings", headers=auth).json()["findings"]
     assert fd[0]["txid"] == tid and fd[0]["screening"]["matches"][0]["address"] == LISTED
+    assert fd[0]["insufficient_evidence"] is False and fd[0]["errors"] == []
     al = edge.get("/v1/live/alerts?status=new", headers=auth).json()["alerts"]
     assert al[0]["kind"] == "source_match" and al[0]["txids"] == [tid]
     assert edge.get("/v1/live/alerts?status=guilty", headers=auth).status_code == 422
     detail = edge.get(f"/v1/live/transactions/{tid}", headers=auth).json()
     assert detail["risk"]["priority"]["level"] == 1 and "lifecycle" in detail
     rows = edge.get("/v1/live/transactions?outcome=all", headers=auth).json()["rows"]
-    assert rows[0]["risk_priority"] == 1
+    assert rows[0]["risk_priority"] == 1 and rows[0]["risk_assessed"] is True
 
     remote_live = LiveConfig(enabled=True, remote_url="http://testserver", remote_cache_s=0.0)
     be = RemoteBackend(remote_live, token, transport=edge._transport)

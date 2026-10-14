@@ -1,6 +1,7 @@
 // Live Bitcoin monitor: REAL network observations (mempool.space), separate from the
 // historical / synthetic replay. Types mirror /v1/live/* (src/chainwatch/serving/live_api.py).
 import { ApiError } from "./api";
+import type { Lifecycle, PriorityLevel, RiskRecord } from "./risk";
 
 /** Collector connection as reported by the API ("failed": the collector gave up and needs attention). */
 export type Connection = "connected" | "reconnecting" | "disconnected" | "failed";
@@ -21,6 +22,8 @@ export interface LiveRow {
   rbf_signal: boolean | null;
   confirmed_at_fetch: boolean | null;
   flags: string[];
+  /** Review priority of the assessment (1..4); null: no finding, or not assessed (yet). Absent before v0.7.0. */
+  risk_priority?: PriorityLevel | null;
 }
 
 export interface LiveFeatures {
@@ -50,12 +53,20 @@ export interface LiveFeatures {
   n_dust_outputs: number;
   /** null when the source did not say whether the transaction was confirmed. */
   confirmed_at_fetch: boolean | null;
+  // feature schema v2 (risk intelligence); absent in rows stored by older collectors
+  schema_version?: string;
+  coinbase?: boolean;
+  max_equal_value_outputs?: number;
+  n_output_types?: number;
 }
 
 export interface LiveDetail extends LiveRow {
   features: LiveFeatures | null;
   explorer_url: string;
   flag_descriptions: Record<string, string>;
+  /** Risk assessment; null when not assessed (older database, failed fetch, risk disabled). */
+  risk?: RiskRecord | null;
+  lifecycle?: Lifecycle | null;
 }
 
 export interface LiveStatus {
@@ -116,7 +127,7 @@ export interface LiveStats {
   failures: Record<string, number>;
 }
 
-async function get<T>(path: string): Promise<T> {
+export async function liveGet<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { accept: "application/json" } });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -131,12 +142,12 @@ async function get<T>(path: string): Promise<T> {
 }
 
 export const liveApi = {
-  status: () => get<LiveStatus>("/v1/live/status"),
+  status: () => liveGet<LiveStatus>("/v1/live/status"),
   recent: (limit = 200) =>
-    get<{ total: number; rows: LiveRow[] }>(`/v1/live/transactions?limit=${limit}&sort=id&outcome=all`),
-  tx: (txid: string) => get<LiveDetail>(`/v1/live/transactions/${txid}`),
-  stats: (windowMinutes = 60) => get<LiveStats>(`/v1/live/stats?window_minutes=${windowMinutes}`),
-  outages: (hours = 24) => get<{ outages: Outage[] }>(`/v1/live/outages?hours=${hours}&limit=50`),
+    liveGet<{ total: number; rows: LiveRow[] }>(`/v1/live/transactions?limit=${limit}&sort=id&outcome=all`),
+  tx: (txid: string) => liveGet<LiveDetail>(`/v1/live/transactions/${txid}`),
+  stats: (windowMinutes = 60) => liveGet<LiveStats>(`/v1/live/stats?window_minutes=${windowMinutes}`),
+  outages: (hours = 24) => liveGet<{ outages: Outage[] }>(`/v1/live/outages?hours=${hours}&limit=50`),
 };
 
 export const OUTAGE_LABEL: Record<OutageKind, string> = {

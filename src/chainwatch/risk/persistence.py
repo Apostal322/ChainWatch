@@ -23,6 +23,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from chainwatch.risk.indicators import Snapshot
+from chainwatch.risk.sources import source_title
 
 RISK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tx_address (
@@ -132,6 +133,28 @@ def _tx(db: sqlite3.Connection):
             return False
 
     return _T()
+
+
+transaction = _tx
+
+
+def _savepoint(db: sqlite3.Connection, name: str = "risk"):
+    """Nested scope inside an open transaction: a failure rolls back only this part."""
+
+    class _S:
+        def __enter__(self):
+            db.execute(f"SAVEPOINT {name}")
+
+        def __exit__(self, exc_type, *_):
+            if exc_type:
+                db.execute(f"ROLLBACK TO {name}")
+            db.execute(f"RELEASE {name}")
+            return False
+
+    return _S()
+
+
+savepoint = _savepoint
 
 
 # ---------------------------------------------------------------- indicators
@@ -433,6 +456,8 @@ def findings(
                     "level": r["anomaly"].get("level"),
                     "indicators": r["anomaly"].get("indicators", []),
                 },
+                "insufficient_evidence": r.get("insufficient_evidence", False),
+                "errors": r.get("errors", []),
                 "lifecycle": {"state": lifecycle, "at": lifecycle_at, "replaced_by": replaced_by},
             }
         )
@@ -532,6 +557,7 @@ def risk_summary(db: sqlite3.Connection, since: float) -> dict[str, Any]:
         "latency_ms": {"p50": pct(0.5), "p95": pct(0.95), "max": lat[-1] if lat else None},
         "lifecycle": lifecycle,
         "alerts_by_status": alert_counts,
+        "alerts_by_status_scope": "all_time",  # the queue is not windowed
         "sources": source_status(db),
     }
 
@@ -543,13 +569,15 @@ def retro_screen(db: sqlite3.Connection, version_id: int, at: float) -> int:
     with the information available then) are left unchanged; the match is raised as a
     separate alert marked ``retrospective``. Returns the number of matches."""
     rows = db.execute(
-        "SELECT t.txid, a.role, a.idx, i.address, i.source_id, i.label, i.reference, "
-        "i.listed_on, i.available_at FROM indicators i "
+        "SELECT t.txid, a.role, a.idx, i.address, i.source_id, i.category, i.label, "
+        "i.reference, i.listed_on, i.available_at, i.details FROM indicators i "
         "JOIN tx_address a ON a.address = i.address JOIN tx t ON t.id = a.tx_id "
         "WHERE i.version_added = ? AND t.fetched_at < i.available_at",
         (version_id,),
     ).fetchall()
-    for txid, role, idx, address, source_id, label, reference, listed_on, available_at in rows:
+    for row in rows:
+        txid, role, idx, address, source_id, category, label, reference = row[:8]
+        listed_on, available_at, details = row[8], row[9], json.loads(row[10] or "{}")
         verb = "spent from" if role == "in" else "paid to"
         upsert_alert(
             db,
@@ -557,17 +585,21 @@ def retro_screen(db: sqlite3.Connection, version_id: int, at: float) -> int:
             layer="screening",
             kind="retrospective_source_match",
             priority=1,
-            title=f"Earlier observed transaction {verb} an address later listed by {source_id}"
-            + (f" ({label})" if label else ""),
+            title=f"Earlier observed transaction {verb} an address later listed by "
+            f"{source_title(source_id, label)}",
             txid=txid,
-            evidence={
+            evidence={  # the same fields as a live match
                 "address": address,
                 "role": role,
                 "index": idx,
                 "source_id": source_id,
+                "category": category,
+                "label": label,
                 "reference": reference,
                 "listed_on": listed_on,
                 "available_at": available_at,
+                "programs": details.get("programs"),
+                "party_designated_on": details.get("party_designated_on"),
                 "retrospective": True,
             },
             at=at,

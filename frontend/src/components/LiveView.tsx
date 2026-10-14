@@ -29,8 +29,27 @@ import {
   type SortKey,
   type ThroughputPoint,
 } from "../lib/live";
+import {
+  filterAlerts,
+  priorityByTxid,
+  riskApi,
+  type Alert,
+  type Finding,
+  type PriorityLevel,
+  type RiskSummary,
+} from "../lib/risk";
 import { useNow } from "../lib/useNow";
 import { Tile } from "./common";
+import {
+  InvestigationQueue,
+  PriorityLegend,
+  PriorityMarker,
+  RecentFindings,
+  RiskAssessment,
+  RiskOverview,
+  type AlertFilter,
+  type DataKind,
+} from "./RiskPanels";
 
 const SORTS: Record<SortKey, string> = {
   newest: "Newest first",
@@ -42,6 +61,8 @@ const SORTS: Record<SortKey, string> = {
 
 const STATUS_POLL_MS = 5000;
 const STATS_POLL_MS = 15000;
+const RISK_POLL_MS = 15000;
+const ALERTS_LIMIT = 200;
 
 // Recharts' default tooltip is white with inherited text colour: unreadable in dark mode.
 const TOOLTIP = {
@@ -59,6 +80,11 @@ const AXIS_TICK = { fill: "var(--muted)", fontSize: 11 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const num = (v: number | string | null | undefined) => (typeof v === "number" ? v : null);
+
+function describeRiskError(e: unknown): string {
+  if (e instanceof ApiError && e.status === 404) return "not available on this server (older version without risk intelligence)";
+  return errText(e);
+}
 
 function describeLiveError(e: unknown): string {
   if (e instanceof ApiError && e.code === "live_no_data") {
@@ -185,12 +211,15 @@ const FeedTable = memo(function FeedTable(props: {
   rows: LiveRow[];
   selected: string | null;
   onSelect: (txid: string) => void;
+  /** Priorities known from /findings, for rows the event stream sent before their assessment. */
+  findingPriority: Map<string, PriorityLevel>;
 }) {
-  const { rows, selected, onSelect } = props;
+  const { rows, selected, onSelect, findingPriority } = props;
   return (
     <table>
       <thead>
         <tr>
+          <th scope="col"><abbr title="Review priority (P1 = review first; not a score)">Prio.</abbr></th>
           <th scope="col">Seen</th><th scope="col">Transaction</th><th scope="col" className="num">Fee rate</th>
           <th scope="col" className="num">vsize</th><th scope="col" className="num">In / out</th><th scope="col">Indicators</th>
         </tr>
@@ -200,6 +229,7 @@ const FeedTable = memo(function FeedTable(props: {
           const isSel = selected === r.txid;
           return (
             <tr key={r.id} className={isSel ? "clickable selected" : "clickable"} onClick={() => onSelect(r.txid)}>
+              <td><PriorityMarker level={r.risk_priority ?? findingPriority.get(r.txid) ?? null} /></td>
               <td className="muted nowrap"><Ago ts={r.first_seen} /></td>
               <td>
                 <button type="button" className="rowbtn" aria-pressed={isSel}
@@ -231,7 +261,7 @@ function locktimeText(f: NonNullable<LiveDetail["features"]>): string {
   return `${f.version} · ${f.locktime} (${f.locktime_kind}${enforced})`;
 }
 
-function Detail({ detail }: { detail: LiveDetail }) {
+function Detail({ detail, onSelect, kind }: { detail: LiveDetail; onSelect: (txid: string) => void; kind: DataKind }) {
   const f = detail.features;
   return (
     <div>
@@ -252,6 +282,10 @@ function Detail({ detail }: { detail: LiveDetail }) {
             <dt>Version / locktime</dt><dd>{locktimeText(f)}</dd>
             <dt>SegWit · BIP125 signal</dt><dd>{f.segwit ? "yes" : "no"} · {f.rbf_signal ? "yes" : "no"}</dd>
             <dt>Sum of outputs</dt><dd>{formatSat(f.output_value_total)} <span className="muted">(includes any change; not a payment amount)</span></dd>
+            {f.max_equal_value_outputs !== undefined && (
+              <><dt>Equal-value outputs · script types</dt><dd>max {f.max_equal_value_outputs} with the same value · {f.n_output_types ?? "—"} output script type{f.n_output_types === 1 ? "" : "s"}</dd></>
+            )}
+            {f.schema_version && <><dt>Feature schema</dt><dd><code>{f.schema_version}</code>{f.coinbase ? " · coinbase" : ""}</dd></>}
           </dl>
           <h3>Output values ({f.output_values.length} of {f.n_outputs} shown)</h3>
           <p className="small">{f.output_values.map(formatSat).join(" · ")}</p>
@@ -272,6 +306,7 @@ function Detail({ detail }: { detail: LiveDetail }) {
           <p className="muted small">Links between transactions are observable spends. They do not identify owners or wallets.</p>
         </>
       )}
+      <RiskAssessment risk={detail.risk} lifecycle={detail.lifecycle} onSelect={onSelect} kind={kind} />
       <h3>Rule-based indicators</h3>
       {detail.flags.length === 0 ? <p className="muted">None.</p> : (
         <ul>{detail.flags.map((fl) => <li key={fl}><b>{fl}</b>: {detail.flag_descriptions[fl]}</li>)}</ul>
@@ -296,15 +331,47 @@ export default function LiveView({ info }: { info: Info }) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FeedFilter>({ minFeeRate: null, flag: null, showFailed: false, sort: "newest" });
+  const [risk, setRisk] = useState<RiskSummary | null>(null);
+  const [riskError, setRiskError] = useState<string | null>(null);
+  const [findings, setFindings] = useState<Finding[] | null>(null);
+  const [findingsError, setFindingsError] = useState<string | null>(null);
+  const [alerts, setAlerts] = useState<{ list: Alert[]; filter: AlertFilter } | null>(null);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+  const [alertFilter, setAlertFilter] = useState<AlertFilter>(null);
+  const [skew, setSkew] = useState(0); // server minus client clock, for source ages
+  const alertFilterRef = useRef<AlertFilter>(null);
+  const alertsSeq = useRef(0);
   const detailRef = useRef<HTMLDivElement>(null);
+  const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const skewRef = useRef(0); // server clock minus client clock, from the last status
 
   const enabled = info.live_enabled;
 
+  /** Latest request wins (a filter change can overlap a poll). A specific status is filtered by
+   * the API (complete up to the limit); "open" is filtered here (the API returns open first). */
+  const loadAlerts = useCallback(async () => {
+    const seq = ++alertsSeq.current;
+    const f = alertFilterRef.current;
+    try {
+      const r = await riskApi.alerts(f === null || f === "open" ? null : f, ALERTS_LIMIT);
+      if (seq !== alertsSeq.current) return;
+      setAlerts({ list: r.alerts ?? [], filter: f });
+      setAlertsError(null);
+    } catch (e) {
+      if (seq === alertsSeq.current) setAlertsError(describeRiskError(e));
+    }
+  }, []);
+
+  const onAlertFilter = useCallback((f: AlertFilter) => {
+    alertFilterRef.current = f;
+    setAlertFilter(f);
+    void loadAlerts();
+  }, [loadAlerts]);
+
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
-    const busy = { status: false, stats: false };
+    const busy = { status: false, stats: false, risk: false };
 
     // Polls skip while a previous request is in flight (no out-of-order overwrites) and while
     // the browser tab is hidden; they catch up immediately when it becomes visible again.
@@ -315,7 +382,10 @@ export default function LiveView({ info }: { info: Info }) {
         const s = await liveApi.status();
         if (!alive) return;
         const at = Date.now() / 1000;
-        if (Number.isFinite(s.server_time)) skewRef.current = s.server_time - at;
+        if (Number.isFinite(s.server_time)) {
+          skewRef.current = s.server_time - at;
+          setSkew((old) => (Math.abs(old - skewRef.current) > 2 ? skewRef.current : old));
+        }
         setStatus(s);
         setStatusAt(at);
         setProblem(null);
@@ -343,16 +413,38 @@ export default function LiveView({ info }: { info: Info }) {
         busy.stats = false;
       }
     };
+    // Risk intelligence: layer health, findings and the investigation queue, polled together.
+    const pollRisk = async () => {
+      if (busy.risk || document.hidden) return;
+      busy.risk = true;
+      try {
+        const [s, f] = await Promise.allSettled([riskApi.summary(24), riskApi.findings(4, 50), loadAlerts()]);
+        if (!alive) return;
+        if (s.status === "fulfilled") {
+          setRisk(s.value);
+          setRiskError(null);
+        } else setRiskError(describeRiskError(s.reason));
+        if (f.status === "fulfilled") {
+          setFindings(f.value.findings ?? []);
+          setFindingsError(null);
+        } else setFindingsError(describeRiskError(f.reason));
+      } finally {
+        busy.risk = false;
+      }
+    };
     const onVisibility = () => {
       if (!document.hidden) {
         void pollStatus();
         void pollStats();
+        void pollRisk();
       }
     };
     void pollStatus();
     void pollStats();
+    void pollRisk();
     const t1 = setInterval(pollStatus, STATUS_POLL_MS);
     const t2 = setInterval(pollStats, STATS_POLL_MS);
+    const t3 = setInterval(pollRisk, RISK_POLL_MS);
     document.addEventListener("visibilitychange", onVisibility);
 
     // Server-sent events. On network errors the browser reconnects by itself (with Last-Event-ID).
@@ -408,11 +500,12 @@ export default function LiveView({ info }: { info: Info }) {
       alive = false;
       clearInterval(t1);
       clearInterval(t2);
+      clearInterval(t3);
       if (retry !== null) clearTimeout(retry);
       document.removeEventListener("visibilitychange", onVisibility);
       es?.close();
     };
-  }, [enabled]);
+  }, [enabled, loadAlerts]);
 
   useEffect(() => {
     if (!selected) {
@@ -437,6 +530,17 @@ export default function LiveView({ info }: { info: Info }) {
     requestAnimationFrame(() => revealIfStacked(detailRef.current));
   }, []);
 
+  /** From the risk panels (far from the detail panel): always bring the panel into view and move
+   * focus to its heading, so keyboard and screen-reader users land on the new content. */
+  const onSelectFar = useCallback((txid: string) => {
+    setSelected(txid);
+    requestAnimationFrame(() => {
+      const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      detailRef.current?.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
+      detailHeadingRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
+
   const rows = useMemo(() => filterSort(feed, filter).slice(0, 100), [feed, filter]);
   const throughput = useMemo(
     () => (stats ? throughputSeries(stats.data.per_minute, stats.serverAt) : { points: [], lastComplete: null }),
@@ -451,6 +555,12 @@ export default function LiveView({ info }: { info: Info }) {
   );
   const binEdges = useMemo(() => (stats?.data.fee_rate_histogram ?? []).map((b) => b.from).join(", "), [stats]);
   const flags = useMemo(() => Object.keys(status?.indicators ?? {}), [status?.indicators]);
+  const findingPriority = useMemo(() => priorityByTxid(findings ?? []), [findings]);
+  const shownAlerts = useMemo(
+    () => (alerts && alerts.filter === alertFilter ? filterAlerts(alerts.list, alertFilter) : null),
+    [alerts, alertFilter],
+  );
+  const kind: DataKind = sourceBadge(status).kind;
 
   if (!enabled) return <Disabled />;
 
@@ -500,7 +610,15 @@ export default function LiveView({ info }: { info: Info }) {
               h={status?.availability_24h ? `down ${formatDuration(status.availability_24h.down_s)} of ${formatDuration(status.availability_24h.window_s)} · ${status.availability_24h.sequence_gaps} missed-update gaps` : undefined} />
       </div>
 
-      <div className="split">
+      <RiskOverview data={risk} error={riskError} skew={skew} kind={kind} />
+      <div className="split" style={{ marginTop: 16 }}>
+        <InvestigationQueue alerts={shownAlerts} error={alertsError} filter={alertFilter} onFilter={onAlertFilter}
+                            onSelect={onSelectFar} skew={skew} kind={kind} />
+        <RecentFindings findings={findings} error={findingsError} selected={selected} onSelect={onSelectFar}
+                        skew={skew} kind={kind} />
+      </div>
+
+      <div className="split" style={{ marginTop: 16 }}>
         <div className="card">
           <h2>Announced transactions per minute</h2>
           {statsError && <p className="err">{st ? "Could not refresh statistics (showing the last loaded data)" : "Could not load statistics"}: {statsError}</p>}
@@ -566,18 +684,19 @@ export default function LiveView({ info }: { info: Info }) {
             </label>
           </div>
           <div className="scroll feed">
-            <FeedTable rows={rows} selected={selected} onSelect={onSelect} />
+            <FeedTable rows={rows} selected={selected} onSelect={onSelect} findingPriority={findingPriority} />
             {rows.length === 0 && <p className="muted">No observations match yet.</p>}
           </div>
+          <PriorityLegend />
           <p className="muted small">Showing up to 100 of the latest {feed.length} observations held in this browser.</p>
         </div>
 
         <div className={selected ? "card detail has-selection" : "card detail"} ref={detailRef}>
-          <h2>Transaction detail</h2>
+          <h2 ref={detailHeadingRef} tabIndex={-1}>Transaction detail</h2>
           {!selected && <p className="muted">Select a transaction.</p>}
           {selected && detailLoading && !shownDetail && <p className="muted">Loading…</p>}
           {selected && detailError && <p className="err">Could not load details: {detailError}</p>}
-          {shownDetail && <Detail detail={shownDetail} />}
+          {shownDetail && <Detail detail={shownDetail} onSelect={onSelectFar} kind={kind} />}
         </div>
       </div>
     </div>

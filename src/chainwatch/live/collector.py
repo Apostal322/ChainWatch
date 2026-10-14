@@ -420,10 +420,7 @@ class Collector:
                 else:
                     flags = feat.indicators(f, self.recent_fee_rates)
                     self.recent_fee_rates.append(f["fee_rate"])
-                    tx_id = self.store.add_fetched_id(f, flags)
-                    if tx_id is not None:
-                        self.c.fetched += 1
-                        self._assess(tx_id, f, payload)
+                    self._store_and_assess(f, flags, payload)
         if error is not None:
             self.c.failed += 1
             self.store.add_failed(txid, first_seen, self.clock(), error)
@@ -468,6 +465,18 @@ class Collector:
         elif self.engine is not None:  # refresh freshness (checked_at) of unchanged sources
             self.engine.screener.sources = rp.source_status(self.store.db)
 
+    def _store_and_assess(self, f: dict[str, Any], flags: list[str], payload: dict) -> None:
+        """The observation and its risk record are committed together, so readers (and the
+        event stream) never see a fetched row whose assessment is still pending. A failed
+        assessment rolls back only its own savepoint; the observation is kept."""
+        from chainwatch.risk import persistence as rp
+
+        with rp.transaction(self.store.db):
+            tx_id = self.store.add_fetched_id(f, flags)
+            if tx_id is not None:
+                self.c.fetched += 1
+                self._assess(tx_id, f, payload)
+
     def _assess(self, tx_id: int, f: dict[str, Any], payload: dict[str, Any]) -> None:
         if self.engine is None or not self.cfg.risk_enabled:
             return
@@ -488,11 +497,13 @@ class Collector:
             record = self.engine.assess(f, addrs, parents)
             self.engine.detector.update(f)  # the window holds only transactions before the next
             db = self.store.db
-            rp.save_addresses(db, tx_id, addrs)
-            rp.save_risk(db, tx_id, record)
-            for spec in alert_specs(record):
-                rp.upsert_alert(db, txid=f["txid"], at=record["evaluated_at"], **spec)
-                self.c.alerts_raised += 1
+            specs = alert_specs(record)
+            with rp.savepoint(db):
+                rp.save_addresses(db, tx_id, addrs)
+                rp.save_risk(db, tx_id, record)
+                for spec in specs:
+                    rp.upsert_alert(db, txid=f["txid"], at=record["evaluated_at"], **spec)
+            self.c.alerts_raised += len(specs)
         except Exception as e:  # keep the observation even if the assessment fails
             self.c.risk_errors += 1
             self.last_error = f"risk: {type(e).__name__}: {e}"[:200]
@@ -559,6 +570,9 @@ class Collector:
                 "queue_max": self.cfg.queue_max,
                 "retention_rows": self.cfg.retention_rows,
                 "collector_version": __version__,
+                "risk_enabled": self.cfg.risk_enabled,
+                "indicator_max_age_days": self.cfg.indicator_max_age_days,
+                "anomaly": (asdict(self.engine.detector.cfg) if self.engine else None),
             },
         }
 

@@ -31,6 +31,7 @@ from chainwatch.risk.screening import (
     Screener,
     graph_relations,
 )
+from chainwatch.risk.sources import source_title
 from chainwatch.risk.supervised import SupervisedLayer
 
 ENGINE_VERSION = "risk-engine/1"
@@ -137,8 +138,8 @@ def alert_specs(record: dict[str, Any]) -> list[dict[str, Any]]:
                 "layer": "screening",
                 "kind": "source_match",
                 "priority": 1,
-                "title": f"Transaction {role} an address listed by {m['source_id']}"
-                + (f" ({m['label']})" if m["label"] else ""),
+                "title": f"Transaction {role} an address listed by "
+                f"{source_title(m['source_id'], m['label'])}",
                 "evidence": {"match": m, "txid": txid},
             }
         )
@@ -150,7 +151,8 @@ def alert_specs(record: dict[str, Any]) -> list[dict[str, Any]]:
                 "kind": r["type"],
                 "priority": 2,
                 "title": f"Spends an output of {r['via_parent'][:12]}..., which spent from an "
-                f"address listed by {r['source_id']} (observed data, distance 2)",
+                f"address listed by {source_title(r['source_id'], None)} (observed data, "
+                "distance 2)",
                 "evidence": {
                     "relation": r,
                     "txid": txid,

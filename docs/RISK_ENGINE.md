@@ -149,19 +149,28 @@ dismissed alert is counted as `suppressed` (no new notification). A repeat of a 
 alert reopens it. Statuses: `new`, `under_review`, `dismissed`, `resolved`,
 `insufficient_evidence`. Changes are logged in `alert_events`. Over HTTP the queue is
 **read-only**: statuses are changed on the collector host with
-`chainwatch-live alerts set-status --id N --status S --note "..."`. No external notification
-is sent anywhere.
+`chainwatch-live alerts set-status --id N --status S --note "..."`. The status history
+(`alert_events`, including operator notes) is deliberately not served over HTTP; read it with
+`chainwatch-live alerts history --id N`. No external notification is sent anywhere.
 
 ## 9. Failure isolation and operations
 
 * Each layer runs in its own guard: an exception becomes `status: ERROR` plus an entry in
   `errors`, and the other layers still report. A failure to assess or store a record is
   counted (`risk_errors`) and the observation is kept.
+* An observation and its risk record (addresses, record, alerts) are committed in one SQLite
+  transaction; the risk writes sit in a savepoint, so a failed write rolls back only them.
+  Readers and the event stream therefore never see a fetched row whose assessment is
+  pending. List rows carry `risk_assessed` so that "assessed, no finding" (`risk_priority`
+  null) is distinguishable from "not assessed".
 * Indicators are refreshed daily by `chainwatch-indicators.timer` (official XML, falling back
   to the mirror). A failed refresh keeps the previous version and exits 1. The collector
   reloads its screening index when a new version appears (checked every heartbeat).
-* API: `/v1/live/risk/summary`, `/v1/live/findings`, `/v1/live/alerts`, and `risk` +
-  `lifecycle` in `/v1/live/transactions/{txid}`. All are read-only, token-protected on the
+* API: `/v1/live/risk/summary` (per-source `age_s` and `stale` by the collector's
+  `indicator_max_age_days`; the anomaly `min_reference`, `window` and `alpha`; alert counts
+  are all-time, marked `alerts_by_status_scope`), `/v1/live/findings` (with
+  `insufficient_evidence` and `errors`), `/v1/live/alerts`, and `risk` + `lifecycle` in
+  `/v1/live/transactions/{txid}`. All are read-only, token-protected on the
   edge API, and proxied with the same cache and limits as the other live routes.
 
 ## 10. Not claimed
