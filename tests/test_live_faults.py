@@ -393,3 +393,245 @@ def test_clean_stop_leaves_the_database_within_the_row_cap(tmp_path):
     col = Collector(cfg, store, http=_rest(), connect=lambda *a, **k: _Hang())
     asyncio.run(col.run(duration=0.3))
     assert LiveReader(cfg.db_path).list(limit=1, outcome=None)[0] == 10
+
+
+# ---- v0.8 audit (docs/AUDIT.md, C-findings) --------------------------------------------------
+def _frame(seq, added=(), removed=(), mined=(), replaced=()):
+    return json.dumps(
+        {
+            "mempool-txids": {
+                "sequence": seq,
+                "added": list(added),
+                "removed": list(removed),
+                "mined": list(mined),
+                "replaced": [{"replaced": a, "by": b} for a, b in replaced],
+            }
+        }
+    )
+
+
+def _mock(fn):
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: fn(r.url.path.rsplit("/", 1)[-1]))
+    )
+
+
+def test_mined_overrides_replaced(tmp_path):
+    """mempool.space can report A replaced by B, then A mined (the conflict lost)."""
+    c = _cfg(tmp_path)
+    a, b = txid("A"), txid("B")
+    col = Collector(
+        c, LiveStore(c.db_path), http=_mock(lambda t: httpx.Response(200, json=esplora_tx(t)))
+    )
+    col.handle_frame(_frame(1, added=[a]))
+    asyncio.run(col.fetch_one(*col.queue.get_nowait()))
+    col.handle_frame(_frame(2, added=[b], removed=[a], replaced=[(a, b)]))
+    col.handle_frame(_frame(3, mined=[a], replaced=[(b, a)]))
+    lc = LiveReader(c.db_path).get(a)["lifecycle"]
+    assert lc["state"] == "mined" and lc["replaced_by"] is None
+
+
+def test_lifecycle_event_during_fetch_is_not_lost(tmp_path):
+    c = _cfg(tmp_path)
+    a = txid("inflight")
+    box = {}
+
+    def handler(t):  # the transaction is mined while its GET is in flight
+        box["col"].handle_frame(_frame(2, mined=[a]))
+        return httpx.Response(200, json=esplora_tx(t, confirmed=True))
+
+    col = box["col"] = Collector(c, LiveStore(c.db_path), http=_mock(handler))
+    col.handle_frame(_frame(1, added=[a]))
+    asyncio.run(col.fetch_one(*col.queue.get_nowait()))
+    assert LiveReader(c.db_path).get(a)["lifecycle"]["state"] == "mined"
+
+
+def test_gone_is_rechecked_after_waiting_for_a_token(tmp_path):
+    c = _cfg(tmp_path)
+    a, now, calls = txid("waiting"), [1e6], []
+    col = Collector(
+        c,
+        LiveStore(c.db_path),
+        clock=lambda: now[0],
+        http=_mock(lambda t: calls.append(t) or httpx.Response(200, json=esplora_tx(t))),
+    )
+
+    async def sleep(s):  # the txid leaves the mempool while the worker waits for a token
+        col.gone.add(a, "removed", now[0])
+        now[0] += s
+
+    col.bucket = TokenBucket(6000, 100, clock=lambda: now[0], sleep=sleep)
+    col.bucket.pause(60)
+    asyncio.run(col.fetch_one(a, now[0]))
+    assert calls == [] and col.c.gone_before_fetch == 1
+
+
+def test_block_conflicts_are_not_fetched(tmp_path):
+    """A block message lists conflicts only in ``replaced``; ``removed`` comes a delta later."""
+    c = _cfg(tmp_path)
+    x, y = txid("conflict"), txid("winner")
+    col = Collector(c, LiveStore(c.db_path), http=_rest())
+    col.handle_frame(_frame(1, added=[x]))
+    col.handle_frame(_frame(2, mined=[y], replaced=[(x, y)]))
+    asyncio.run(col.fetch_one(*col.queue.get_nowait()))
+    assert col.c.gone_before_fetch == 1 and col.c.fetched == 0
+
+
+def test_disk_full_in_the_risk_write_does_not_count_a_phantom_fetch(tmp_path):
+    """SQLITE_FULL rolls back the whole transaction (not just the savepoint): nothing may be
+    counted as fetched, and the error must surface (the worker records a failed row)."""
+    c = _cfg(tmp_path)
+    store = LiveStore(c.db_path)
+    t = txid("full")
+    p = esplora_tx(t, out_values=[600 + i for i in range(500)], weight=86_000, size=21_500)
+    col = Collector(c, store, http=None)
+    col._build_engine()
+    pages = store.db.execute("PRAGMA page_count").fetchone()[0]
+    store.db.execute(f"PRAGMA max_page_count = {pages + 4}")
+    f = feat.extract(p, txid=t, first_seen=time.time(), fetched_at=time.time())
+    with pytest.raises(sqlite3.Error):
+        col._store_and_assess(f, [], p)
+    assert col.c.fetched == 0 and col.c.risk_assessed == 0
+    assert not store.db.in_transaction
+
+
+def test_db_error_in_frame_does_not_drop_new_txids_or_the_connection(tmp_path):
+    c = _cfg(tmp_path)
+    store = LiveStore(c.db_path)
+    store.db.execute("PRAGMA busy_timeout = 50")
+    col = Collector(c, store, http=None)
+    other = sqlite3.connect(c.db_path, isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")  # e.g. the indicators CLI holding the write lock
+    try:
+        col.handle_frame(_frame(1, added=[txid("n1"), txid("n2")], removed=[txid("old")]))
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+    assert col.c.queued == 2 and col.c.db_errors == 1  # handled here, not as a network error
+
+
+def test_sum_of_outputs_above_max_money_is_malformed():
+    t = txid("sum")
+    tx = esplora_tx(t, out_values=[feat.MAX_MONEY_SAT] * 2, fee=0)
+    for i in tx["vin"]:
+        i["prevout"] = None
+    with pytest.raises(feat.FeatureError, match="sum of outputs"):
+        feat.extract(tx, txid=t, first_seen=1, fetched_at=2)
+
+
+def test_fee_must_equal_inputs_minus_outputs_when_all_prevouts_are_known():
+    t = txid("fee")
+    tx = esplora_tx(t, fee=1_000)
+    tx["fee"] = 50_000
+    with pytest.raises(feat.FeatureError, match="fee"):
+        feat.extract(tx, txid=t, first_seen=1, fetched_at=2)
+    tx = esplora_tx(t, weight=100, size=222)  # weight below size: impossible
+    with pytest.raises(feat.FeatureError, match="weight"):
+        feat.extract(tx, txid=t, first_seen=1, fetched_at=2)
+
+
+def test_huge_sequence_does_not_break_the_heartbeat(tmp_path):
+    c = _cfg(tmp_path)
+    col = Collector(c, LiveStore(c.db_path), http=None)
+    col.handle_frame(_frame(2**63, added=[]))
+    col.flush()  # used to raise OverflowError in the heartbeat task -> fatal exit loop
+    assert col.last_sequence is None
+
+
+def test_reader_get_survives_a_concurrent_prune(tmp_path):
+    store = LiveStore(tmp_path / "s.sqlite")
+    t = txid("victim")
+    store.add_fetched(feat.extract(esplora_tx(t), txid=t, first_seen=1, fetched_at=2), [])
+    real = sqlite3.Connection.execute
+    n = [0]
+
+    class Conn(sqlite3.Connection):
+        def execute(self, sql, *a):
+            n[0] += 1
+            if n[0] == 3:  # retention deletes the row between the reader's queries
+                store.db.execute("DELETE FROM tx WHERE txid = ?", (t,))
+            return real(self, sql, *a)
+
+    orig = sqlite3.connect
+    sqlite3.connect = lambda *a, **k: orig(*a, factory=Conn, **k)
+    try:
+        got = LiveReader(store.path).get(t)  # a consistent row (snapshot), never a TypeError
+    finally:
+        sqlite3.connect = orig
+    assert got is None or got["txid"] == t
+
+
+def test_rest_read_has_an_overall_deadline(tmp_path):
+    """httpx's timeout is per read: a body that trickles in kept a worker busy forever."""
+
+    async def drip(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 100000\r\n\r\n")
+        try:
+            while True:
+                writer.write(b" ")
+                await writer.drain()
+                await asyncio.sleep(0.2)
+        except (ConnectionError, asyncio.CancelledError):
+            pass
+
+    async def go():
+        srv = await asyncio.start_server(drip, "127.0.0.1", 0)
+        port = srv.sockets[0].getsockname()[1]
+        c = _cfg(tmp_path, rest_base=f"http://127.0.0.1:{port}/api", request_timeout_s=0.5)
+        col = Collector(c, LiveStore(c.db_path), http=httpx.AsyncClient(timeout=0.5))
+        try:
+            await asyncio.wait_for(col.fetch_one(txid("drip"), time.time()), 3.0)
+        finally:
+            srv.close()
+        return col.c
+
+    c = asyncio.run(go())
+    assert c.timeouts == 1 and c.failed == 1
+
+
+def test_concurrent_migrations_do_not_collide(tmp_path):
+    """Two processes opening an old database at once used to race on ALTER TABLE: both read
+    the columns, both add them, the second failed ("duplicate column name"). Here a second
+    migration starts just before our first ALTER; it must wait for our transaction."""
+    import threading
+
+    from chainwatch.live.store import SCHEMA
+    from chainwatch.risk import persistence as rp
+
+    path = tmp_path / "old.sqlite"
+    con = sqlite3.connect(path)
+    con.executescript(SCHEMA)  # a v0.6 database: no risk tables, no lifecycle columns
+    con.close()
+    errors: list[Exception] = []
+
+    def other_process():
+        other = sqlite3.connect(path, isolation_level=None, timeout=10)
+        try:
+            rp.migrate(other)
+        except Exception as e:  # pragma: no cover - the failure being guarded against
+            errors.append(e)
+        finally:
+            other.close()
+
+    class Interleave:  # connection proxy: the other migration starts before our first ALTER
+        def __init__(self, db):
+            self.db, self.thread = db, None
+
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+
+        def execute(self, sql, *a):
+            if sql.startswith("ALTER TABLE tx") and self.thread is None:
+                self.thread = threading.Thread(target=other_process)
+                self.thread.start()
+                self.thread.join(timeout=1.0)  # old code: it finishes first (no lock held)
+            return self.db.execute(sql, *a)
+
+    mine = Interleave(sqlite3.connect(path, isolation_level=None, timeout=10))
+    rp.migrate(mine)
+    mine.thread.join()
+    mine.db.close()
+    assert errors == []
+    cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(tx)")}
+    assert {"lifecycle", "lifecycle_at", "replaced_by"} <= cols

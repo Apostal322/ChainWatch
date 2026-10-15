@@ -113,7 +113,11 @@ class LiveStore:
         self.db.executescript(SCHEMA)
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(collector)")}
         if "first_started_at" not in cols:  # migrate databases created by v0.5.0
-            self.db.execute("ALTER TABLE collector ADD COLUMN first_started_at REAL")
+            try:
+                self.db.execute("ALTER TABLE collector ADD COLUMN first_started_at REAL")
+            except sqlite3.OperationalError as e:  # another process migrated it meanwhile
+                if "duplicate column" not in str(e):
+                    raise
         from chainwatch.risk.persistence import migrate
 
         migrate(self.db)  # risk tables and tx lifecycle columns (v0.7.0)
@@ -362,6 +366,9 @@ class LiveReader:
         from chainwatch.risk import persistence as rp
 
         with self._conn() as c:
+            # one read transaction: a retention prune between the queries cannot leave the
+            # row half-read (it raised TypeError -> HTTP 500)
+            c.execute("BEGIN")
             row = c.execute(f"SELECT {SUMMARY_COLS}, features FROM tx WHERE txid = ?", (txid,))
             row = row.fetchone()
             if row is None:

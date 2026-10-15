@@ -227,9 +227,9 @@ def _f(fee_rate=5.0, n_out=2, n_in=1, vsize=200, value=100_000, **kw):
     }
 
 
-def _trained(n=500, seed=0) -> RobustTailDetector:
+def _trained(n=1000, seed=0) -> RobustTailDetector:
     rng = random.Random(seed)
-    det = RobustTailDetector(DetectorConfig(window=1000, min_reference=500))
+    det = RobustTailDetector(DetectorConfig(window=2000, min_reference=1000))
     for _ in range(n):
         det.update(_f(fee_rate=rng.uniform(1, 30), n_out=rng.choice([1, 2, 2, 3]),
                       n_in=rng.choice([1, 1, 2]), vsize=rng.randint(110, 600),
@@ -240,7 +240,7 @@ def _trained(n=500, seed=0) -> RobustTailDetector:
 def test_anomaly_needs_a_baseline_and_flags_only_tails():
     det = RobustTailDetector()
     assert det.score(_f())["status"] == "INSUFFICIENT_BASELINE"
-    det = _trained(600)
+    det = _trained(1200)
     assert det.score(_f(fee_rate=10, n_out=2, vsize=300, value=200_000))["status"] == "NO_ANOMALY"
     out = det.score(_f(n_out=400, vsize=9000, value=10**11))
     assert out["status"] == "ANOMALY" and out["level"] == "strong"
@@ -252,18 +252,39 @@ def test_anomaly_needs_a_baseline_and_flags_only_tails():
 
 
 def test_detector_config_must_be_able_to_reach_alpha():
-    """Regression: min_reference 200 with alpha 0.002 could never flag (1/201 > 0.002)."""
+    """Regression: min_reference 200 with alpha 0.002 could never flag (1/201 > 0.002), and
+    the two-sided fee rate needs 2/(n+1) <= alpha: at n = 500 a fee of 1e6 sat/vB was not
+    flagged."""
     with pytest.raises(ValueError, match="cannot reach alpha"):
         DetectorConfig(min_reference=200, alpha=0.002)
+    with pytest.raises(ValueError, match="two-sided"):
+        DetectorConfig(window=900, min_reference=500, alpha=0.002)
+    for bad in ({"alpha": 0}, {"alpha": float("nan")}, {"min_z": float("nan")},
+                {"window": 0, "min_reference": 0}):  # fmt: skip
+        with pytest.raises(ValueError):
+            DetectorConfig(**bad)
+    det = _trained(1000)
+    assert det.score(_f(fee_rate=1e6))["status"] == "ANOMALY"  # reachable at min_reference
+
+
+def test_strong_means_several_measurements_not_a_small_window():
+    """robust-tail/1 called every single flag "strong" when the window was small (any flag is
+    then outside the reference range), so pure noise raised priority-3 alerts."""
+    det = _trained(1000)
+    one = det.score(_f(n_out=400))  # one unusual measurement: notable, no alert
+    assert one["status"] == "ANOMALY" and one["level"] == "notable"
+    assert one["indicators"][0]["outside_reference_range"]
+    many = det.score(_f(n_out=400, vsize=9000))
+    assert many["level"] == "strong"
 
 
 def test_anomaly_reference_window_excludes_the_scored_and_later_transactions():
-    det = _trained(600)
+    det = _trained(1200)
     extreme = _f(n_out=500)
     first = det.score(extreme)
     det.update(extreme)  # only after scoring, as the collector does
-    assert det.n == 601 and first["status"] == "ANOMALY"
-    again = _trained(600)
+    assert det.n == 1201 and first["status"] == "ANOMALY"
+    again = _trained(1200)
     assert again.score(extreme) == first  # deterministic for the same history
 
 
@@ -464,7 +485,7 @@ def test_retrospective_screening_does_not_rewrite_history(tmp_path):
     assert rp.retro_screen(store.db, report["version_id"], 51.0) == 1
     alert = rp.alerts(store.db)[0]
     assert alert["retrospective"] is True and alert["kind"] == "retrospective_source_match"
-    assert alert["title"].endswith("later listed by test-src (TEST LIST)")
+    assert alert["title"].endswith("now listed by test-src (TEST LIST)")
     ev = alert["evidence"]
     assert ev["label"] == "TEST LIST" and ev["category"] == "sanctions"  # like a live match
     assert {"programs", "party_designated_on"} <= set(ev)
@@ -511,7 +532,7 @@ def test_risk_routes_on_the_edge_and_through_the_remote_proxy(tmp_path):
     src = s["summary"]["sources"][0]
     assert src["source_id"] == "test-src" and src["stale"] is True and src["age_s"] > 86400
     assert s["engine"]["indicator_max_age_days"] == 7.0
-    assert s["engine"]["anomaly_min_reference"] == 500
+    assert s["engine"]["anomaly_min_reference"] == 1000
     assert s["summary"]["alerts_by_status_scope"] == "all_time"
     assert "illicit" not in json.dumps(s["layers"])
     fd = edge.get("/v1/live/findings", headers=auth).json()["findings"]
@@ -592,3 +613,243 @@ def test_authentic_sdn_excerpt_parses_with_real_structure():
     assert all(r.details["party_designated_on"] for r in snap.records)
     # the TRON-style address OFAC filed under "Digital Currency Address - XBT" is rejected
     assert [raw for raw, _ in snap.rejected] == ["TUCsTq7TofTCJRRoHk6RvhMoS2mJLm5Yzq"]
+
+
+# ---------------------------------------------------------------- v0.8 audit (R-findings)
+def _many(n, prefix="m"):
+    return [p2wpkh_address(f"{prefix}-{i}") for i in range(n)]
+
+
+def _active(store, source_id="test-src"):
+    q = "SELECT COUNT(*) FROM indicators WHERE source_id = ? AND removed_at IS NULL"
+    return store.db.execute(q, (source_id,)).fetchone()[0]
+
+
+def test_empty_or_mass_delisting_snapshot_is_refused(tmp_path):
+    """An error page, an empty body or a changed schema parsed to 0 or few records and
+    silently delisted everything (afterwards a listed address screened as no match)."""
+    store = _store(tmp_path)
+    addrs = _many(20)
+    _ingest(store, addrs, at=1.0)
+    with pytest.raises(rp.SnapshotRejected, match="no valid address"):
+        _ingest(store, [], at=2.0)
+    with pytest.raises(rp.SnapshotRejected, match="would delist 18 of 20"):
+        _ingest(store, addrs[:2], at=3.0)
+    assert _active(store) == 20  # nothing changed
+    assert _screener(store).screen(_addrs(outputs=[addrs[5]]), 4.0)["status"] == "SCREENING_MATCH"
+    snap = parse_address_list(
+        "\n".join(addrs[:2]).encode(), source_id="test-src", url="https://example.invalid/l",
+        licence="t", category="sanctions", label="TEST LIST", retrieved_at=5.0,
+    )  # fmt: skip
+    assert rp.ingest_snapshot(store.db, snap, 5.0, allow_mass_removal=True)["removed"] == 18
+
+
+def test_content_reverting_to_an_earlier_version_relists_it(tmp_path):
+    """A = {X, Y}, B = {Y}, A again: the third snapshot was taken as "unchanged" (its sha256
+    existed) and X stayed delisted although the current list contains it."""
+    store = _store(tmp_path)
+    first = _ingest(store, [LISTED, LISTED_2], at=1.0)
+    _ingest(store, [LISTED_2], at=2.0)
+    third = _ingest(store, [LISTED, LISTED_2], at=3.0)
+    assert third["status"] == "new_version" and third["added"] == 1
+    assert third["sha256"] == first["sha256"]
+    assert _screener(store).screen(_addrs(outputs=[LISTED]), 4.0)["status"] == "SCREENING_MATCH"
+    assert _ingest(store, [LISTED, LISTED_2], at=5.0)["status"] == "unchanged"
+
+
+def test_official_list_and_its_mirror_are_one_list(tmp_path):
+    """A mirror loaded once (fallback) stayed active forever: OFAC delisting X never reached
+    it, and every listed address produced one alert per copy of the list."""
+    store = _store(tmp_path)
+    _ingest(store, [LISTED, LISTED_2], at=1.0, source_id="ofac-sdn-mirror")
+    report = _ingest(store, [LISTED_2], at=2.0, source_id="ofac-sdn")  # X delisted by OFAC
+    assert report["superseded_elsewhere"] == 1
+    sc = _screener(store)
+    assert sc.screen(_addrs(outputs=[LISTED]), 3.0)["status"] == "NO_KNOWN_SCREENING_MATCH"
+    hit = sc.screen(_addrs(outputs=[LISTED_2]), 3.0)
+    assert [(m["source_id"], m["authority"]) for m in hit["matches"]] == [("ofac-sdn", "ofac-sdn")]
+    status = {s["source_id"]: s for s in rp.source_status(store.db)}
+    assert status["ofac-sdn-mirror"]["superseded_by"] == "ofac-sdn"
+    assert status["ofac-sdn"]["superseded_by"] is None
+    f, tx = _features("both", out_addresses=[LISTED_2])
+    rec = RiskEngine(sc, RobustTailDetector(), SupervisedLayer(None), clock=lambda: 3.0).assess(
+        f, feat.extract_addresses(tx), []
+    )
+    assert [s["group_key"] for s in alert_specs(rec)] == [f"screening:ofac-sdn:out:{LISTED_2}"]
+
+
+def test_alert_group_includes_the_role(tmp_path):
+    """Dismissing a 'pays to X' alert used to suppress a later 'X spends' alert too."""
+    store = _store(tmp_path)
+    _ingest(store, [LISTED], at=1.0)
+    eng = RiskEngine(_screener(store), RobustTailDetector(), SupervisedLayer(None),
+                     clock=lambda: 2.0)  # fmt: skip
+    pay, tx1 = _features("pay", out_addresses=[LISTED])
+    spend, tx2 = _features("spend", in_addresses=[LISTED])
+    for f, tx in ((pay, tx1), (spend, tx2)):
+        for spec in alert_specs(eng.assess(f, feat.extract_addresses(tx), [])):
+            rp.upsert_alert(store.db, txid=f["txid"], at=2.0, **spec)
+    titles = sorted(a["title"] for a in rp.alerts(store.db))
+    assert len(titles) == 2 and "pays to" in titles[0] and "spends from" in titles[1]
+
+
+def test_retro_screening_covers_the_reload_window_and_is_idempotent(tmp_path):
+    """A transaction assessed after a snapshot was stored but before the collector loaded it
+    was missed by live and retrospective screening alike (retro only looked at
+    fetched_at < available_at). Re-runs must not count anything twice, and a transaction
+    that matched live gets no retrospective alert."""
+    store = _store(tmp_path)
+    _ingest(store, [LISTED_2], at=1.0)
+    eng = RiskEngine(_screener(store), RobustTailDetector(), SupervisedLayer(None),
+                     clock=lambda: 30.0)  # fmt: skip
+    rows = []
+    for name, outs in (("window", [LISTED]), ("live", [LISTED_2])):
+        f, tx = _features(name, out_addresses=outs)
+        f["fetched_at"] = 30.0  # after the new snapshot below (available at 20)
+        tx_id = store.add_fetched_id(f, [])
+        rec = eng.assess(f, feat.extract_addresses(tx), [])  # the old, loaded list
+        rp.save_addresses(store.db, tx_id, feat.extract_addresses(tx))
+        rp.save_risk(store.db, tx_id, rec)
+        rows.append(rec)
+    report = _ingest(store, [LISTED, LISTED_2], at=20.0)
+    assert rows[0]["screening"]["status"] == "NO_KNOWN_SCREENING_MATCH"
+    assert rp.retro_screen(store.db, report["version_id"], 40.0) == 1  # only the window tx
+    assert rp.retro_screen(store.db, report["version_id"], 41.0) == 1
+    retro = [a for a in rp.alerts(store.db) if a["retrospective"]]
+    assert len(retro) == 1 and retro[0]["occurrences"] == 1  # idempotent
+    assert retro[0]["evidence"]["source_version_id"] == report["version_id"]
+    assert rp.risk_record(store.db, txid("window"))["screening"]["matches"] == []  # unchanged
+
+
+def test_collector_retro_screens_when_it_loads_a_new_snapshot(tmp_path):
+    store = _store(tmp_path)
+    cfg = _cfg(tmp_path, indicator_max_age_days=3650)
+    now = [1.8e9]
+    _ingest(store, [LISTED_2], at=now[0] - 3600)
+    col = Collector(cfg, store, http=None, clock=lambda: now[0])
+    col._build_engine()
+    now[0] += 20
+    f, tx = _features("between", out_addresses=[LISTED])
+    f["first_seen"] = f["fetched_at"] = now[0]
+    col._store_and_assess(f, [], tx)  # assessed with the old list
+    _ingest(store, [LISTED, LISTED_2], at=now[0] - 10)  # stored 10 s before: the window
+    col._reload_indicators_if_changed()
+    assert col.c.retrospective_matches == 1
+    assert [a["kind"] for a in rp.alerts(store.db)] == ["retrospective_source_match"]
+
+
+def test_graph_relations_screen_parents_at_the_childs_time(tmp_path):
+    """The relation reused the parent's frozen screening result: a listing added after the
+    parent was assessed was never related, and a delisted address still was."""
+    store = _store(tmp_path)
+    _ingest(store, [LISTED_2], at=1.0)  # LISTED not listed yet
+    parent, ptx = _features("parent", in_addresses=[LISTED, LISTED, LISTED])
+    pid = store.add_fetched_id(parent, [])
+    eng0 = RiskEngine(_screener(store), RobustTailDetector(), SupervisedLayer(None),
+                      clock=lambda: 2.0)  # fmt: skip
+    rp.save_addresses(store.db, pid, feat.extract_addresses(ptx))
+    rp.save_risk(store.db, pid, eng0.assess(parent, feat.extract_addresses(ptx), []))
+    _ingest(store, [LISTED, LISTED_2], at=3.0, source_id="ofac-sdn-mirror")
+    _ingest(store, [LISTED, LISTED_2], at=3.5, source_id="ofac-sdn")  # two copies of one list
+
+    def lookup(txids):
+        return rp.observed_parent_inputs(store.db, txids), rp.count_observed(store.db, txids), 1
+
+    child, ctx = _features("child")
+    eng = RiskEngine(_screener(store), RobustTailDetector(), SupervisedLayer(None), lookup,
+                     clock=lambda: 4.0)  # fmt: skip
+    rec = eng.assess(child, feat.extract_addresses(ctx), [parent["txid"]])
+    g = rec["graph"]
+    assert g["status"] == "RELATION_FOUND" and rec["priority"]["level"] == 2
+    assert len(g["relations"]) == 1  # 3 inputs x 2 copies of the list -> one relation
+    assert g["coverage"] == {"parents": 1, "parents_checked": 1, "parents_observed": 1}
+    _ingest(store, [LISTED_2], at=5.0, source_id="ofac-sdn")  # LISTED delisted
+    eng.screener = _screener(store)
+    eng.clock = lambda: 6.0
+    assert (
+        eng.assess(child, feat.extract_addresses(ctx), [parent["txid"]])["graph"]["status"]
+        == "NO_KNOWN_RELATION"
+    )
+
+
+def test_truncated_official_xml_falls_back_and_file_inputs_never_do(tmp_path, monkeypatch, capsys):
+    from chainwatch.config import REPO_ROOT
+    from chainwatch.live import cli as live_cli
+    from chainwatch.risk import sources
+
+    def fake_fetch(url, timeout=120.0, dest=None):
+        if "treasury.gov" in url:
+            dest.write_bytes(SDN_XML[: len(SDN_XML) // 2])  # cut off mid-download
+        else:
+            dest.write_bytes(f"{LISTED}\n".encode())
+        return dest
+
+    monkeypatch.setattr(sources, "fetch", fake_fetch)
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        f"extends: {REPO_ROOT / 'configs' / 'live.yaml'}\nlive:\n  db_path: {tmp_path / 'i.db'}\n"
+    )
+    argv = ["--config", str(cfg), "indicators", "update", "--source", "ofac-sdn",
+            "--fallback", "ofac-sdn-mirror"]  # fmt: skip
+    assert live_cli.main(argv) == 0  # ParseError used to escape the fallback
+    out = json.loads(capsys.readouterr().out)
+    assert out["source_id"] == "ofac-sdn-mirror" and "ParseError" in out["failures"][0]["error"]
+    bad = tmp_path / "list.xml"
+    bad.write_bytes(SDN_XML)
+    with pytest.raises(SystemExit, match="--fallback cannot be combined with --file"):
+        live_cli.main([*argv, "--file", str(bad)])
+    with pytest.raises(SystemExit, match="needs --id"):
+        live_cli.main(["--config", str(cfg), "alerts", "set-status", "--status", "resolved"])
+
+
+def test_utf16_and_bom_inputs(tmp_path):
+    """The DTD scan works on bytes, so a UTF-16 document could hide a DOCTYPE (and its
+    entities) from it: only UTF-8 is accepted. A UTF-8 BOM no longer costs the first line."""
+    doc = SDN_XML.decode().replace('<?xml version="1.0" encoding="utf-8"?>', "")
+    for enc in ("utf-16", "utf-16-le", "utf-16-be"):
+        with pytest.raises(ValueError, match="UTF-8"):
+            parse_ofac_sdn_advanced(doc.encode(enc), retrieved_at=1.0)
+    with pytest.raises(ValueError, match="UTF-8"):
+        parse_ofac_sdn_advanced(b'<?xml version="1.0" encoding="latin-1"?><Sanctions/>')
+    snap = parse_address_list(
+        f"﻿{LISTED}\n{LISTED_2}\n".encode(), source_id="m", url="https://e.invalid/l",
+        licence="t", category="sanctions", label="", retrieved_at=1.0,
+    )  # fmt: skip
+    assert len(snap.records) == 2 and snap.rejected == []
+
+
+def test_fetch_refuses_a_redirect_through_plain_http(monkeypatch):
+    from chainwatch.risk import sources
+
+    def handler(request):
+        if request.url.host == "start.example":
+            return httpx.Response(302, headers={"location": "http://middle.example/x"})
+        if request.url.host == "middle.example":
+            return httpx.Response(302, headers={"location": "https://end.example/x"})
+        return httpx.Response(200, content=b"x")
+
+    real = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)
+    )
+    with pytest.raises(ValueError, match="non-https"):
+        sources.fetch("https://start.example/list")
+
+
+def test_supervised_gate_rejects_empty_or_malformed_evidence(tmp_path):
+    art = tmp_path / "model.bin"
+    art.write_bytes(b"x")
+    import hashlib
+
+    good = {"name": "m", "version": "1", "feature_schema": feat.FEATURE_SCHEMA_VERSION,
+            "validated_for_live": True, "sha256": hashlib.sha256(b"x").hexdigest(),
+            "evaluation": {"holdout": None, "primary_metrics": [], "label_source": "",
+                           "time_separated": True}}  # fmt: skip
+    with pytest.raises(ModelGateError, match="non-empty"):
+        check_model_card(good, art)
+    good["evaluation"] = "trust me"
+    with pytest.raises(ModelGateError, match="object"):
+        check_model_card(good, art)
+    (tmp_path / "model_card.json").write_text(json.dumps({**good, "evaluation": ["x"]}))
+    layer = SupervisedLayer(tmp_path)  # a malformed card abstains instead of raising
+    assert layer.predict({})["status"] == "NO_VALIDATED_MODEL" and layer.gate_error

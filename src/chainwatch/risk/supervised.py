@@ -50,11 +50,24 @@ def check_model_card(card: dict[str, Any], artifact: Path) -> None:
     if card["validated_for_live"] is not True:
         raise ModelGateError("model is not validated for live scoring")
     ev = card["evaluation"]
+    if not isinstance(ev, dict):
+        raise ModelGateError("evaluation must be an object")
     for key in ("holdout", "primary_metrics", "label_source", "time_separated"):
         if key not in ev:
             raise ModelGateError(f"evaluation lacks {key!r}")
     if ev["time_separated"] is not True:
         raise ModelGateError("evaluation holdout is not time-separated")
+    # present is not enough: an empty holdout, metric list or label source proves nothing
+    if (
+        not ev["holdout"]
+        or not isinstance(ev["primary_metrics"], list | dict)
+        or not (ev["primary_metrics"])
+    ):
+        raise ModelGateError("evaluation needs a non-empty holdout and primary metrics")
+    if not isinstance(ev["label_source"], str) or not ev["label_source"].strip():
+        raise ModelGateError("evaluation needs a label source")
+    if not isinstance(card["sha256"], str):
+        raise ModelGateError("sha256 must be a string")
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
     if digest != card["sha256"]:
         raise ModelGateError("artifact sha256 does not match its model card")
@@ -74,7 +87,7 @@ class SupervisedLayer:
         try:
             card = json.loads(card_path.read_text())
             check_model_card(card, artifact)
-        except (OSError, ValueError) as e:  # includes ModelGateError and JSON errors
+        except (OSError, ValueError, TypeError, KeyError) as e:  # gate, JSON and shape errors
             self.gate_error = str(e)[:300]
             return
         # A real loader would deserialize a pickle-free format here. None exists because no

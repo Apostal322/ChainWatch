@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ from chainwatch.risk.addresses import InvalidAddress, parse_address
 
 MAX_SOURCE_BYTES = 400_000_000  # sdn_advanced.xml is ~100 MB in 2026; refuse absurd inputs
 MAX_RECORDS = 1_000_000
+MAX_ADDRESSES_PER_PARTY = 10_000  # the largest real party has a few hundred
 OFAC_FEATURE_TYPE = "Digital Currency Address - XBT"
 OFAC_NS = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/ADVANCED_XML"
 
@@ -91,7 +93,7 @@ def parse_address_list(
     the official SDN list: no per-address party names or dates)."""
     if len(content) > MAX_SOURCE_BYTES:
         raise ValueError("indicator source too large")
-    text = content.decode("utf-8", errors="strict")
+    text = content.decode("utf-8-sig", errors="strict")  # tolerate a UTF-8 byte-order mark
     records: dict[str, IndicatorRecord] = {}
     rejected: list[tuple[str, str]] = []
     for line in text.splitlines():
@@ -155,12 +157,15 @@ def parse_ofac_sdn_advanced(
         size = content.stat().st_size
         if size > MAX_SOURCE_BYTES:
             raise ValueError("indicator source too large")
+        with content.open("rb") as fh:
+            _require_utf8(fh.read(1024))
         digest, has_dtd = _scan_file(content)
         stream: Any = content.open("rb")
     else:
         size = len(content)
         if size > MAX_SOURCE_BYTES:
             raise ValueError("indicator source too large")
+        _require_utf8(content[:1024])
         digest = hashlib.sha256(content).hexdigest()
         has_dtd = any(m in content for m in _DTD_MARKERS)
         stream = io.BytesIO(content)
@@ -171,8 +176,10 @@ def parse_ofac_sdn_advanced(
     issued: str | None = None
     feature_ids: set[str] = set()
     parties: list[tuple[str, str, list[str]]] = []  # (profile id, name, raw addresses)
+    pending: dict[str, list[str]] = {}  # raw addresses per profile of the open party
     entries: dict[str, dict[str, Any]] = {}
     stack: list[str] = []  # open element names: Sanctions / section / record / ...
+    parents: list[ET.Element] = []  # the open elements themselves
     try:
         for event, el in ET.iterparse(stream, events=("start", "end")):
             tag = _local(el.tag)
@@ -180,28 +187,39 @@ def parse_ofac_sdn_advanced(
                 if not stack and tag != "Sanctions":
                     raise ValueError(f"unexpected root element {tag!r}")
                 stack.append(tag)
+                parents.append(el)
                 continue
             stack.pop()
+            parents.pop()
             if tag == "DateOfIssue":
                 issued = _date(el)
             elif tag == "FeatureType":
                 if (el.text or "").strip() == OFAC_FEATURE_TYPE:
                     feature_ids.add(el.get("ID", ""))
+            elif tag == "Feature" and len(parents) >= 1:
+                # read (Bitcoin) or drop (anything else) each feature as it ends, so even a
+                # party with a million features never sits in memory
+                if el.get("FeatureTypeID") in feature_ids:
+                    got = pending.setdefault(parents[-1].get("ID") or "", [])
+                    got += [
+                        (d.text or "").strip()
+                        for d in el.iter()
+                        if _local(d.tag) == "VersionDetail" and (d.text or "").strip()
+                    ]
+                    if len(got) > MAX_ADDRESSES_PER_PARTY:
+                        raise ValueError("implausible number of addresses for one party")
+                if len(parents[-1]) and parents[-1][-1] is el:
+                    del parents[-1][-1]
+                el.clear()
             elif tag == "DistinctParty":
                 for profile in el:
                     if _local(profile.tag) != "Profile":
                         continue
-                    raw = [
-                        (d.text or "").strip()
-                        for feat in profile
-                        if _local(feat.tag) == "Feature"
-                        and feat.get("FeatureTypeID") in feature_ids
-                        for d in feat.iter()
-                        if _local(d.tag) == "VersionDetail" and (d.text or "").strip()
-                    ]
+                    raw = pending.pop(profile.get("ID") or "", [])
                     if raw:
                         pid = profile.get("ID") or el.get("FixedRef") or ""
                         parties.append((pid, _primary_name(profile), raw))
+                pending.clear()
             elif tag == "SanctionsEntry":
                 dates = [d for ev in el if _local(ev.tag) == "EntryEvent"
                          for d in [_date(_child(ev, "Date"))] if d]  # fmt: skip
@@ -218,11 +236,11 @@ def parse_ofac_sdn_advanced(
                     "entry_date": min(dates) if dates else None,
                     "programs": programs,
                 }
-            if len(stack) == 2 and stack[1] in _LIST_SECTIONS:
-                # a whole record of a list section (a Location, IDRegDocument, DistinctParty,
-                # SanctionsEntry, ...) has been read: free it. Every section, not only the
-                # ones used, or the unused ones pile up: the real 122 MB file peaked at
-                # 206 MB of Python memory before this, 10 MB after.
+            if len(stack) == 2 and stack[1] not in _KEEP_SECTIONS:
+                # a whole record of a top-level section (a Location, IDRegDocument,
+                # DistinctParty, SanctionsEntry, or a section this parser does not know) has
+                # been read: free it, or unused sections pile up (the real 122 MB file peaked
+                # at 206 MB of Python memory before this, 10 MB after).
                 el.clear()
     finally:
         stream.close()
@@ -277,15 +295,19 @@ def parse_ofac_sdn_advanced(
     )
 
 
-_LIST_SECTIONS = {
-    "DistinctParties",
-    "SanctionsEntries",
-    "Locations",
-    "IDRegDocuments",
-    "ProfileRelationships",
-    "SanctionsEntryLinks",
-    "ReferenceValueSets",
-}
+# top-level sections whose children are read when the section itself ends (not records)
+_KEEP_SECTIONS = {"DateOfIssue"}
+_DECLARED_ENCODING = re.compile(rb"""<\?xml[^>]*encoding\s*=\s*["']([A-Za-z0-9._-]+)["']""")
+
+
+def _require_utf8(head: bytes) -> None:
+    """Only UTF-8 is accepted: the DTD/entity scan works on bytes, so a UTF-16 document could
+    hide a DOCTYPE from it."""
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")) or b"\x00" in head:
+        raise ValueError("indicator sources must be UTF-8 (UTF-16/32 refused)")
+    m = _DECLARED_ENCODING.search(head)
+    if m and m.group(1).lower() not in (b"utf-8", b"utf8"):
+        raise ValueError(f"indicator sources must be UTF-8, not {m.group(1).decode()!r}")
 
 
 _DTD_MARKERS = (b"<!DOCTYPE", b"<!ENTITY")

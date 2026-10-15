@@ -223,14 +223,18 @@ def test_backpressure_drops_when_queue_full(tmp_path):
     async def go():
         store = LiveStore(tmp_path / "db.sqlite")
         col = Collector(_cfg(tmp_path, queue_max=3), store, http=_rest())
-        col.handle_frame(delta([txid(i) for i in range(10)]))
-        col.handle_frame(delta([txid(0), txid(1)]))  # duplicates
+        col.handle_frame(delta([txid(i) for i in range(10)], seq=1))
+        col.handle_frame(delta([txid(0), txid(1)], seq=2))  # duplicates
         col.handle_frame("garbage")
+        # mempool's backend repeats its sequence while it re-syncs: such a delta
+        # re-announces old transactions, which are not new arrivals
+        col.handle_frame(delta([txid(i) for i in range(100, 150)], seq=2))
         return col.c, col.queue.qsize()
 
     c, size = asyncio.run(go())
     assert size == 3 and c.queued == 3 and c.dropped_backpressure == 7
     assert c.duplicates == 2 and c.received == 12 and c.malformed == 1
+    assert c.resync_deltas == 1 and c.resync_txids_skipped == 50
 
 
 def test_fetch_outcomes_429_404_timeout_and_idempotency(tmp_path):

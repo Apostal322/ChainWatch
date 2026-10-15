@@ -98,6 +98,8 @@ def extract(tx: Any, *, txid: str, first_seen: float, fetched_at: float) -> dict
     locktime = _int(tx, "locktime")
     if not 0 < size <= MAX_TX_WEIGHT or not 0 < weight <= MAX_TX_WEIGHT:
         raise FeatureError("size/weight outside (0, 4,000,000]")
+    if not size <= weight <= 4 * size:  # weight = 3 * base size + total size (BIP141)
+        raise FeatureError("weight inconsistent with size")
     _amount(fee, "fee")
     if not 0 <= locktime <= SEQUENCE_FINAL or not -(2**31) <= version < 2**31:
         raise FeatureError("locktime/version out of range")
@@ -149,6 +151,9 @@ def extract(tx: Any, *, txid: str, first_seen: float, fetched_at: float) -> dict
             in_types[kind] = in_types.get(kind, 0) + 1
 
     n_in, n_out = len(vin), len(vout)
+    _amount(sum(out_values), "sum of outputs")  # each output in range is not enough
+    if len(in_values) == n_in and sum(in_values) - sum(out_values) != fee:
+        raise FeatureError("fee does not equal inputs minus outputs")
     value_counts: dict[int, int] = {}
     for v in out_values:
         if v >= DUST_LIMIT_SAT:

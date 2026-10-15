@@ -215,45 +215,56 @@ def reliability_report(live: LiveConfig, hours: float, now: float | None = None)
 
 
 def cmd_indicators(args) -> int:
-    """Load an indicator source snapshot (fetch, or --file), version it, retro-screen."""
+    """Load an indicator source snapshot (fetch, or --file), version it, retro-screen.
+
+    A source that cannot be fetched or parsed, or whose snapshot is refused (it would empty
+    or mostly empty the list), counts as failed: the fallback is tried, and if every source
+    fails the previous version stays in use and the exit code is 1."""
+    import xml.etree.ElementTree as ET
+
     from chainwatch.live.store import LiveStore
     from chainwatch.risk import persistence as rp
     from chainwatch.risk import sources
 
+    for name in (args.source, args.fallback):
+        if name and name not in sources.SOURCES:
+            raise SystemExit(f"unknown source {name!r}; choose from {sorted(sources.SOURCES)}")
+    if args.file and args.fallback:  # a local file has one format; a fallback would re-parse it
+        raise SystemExit("--fallback cannot be combined with --file")
     live = _live(args)
     store = LiveStore(live.db_path)
     try:
         if args.action == "status":
             print(json.dumps(rp.source_status(store.db), indent=2))
             return 0
-        for name in (args.source, args.fallback):
-            if name and name not in sources.SOURCES:
-                raise SystemExit(f"unknown source {name!r}; choose from {sorted(sources.SOURCES)}")
         order = [args.source] + ([args.fallback] if args.fallback else [])
-        snap, failures = None, []
+        report, failures = None, []
         for source in order:
             spec = sources.SOURCES[source]
             try:
                 if args.file:
-                    content, url = Path(args.file), f"file:{Path(args.file).name}"
-                    snap = sources.load(spec, content, url)
+                    snap = sources.load(spec, Path(args.file), f"file:{Path(args.file).name}")
                 else:
                     with tempfile.TemporaryDirectory(prefix="chainwatch-src-") as tmp:
                         path = sources.fetch(spec.url, dest=Path(tmp) / "source")
                         snap = sources.load(spec, path, spec.url)
+                report = rp.ingest_snapshot(
+                    store.db, snap, time.time(), allow_mass_removal=args.allow_mass_removal
+                )
                 break
-            except (OSError, ValueError, httpx.HTTPError) as e:  # unreachable, invalid, too big
+            except (OSError, ValueError, ET.ParseError, httpx.HTTPError) as e:
+                # unreachable, truncated, invalid, too big, or refused (SnapshotRejected)
                 failures.append({"source": source, "error": f"{type(e).__name__}: {e}"[:300]})
                 print(f"chainwatch-live: source {source} failed: {failures[-1]['error']}",
                       file=sys.stderr)  # fmt: skip
-        if snap is None:
+        if report is None:
             print(json.dumps({"status": "failed", "failures": failures}, indent=2))
             return 1  # the previous version stays in use; freshness shows the age
-        report = rp.ingest_snapshot(store.db, snap, time.time())
         if report["status"] == "new_version":
-            report["retrospective_matches"] = rp.retro_screen(
-                store.db, report["version_id"], time.time()
-            )
+            with rp.transaction(store.db):
+                report["retrospective_matches"] = rp.retro_screen(
+                    store.db, report["version_id"], time.time()
+                )
         report["rejected_examples"] = snap.rejected[:5]
         report["failures"] = failures
         print(json.dumps(report, indent=2, default=str))
@@ -266,6 +277,10 @@ def cmd_alerts(args) -> int:
     from chainwatch.live.store import LiveStore
     from chainwatch.risk import persistence as rp
 
+    if args.action != "list" and args.id is None:
+        raise SystemExit(f"alerts {args.action} needs --id")
+    if args.action == "set-status" and not args.status:
+        raise SystemExit("alerts set-status needs --status")
     store = LiveStore(_live(args).db_path)
     try:
         if args.action == "list":
@@ -315,6 +330,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--source", default="ofac-sdn", help="ofac-sdn (official) or ofac-sdn-mirror")
     s.add_argument("--fallback", default=None, help="source to try if the first one fails")
     s.add_argument("--file", type=Path, default=None, help="ingest a local copy instead")
+    s.add_argument(
+        "--allow-mass-removal",
+        action="store_true",
+        help="accept a snapshot that delists most of the active list (verify it first)",
+    )
     s.add_argument("--db", type=Path, default=None)
     s.set_defaults(func=cmd_indicators)
     s = sub.add_parser("alerts", help="investigation queue: list, set-status, history")

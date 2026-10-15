@@ -30,6 +30,21 @@ class SourceSpec:
     category: str
     label: str
     note: str
+    # Sources publishing the same list through different channels share an authority: only
+    # the newest snapshot of that list counts (a mirror is superseded by the official file
+    # and vice versa), and screening reports one match per authority, preferring low rank.
+    authority: str = ""
+    rank: int = 0
+
+
+def authority_of(source_id: str) -> str:
+    spec = SOURCES.get(source_id)
+    return (spec.authority if spec and spec.authority else None) or source_id
+
+
+def rank_of(source_id: str) -> int:
+    spec = SOURCES.get(source_id)
+    return spec.rank if spec else 0
 
 
 DISPLAY_NAMES = {"ofac-sdn": "OFAC SDN", "ofac-sdn-mirror": "OFAC SDN (third-party mirror)"}
@@ -54,6 +69,8 @@ SOURCES: dict[str, SourceSpec] = {
         "",
         "Official OFAC SDN list (XML). Per-address party name, profile id, programmes and "
         "entry date. Recommended on the VM.",
+        authority="ofac-sdn",
+        rank=0,
     ),
     "ofac-sdn-mirror": SourceSpec(
         "ofac-sdn-mirror",
@@ -65,7 +82,9 @@ SOURCES: dict[str, SourceSpec] = {
         "",  # the list names no parties: a per-address label would only repeat the source
         "Nightly extraction of the XBT addresses from sdn_advanced.xml by a third party. Same "
         "addresses, but no per-address party names or dates. Fallback when the official "
-        "file cannot be fetched.",
+        "file cannot be fetched. Not an authoritative copy: its content can lag or differ.",
+        authority="ofac-sdn",
+        rank=1,
     ),
 }
 
@@ -84,8 +103,9 @@ def fetch(url: str, timeout: float = 120.0, dest: Path | None = None) -> bytes |
         client.stream("GET", url) as r,
     ):
         r.raise_for_status()
-        if urlparse(str(r.url)).scheme != "https":
-            raise ValueError("redirected to a non-https URL")
+        # every hop, not only the final URL: https -> http -> https would expose the request
+        if any(urlparse(str(h.url)).scheme != "https" for h in (*r.history, r)):
+            raise ValueError("redirected through a non-https URL")
         size = 0
         chunks: list[bytes] = []
         sink = dest.open("wb") if dest is not None else None

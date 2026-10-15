@@ -89,7 +89,9 @@ def parse_message(raw: str | bytes) -> ParseResult:
         return out
 
     seq = body.get("sequence")
-    sequence = seq if isinstance(seq, int) and not isinstance(seq, bool) else None
+    # a sane counter (it also has to fit SQLite's and JSON's integer range)
+    ok = isinstance(seq, int) and not isinstance(seq, bool) and 0 <= seq < 2**53
+    sequence = seq if ok else None
     added, bad_a = _txids(body.get("added"))
     removed, bad_r = _txids(body.get("removed"))
     mined, bad_m = _txids(body.get("mined"))

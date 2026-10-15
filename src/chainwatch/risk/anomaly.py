@@ -8,8 +8,10 @@ measurement's direction, and a robust z-score ``(x - median) / (1.4826 * MAD)``.
 
 * A measurement is *flagged* when ``p <= alpha`` and ``|robust z| >= min_z`` (the z-score
   guard avoids flagging ties of discrete counts).
-* ``ANOMALY`` level ``strong``: two or more flagged measurements, or one outside the whole
-  reference range. Otherwise ``notable``.
+* ``ANOMALY`` level ``strong``: two or more flagged measurements. Otherwise ``notable``.
+  (Before robust-tail/2, one value outside the reference range also counted as strong; with
+  a small window every flag is outside the range, so "strong" measured the window size,
+  not the evidence: on pure noise all flags were strong at n = 500.)
 * ``INSUFFICIENT_BASELINE``: fewer than ``min_reference`` reference transactions.
 
 The score is a tail probability under the sampled recent traffic, **not** a probability of
@@ -26,7 +28,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-DETECTOR_VERSION = "robust-tail/1"
+DETECTOR_VERSION = "robust-tail/2"
 
 
 @dataclass(frozen=True)
@@ -77,20 +79,24 @@ MEASUREMENTS: tuple[Measurement, ...] = (
 @dataclass(frozen=True)
 class DetectorConfig:
     window: int = 2000
-    min_reference: int = 500
+    min_reference: int = 1000
     alpha: float = 0.002  # per-measurement tail probability for a flag
     min_z: float = 3.0
 
     def __post_init__(self) -> None:
-        # with n reference values the smallest attainable tail probability is 1/(n+1): a
-        # baseline smaller than 1/alpha - 1 could never flag anything
-        if 1 / (self.min_reference + 1) > self.alpha:
+        if not (0 < self.alpha < 1) or not math.isfinite(self.min_z) or self.min_z < 0:
+            raise ValueError("alpha must be in (0, 1) and min_z a finite number >= 0")
+        if self.min_reference < 1 or self.window < self.min_reference:
+            raise ValueError("need 1 <= min_reference <= window")
+        # with n reference values the smallest attainable tail probability is 1/(n+1), and
+        # 2/(n+1) for a two-sided measurement (the fee rate): a smaller baseline could never
+        # flag it
+        sides = 2 if any(m.direction == "both" for m in MEASUREMENTS) else 1
+        if sides / (self.min_reference + 1) > self.alpha:
             raise ValueError(
-                f"min_reference {self.min_reference} cannot reach alpha {self.alpha}; "
-                f"need at least {int(1 / self.alpha)}"
+                f"min_reference {self.min_reference} cannot reach alpha {self.alpha} for a "
+                f"two-sided measurement; need at least {math.ceil(sides / self.alpha) - 1}"
             )
-        if self.window < self.min_reference:
-            raise ValueError("window must be at least min_reference")
 
 
 class RobustTailDetector:
@@ -171,7 +177,7 @@ class RobustTailDetector:
         if not flagged:
             return {"status": "NO_ANOMALY", "level": None, "score": None, "indicators": [],
                     "detector": detector}  # fmt: skip
-        strong = len(flagged) >= 2 or any(i["outside_reference_range"] for i in flagged)
+        strong = len(flagged) >= 2
         flagged.sort(key=lambda i: i["tail_probability"])
         return {
             "status": "ANOMALY",

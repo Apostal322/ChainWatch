@@ -31,10 +31,10 @@ from chainwatch.risk.screening import (
     Screener,
     graph_relations,
 )
-from chainwatch.risk.sources import source_title
+from chainwatch.risk.sources import authority_of, source_title
 from chainwatch.risk.supervised import SupervisedLayer
 
-ENGINE_VERSION = "risk-engine/1"
+ENGINE_VERSION = "risk-engine/2"
 PRIORITY_LABELS = {
     1: "Source-backed screening match",
     2: "Relation to a source-backed match (observed data)",
@@ -49,7 +49,8 @@ class RiskEngine:
         screener: Screener,
         detector: RobustTailDetector,
         supervised: SupervisedLayer,
-        parent_lookup: Callable[[list[str]], tuple[list[dict], int]] | None = None,
+        # parent txids -> (their stored input addresses, parents assessed, parents looked up)
+        parent_lookup: Callable[[list[str]], tuple[dict[str, list], int, int]] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.screener, self.detector, self.supervised = screener, detector, supervised
@@ -73,14 +74,20 @@ class RiskEngine:
         screening = guarded("screening", lambda: self.screener.screen(addrs, evaluated_at))
 
         def graph() -> dict[str, Any]:
-            if self.parent_lookup is None or not parent_txids:
+            if (
+                self.parent_lookup is None
+                or not parent_txids
+                or screening.get("status") in (SCREENING_DATA_UNAVAILABLE, "ERROR")
+            ):
                 return {
                     "status": "NOT_EVALUATED",
                     "relations": [],
                     "coverage": {"parents": len(parent_txids), "parents_observed": 0},
                 }
-            matches, observed = self.parent_lookup(parent_txids)
-            return graph_relations(parent_txids, matches, observed)
+            inputs, observed, checked = self.parent_lookup(parent_txids)
+            return graph_relations(
+                self.screener, parent_txids, inputs, observed, checked, evaluated_at
+            )
 
         relation = guarded("graph", graph)
         anomaly = guarded("anomaly", lambda: self.detector.score(features))
@@ -132,9 +139,11 @@ def alert_specs(record: dict[str, Any]) -> list[dict[str, Any]]:
     txid, at = record["txid"], record["evaluated_at"]
     for m in record["screening"].get("matches", []):
         role = "spends from" if m["role"] == "in" else "pays to"
+        authority = m.get("authority") or authority_of(m["source_id"])
         out.append(
             {
-                "group_key": f"screening:{m['source_id']}:{m['address']}",
+                # one item per listed address and role, whichever copy of the list matched
+                "group_key": f"screening:{authority}:{m['role']}:{m['address']}",
                 "layer": "screening",
                 "kind": "source_match",
                 "priority": 1,
@@ -146,7 +155,8 @@ def alert_specs(record: dict[str, Any]) -> list[dict[str, Any]]:
     for r in record["graph"].get("relations", []):
         out.append(
             {
-                "group_key": f"relation:{r['source_id']}:{r['path'][0]}",
+                "group_key": f"relation:{r.get('authority') or authority_of(r['source_id'])}:"
+                f"{r['path'][0]}",
                 "layer": "graph",
                 "kind": r["type"],
                 "priority": 2,

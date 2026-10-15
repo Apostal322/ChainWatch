@@ -29,6 +29,7 @@ import json
 import logging
 import random
 import signal
+import sqlite3
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
@@ -68,6 +69,11 @@ class Counters:
     malformed_payloads: int = 0
     upstream_errors: int = 0  # HTTP 5xx (the fetch budget pauses briefly)
     internal_errors: int = 0  # unexpected exceptions while processing one item
+    db_errors: int = 0  # lifecycle/gap writes that failed (e.g. the database was locked)
+    # mempool's backend repeats its sequence number while it re-syncs (after its restart):
+    # those deltas re-announce the whole mempool and are not new arrivals, so they are skipped
+    resync_deltas: int = 0
+    resync_txids_skipped: int = 0
     # Upstream mempool-txids semantics (mempool/mempool websocket-handler.ts):
     # ``removed`` lists every txid that left the mempool in a poll (replacements, conflicts,
     # evictions, expiry), NOT mined ones; ``mined`` comes with each new block;
@@ -91,6 +97,7 @@ class Counters:
     stale_reconnects: int = 0
     sequence_gaps: int = 0  # missed mempool updates while connected
     recovered_downtime_s: float = 0.0  # gap since the previous process's last heartbeat
+    retrospective_matches: int = 0  # found when the collector loaded a new indicator version
 
 
 class SeenSet:
@@ -108,6 +115,33 @@ class SeenSet:
         if len(self._items) > self.max_items:
             self._items.popitem(last=False)
         return True
+
+    def __contains__(self, txid: object) -> bool:
+        return txid in self._items
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+class LifecycleMemo:
+    """Bounded memory of txids that left the mempool, with their state, so a transaction
+    whose removal/mining/replacement arrives while it waits for or during its fetch is not
+    fetched (or, if already in flight, gets its state once stored)."""
+
+    def __init__(self, max_items: int) -> None:
+        self.max_items = max_items
+        self._items: OrderedDict[str, tuple[str, float, str | None]] = OrderedDict()
+
+    def add(self, txid: str, state: str, at: float, replaced_by: str | None = None) -> None:
+        prev = self._items.pop(txid, None)
+        if prev is not None and prev[0] == "mined":
+            state, replaced_by = "mined", None  # mined is final
+        self._items[txid] = (state, at, replaced_by)
+        if len(self._items) > self.max_items:
+            self._items.popitem(last=False)
+
+    def get(self, txid: str) -> tuple[str, float, str | None] | None:
+        return self._items.get(txid)
 
     def __contains__(self, txid: object) -> bool:
         return txid in self._items
@@ -198,6 +232,7 @@ def _pct(values, q: float) -> float | None:
 
 HEALTHY_AFTER_S = 30.0  # a connection must deliver for this long before backoff resets
 UPSTREAM_ERROR_PAUSE_S = 30.0  # fetch pause after an HTTP 5xx from the REST API
+MAX_TX_BYTES = 16_000_000  # a REST transaction document larger than this is refused
 GONE_MAX = 50_000  # remembered removed/mined txids (bounded)
 
 
@@ -223,7 +258,7 @@ class Collector:
         self.clock = clock
         self.c = Counters()
         self.seen = SeenSet(cfg.dedupe_max)
-        self.gone = SeenSet(GONE_MAX)  # removed or mined: no longer worth fetching
+        self.gone = LifecycleMemo(GONE_MAX)  # removed, mined or replaced: not worth fetching
         self.queue: asyncio.Queue[tuple[str, float]] = asyncio.Queue(maxsize=cfg.queue_max)
         self.bucket = TokenBucket(cfg.fetch_per_minute, cfg.fetch_burst)
         self.recent_fee_rates: deque[float] = deque(maxlen=500)
@@ -241,6 +276,7 @@ class Collector:
         self._max_fetches: int | None = None
         self.fatal: str | None = None  # set when a pipeline task died; the CLI exits non-zero
         self.engine = None  # built in run() from the store (risk intelligence)
+        self.risk_unavailable: str | None = None
         self._indicator_version = -1
         self._latencies: deque[float] = deque(maxlen=500)
 
@@ -255,46 +291,68 @@ class Collector:
         d = res.delta
         if d is None:
             return
+        gap: str | None = None
+        resync = False
         if d.sequence is not None:
             prev = self._conn_sequence
             if prev is not None and d.sequence > prev + 1:
-                missed = d.sequence - prev - 1
                 self.c.sequence_gaps += 1
-                self.store.record_gap(
-                    "sequence_gap", self.last_message_at, self.last_message_at,
-                    f"{missed} mempool update(s) missed (sequence {prev} -> {d.sequence})",
-                )  # fmt: skip
+                gap = (
+                    f"{d.sequence - prev - 1} mempool update(s) missed "
+                    f"(sequence {prev} -> {d.sequence})"
+                )
+            # the backend only advances its sequence while in sync; a repeated number is a
+            # re-sync delta that re-announces old transactions (websocket-handler.ts)
+            resync = prev is not None and d.sequence == prev
             self._conn_sequence = d.sequence
             self.last_sequence = d.sequence
         self.c.invalid_txids += d.invalid
         self.c.removed += len(d.removed)
         self.c.mined += len(d.mined)
         self.c.replacement_pairs += len(d.replaced)
-        for txid in (*d.removed, *d.mined):
-            self.gone.add(txid)
-        if self.store is not None and (d.removed or d.mined or d.replaced):
-            # post-observation state only; features and past assessments are never changed
-            from chainwatch.risk.persistence import mark_lifecycle
-
-            at = self.last_message_at
-            n = mark_lifecycle(self.store.db, d.mined, "mined", at)
-            n += mark_lifecycle(self.store.db, d.removed, "removed", at)
-            for old, by in d.replaced:
-                n += mark_lifecycle(self.store.db, [old], "replaced", at, replaced_by=by)
-            self.c.lifecycle_updates += n
+        at = self.last_message_at
+        for txid in d.removed:
+            self.gone.add(txid, "removed", at)
+        for old, by in d.replaced:  # block conflicts reach ``removed`` only a delta later
+            self.gone.add(old, "replaced", at, by)
+        for txid in d.mined:
+            self.gone.add(txid, "mined", at)
+        # new arrivals first, so a database problem below cannot lose them
         now = self.clock()
-        for txid in d.added:
-            self.c.received += 1
-            if not self.seen.add(txid):
-                self.c.duplicates += 1
-            elif not sampled(txid, self.cfg.sample_rate):
-                self.c.not_sampled += 1
-            else:
-                try:
-                    self.queue.put_nowait((txid, now))
-                    self.c.queued += 1
-                except asyncio.QueueFull:
-                    self.c.dropped_backpressure += 1
+        if resync:
+            self.c.resync_deltas += 1
+            self.c.resync_txids_skipped += len(d.added)
+        else:
+            for txid in d.added:
+                self.c.received += 1
+                if not self.seen.add(txid):
+                    self.c.duplicates += 1
+                elif not sampled(txid, self.cfg.sample_rate):
+                    self.c.not_sampled += 1
+                else:
+                    try:
+                        self.queue.put_nowait((txid, now))
+                        self.c.queued += 1
+                    except asyncio.QueueFull:
+                        self.c.dropped_backpressure += 1
+        if self.store is None:
+            return
+        try:
+            if gap is not None:
+                self.store.record_gap("sequence_gap", at, at, gap)
+            if d.removed or d.mined or d.replaced:
+                # post-observation state only; features and past assessments never change
+                from chainwatch.risk.persistence import mark_lifecycle
+
+                n = mark_lifecycle(self.store.db, d.removed, "removed", at)
+                for old, by in d.replaced:
+                    n += mark_lifecycle(self.store.db, [old], "replaced", at, replaced_by=by)
+                n += mark_lifecycle(self.store.db, d.mined, "mined", at)  # last: final state
+                self.c.lifecycle_updates += n
+        except sqlite3.Error as e:  # e.g. locked by another writer: not a network problem
+            self.c.db_errors += 1
+            self.last_error = f"database: {type(e).__name__}: {e}"[:200]
+            log.warning(json.dumps({"msg": "lifecycle/gap write failed", "error": self.last_error}))
 
     async def _ws_loop(self) -> None:
         attempt = 0
@@ -385,32 +443,42 @@ class Collector:
         if self.clock() - first_seen > self.cfg.max_queue_age_s:  # aged while paused
             self.c.expired += 1
             return
+        if txid in self.gone:  # left the mempool while waiting for a token
+            self.c.gone_before_fetch += 1
+            return
         assert self.http is not None
         error: str | None = None
+        status, headers, body = 0, {}, b""
         try:
-            resp = await self.http.get(f"{self.cfg.rest_base}/tx/{txid}")
-        except httpx.TimeoutException:
+            # an overall deadline: httpx's timeout is per read, so a body that trickles in
+            # could otherwise hold the worker forever while the status still says connected
+            async with asyncio.timeout(self.cfg.request_timeout_s):
+                status, headers, body = await self._get(f"{self.cfg.rest_base}/tx/{txid}")
+        except (httpx.TimeoutException, TimeoutError):
             self.c.timeouts += 1
             error = "timeout"
         except httpx.HTTPError as e:
             error = f"network:{type(e).__name__}"
+        except ValueError as e:  # response larger than MAX_TX_BYTES
+            self.c.malformed_payloads += 1
+            error = f"malformed_payload:{str(e)[:80]}"
         else:
-            if resp.status_code == 429:
+            if status == 429:
                 self.c.rate_limited += 1
-                self.bucket.pause(retry_after_seconds(resp.headers.get("retry-after")))
+                self.bucket.pause(retry_after_seconds(headers.get("retry-after")))
                 error = "rate_limited"
-            elif resp.status_code == 404:
+            elif status == 404:
                 self.c.not_found += 1  # evicted, replaced or not (yet) indexed
                 error = "not_found"
-            elif resp.status_code >= 500:
+            elif status >= 500:
                 self.c.upstream_errors += 1
                 self.bucket.pause(UPSTREAM_ERROR_PAUSE_S)  # do not drain the queue into errors
-                error = f"http_{resp.status_code}"
-            elif resp.status_code != 200:
-                error = f"http_{resp.status_code}"
+                error = f"http_{status}"
+            elif status != 200:
+                error = f"http_{status}"
             else:
                 try:
-                    payload = resp.json()
+                    payload = json.loads(body)
                     f = feat.extract(
                         payload, txid=txid, first_seen=first_seen, fetched_at=self.clock()
                     )
@@ -425,6 +493,19 @@ class Collector:
             self.c.failed += 1
             self.store.add_failed(txid, first_seen, self.clock(), error)
 
+    async def _get(self, url: str) -> tuple[int, Any, bytes]:
+        """GET with a size cap on the body (status, headers, body)."""
+        assert self.http is not None
+        async with self.http.stream("GET", url) as resp:
+            chunks, size = [], 0
+            if resp.status_code == 200:
+                async for chunk in resp.aiter_bytes():
+                    size += len(chunk)
+                    if size > MAX_TX_BYTES:
+                        raise ValueError("transaction document too large")
+                    chunks.append(chunk)
+            return resp.status_code, resp.headers, b"".join(chunks)
+
     # ---- risk intelligence --------------------------------------------------------------
     def _build_engine(self) -> None:
         from chainwatch.risk import persistence as rp
@@ -433,11 +514,24 @@ class Collector:
         from chainwatch.risk.supervised import SupervisedLayer
 
         detector = RobustTailDetector()
-        detector.warm_start(self.store.recent_features(detector.cfg.window))
+        # only rows with today's feature schema: an upgrade that changes a measurement's
+        # meaning must not mix old values into the reference window
+        detector.warm_start(
+            [
+                f
+                for f in self.store.recent_features(detector.cfg.window)
+                if f.get("schema_version") == feat.FEATURE_SCHEMA_VERSION
+            ]
+        )
         db = self.store.db
 
-        def parents(txids: list[str]) -> tuple[list[dict], int]:
-            return rp.observed_parent_matches(db, txids), rp.count_observed(db, txids)
+        def parents(txids: list[str]) -> tuple[dict[str, list], int, int]:
+            checked = txids[: rp.MAX_PARENTS_CHECKED]
+            return (
+                rp.observed_parent_inputs(db, checked),
+                rp.count_observed(db, checked),
+                len(checked),
+            )
 
         self.engine = RiskEngine(
             self._load_screener(), detector, SupervisedLayer(None), parents, clock=self.clock
@@ -457,12 +551,22 @@ class Collector:
     def _reload_indicators_if_changed(self) -> None:
         from chainwatch.risk import persistence as rp
 
-        if (
-            self.engine is not None
-            and rp.latest_version_id(self.store.db) != self._indicator_version
-        ):
+        if self.engine is None:
+            return
+        previous = self._indicator_version
+        if rp.latest_version_id(self.store.db) != previous:
             self.engine.screener = self._load_screener()
-        elif self.engine is not None:  # refresh freshness (checked_at) of unchanged sources
+            # Transactions assessed between the snapshot being stored and this reload used
+            # the old list: screen them retrospectively now (idempotent with the CLI's pass).
+            new = [r[0] for r in self.store.db.execute(
+                "SELECT id FROM indicator_versions WHERE id > ? ORDER BY id", (previous,)
+            )]  # fmt: skip
+            with rp.transaction(self.store.db):
+                for vid in new:
+                    self.c.retrospective_matches += rp.retro_screen(
+                        self.store.db, vid, self.clock()
+                    )
+        else:  # refresh freshness (checked_at) of unchanged sources
             self.engine.screener.sources = rp.source_status(self.store.db)
 
     def _store_and_assess(self, f: dict[str, Any], flags: list[str], payload: dict) -> None:
@@ -471,15 +575,25 @@ class Collector:
         assessment rolls back only its own savepoint; the observation is kept."""
         from chainwatch.risk import persistence as rp
 
+        assessed = None
         with rp.transaction(self.store.db):
             tx_id = self.store.add_fetched_id(f, flags)
             if tx_id is not None:
-                self.c.fetched += 1
-                self._assess(tx_id, f, payload)
+                gone = self.gone.get(f["txid"])
+                if gone is not None:  # it left the mempool while its fetch was in flight
+                    rp.mark_lifecycle(self.store.db, [f["txid"]], gone[0], gone[1], gone[2])
+                assessed = self._assess(tx_id, f, payload)
+        # counted only once committed (a disk-full rollback must not count as fetched)
+        if tx_id is not None:
+            self.c.fetched += 1
+            if assessed is not None:
+                self._count_assessment(assessed)
 
-    def _assess(self, tx_id: int, f: dict[str, Any], payload: dict[str, Any]) -> None:
+    def _assess(self, tx_id: int, f: dict[str, Any], payload: dict[str, Any]) -> dict | None:
+        """Assess and store inside the caller's transaction; returns the stored record, or
+        None if risk is off or the assessment failed (the observation is kept)."""
         if self.engine is None or not self.cfg.risk_enabled:
-            return
+            return None
         from chainwatch.risk import persistence as rp
         from chainwatch.risk.engine import alert_specs
 
@@ -503,12 +617,18 @@ class Collector:
                 rp.save_risk(db, tx_id, record)
                 for spec in specs:
                     rp.upsert_alert(db, txid=f["txid"], at=record["evaluated_at"], **spec)
-            self.c.alerts_raised += len(specs)
+            record["_alerts"] = len(specs)
         except Exception as e:  # keep the observation even if the assessment fails
+            if not self.store.db.in_transaction:  # SQLite rolled everything back (disk full)
+                raise
             self.c.risk_errors += 1
             self.last_error = f"risk: {type(e).__name__}: {e}"[:200]
             log.exception(json.dumps({"msg": "risk assessment failed", "txid": f["txid"]}))
-            return
+            return None
+        return record
+
+    def _count_assessment(self, record: dict[str, Any]) -> None:
+        self.c.alerts_raised += record.pop("_alerts", 0)
         self.c.risk_assessed += 1
         self.c.layer_errors += len(record["errors"])
         self._latencies.append(record["latency_ms"])
@@ -559,6 +679,7 @@ class Collector:
                 "risk_latency_ms_p95": _pct(self._latencies, 0.95),
                 "anomaly_reference_size": self.engine.detector.n if self.engine else None,
                 "supervised_state": self.engine.supervised.status() if self.engine else None,
+                "risk_unavailable": self.risk_unavailable,
             },
             "settings": {
                 "source": "mempool.space",
@@ -633,7 +754,12 @@ class Collector:
         self._max_fetches = max_fetches
         self.recover()
         if self.cfg.risk_enabled:
-            self._build_engine()
+            try:
+                self._build_engine()
+            except Exception as e:  # observations still matter; the status says why no risk
+                self.engine = None
+                self.risk_unavailable = f"{type(e).__name__}: {e}"[:200]
+                log.exception(json.dumps({"msg": "risk engine unavailable"}))
         if self.http is None:
             self.http = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.cfg.request_timeout_s),

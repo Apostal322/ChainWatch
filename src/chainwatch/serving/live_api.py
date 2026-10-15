@@ -171,7 +171,10 @@ class LocalBackend:
             for src in summary["sources"]:  # same staleness rule as the screening layer
                 checked = src.get("checked_at") or src.get("retrieved_at")
                 src["age_s"] = round(now - checked, 1) if checked else None
-                src["stale"] = checked is None or now - checked > max_age_days * 86400
+                # a copy superseded by a newer snapshot of the same list is not a stale list
+                src["stale"] = not src.get("superseded_by") and (
+                    checked is None or now - checked > max_age_days * 86400
+                )
         return {
             "enabled": summary is not None,
             "window_hours": hours,
