@@ -251,17 +251,20 @@ def prepare(raw_dir: Path, processed_dir: Path) -> ValidationReport:
     ds.edges.to_parquet(processed_dir / EDGES_PARQUET, index=False)
 
     raw_files = raw_file_provenance(raw_dir)
+    synthetic = (raw_dir / SYNTHETIC_MARKER).exists()
     write_json(
         processed_dir / MANIFEST_JSON,
         {
             "manifest_version": MANIFEST_VERSION,
             "source": "Elliptic++ transactions dataset (git-disl/EllipticPlusPlus)",
-            "synthetic": (raw_dir / SYNTHETIC_MARKER).exists(),
+            "synthetic": synthetic,
             "raw_files": raw_files,
             "validation": report.to_dict(),
         },
     )
-    if not all(v["matches_published"] for v in raw_files.values()):
+    if synthetic:  # generated data never matches the published files; not a warning
+        log.info("Synthetic data: published Elliptic++ hashes do not apply")
+    elif not all(v["matches_published"] for v in raw_files.values()):
         log.warning(
             "Raw files do not match published hashes: %s",
             {k: v["matches_published"] for k, v in raw_files.items()},
