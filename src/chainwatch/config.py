@@ -256,12 +256,37 @@ class LiveConfig:
             d["remote_url"] = os.environ.get(url[4:]) or None
             if d["remote_url"] is None and d.get("enabled"):
                 raise ValueError(f"live.remote_url: environment variable {url[4:]} is not set")
-        cfg = cls(**d)
-        if not 0.0 < cfg.sample_rate <= 1.0:
+        return cls(**d)
+
+    def __post_init__(self) -> None:
+        """Reject syntactically valid but unsafe values (e.g. ``retention_rows: 0`` made every
+        prune delete all stored rows; ``heartbeat_s: 0`` made the heartbeat loop spin)."""
+        if not 0.0 < self.sample_rate <= 1.0:
             raise ValueError("live.sample_rate must be in (0, 1]")
-        if cfg.fetch_per_minute < 1 or cfg.fetch_concurrency < 1 or cfg.queue_max < 1:
-            raise ValueError("live fetch limits and queue_max must be positive")
-        return cfg
+        at_least_one = ("fetch_per_minute", "fetch_burst", "fetch_concurrency", "queue_max",
+                        "dedupe_max", "retention_rows", "sse_max_per_client",
+                        "edge_rate_limit_per_minute")  # fmt: skip
+        positive = ("request_timeout_s", "max_queue_age_s", "retention_days", "reconnect_base_s",
+                    "reconnect_max_s", "stale_after_s", "heartbeat_s", "sse_max_seconds",
+                    "indicator_max_age_days", "remote_timeout_s")  # fmt: skip
+        for name in at_least_one:
+            if getattr(self, name) < 1:
+                raise ValueError(f"live.{name} must be at least 1")
+        for name in positive:
+            if not getattr(self, name) > 0:
+                raise ValueError(f"live.{name} must be positive")
+        # sse_max_clients: 0 turns the event stream off (503); the dashboard keeps polling
+        if self.remote_cache_s < 0 or self.edge_trusted_proxy_hops < 0 or self.sse_max_clients < 0:
+            raise ValueError(
+                "live.remote_cache_s, edge_trusted_proxy_hops and sse_max_clients must be >= 0"
+            )
+        if self.reconnect_max_s < self.reconnect_base_s:
+            raise ValueError("live.reconnect_max_s must be >= live.reconnect_base_s")
+        if not self.ws_url.startswith(("ws://", "wss://")):
+            raise ValueError("live.ws_url must be a ws:// or wss:// URL")
+        for name in ("rest_base", "explorer_tx_url"):
+            if not getattr(self, name).startswith(("http://", "https://")):
+                raise ValueError(f"live.{name} must be an http:// or https:// URL")
 
 
 @dataclass

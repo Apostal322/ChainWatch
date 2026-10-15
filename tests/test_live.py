@@ -388,3 +388,28 @@ def test_live_config_validation():
     with pytest.raises(ValueError):
         LiveConfig.from_dict({"fetch_per_minute": 0})
     assert dataclasses.replace(LiveConfig(), sample_rate=0.5).sample_rate == 0.5
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"retention_rows": 0},  # prune(0) deleted every stored row
+        {"retention_rows": -5},
+        {"retention_days": 0},
+        {"heartbeat_s": 0},  # the heartbeat loop would spin
+        {"stale_after_s": 0},
+        {"sse_max_clients": -1},  # 0 is allowed: event stream off
+        {"indicator_max_age_days": -1},
+        {"reconnect_base_s": 5, "reconnect_max_s": 0.1},
+        {"ws_url": "http://mempool.space/api/v1/ws"},
+        {"rest_base": "ftp://mempool.space/api"},
+        {"request_timeout_s": 0},
+        {"max_queue_age_s": -1},
+        {"edge_trusted_proxy_hops": -1},
+    ],
+)
+def test_live_config_rejects_unsafe_values(bad):
+    with pytest.raises(ValueError):
+        LiveConfig.from_dict(bad)
+    with pytest.raises(ValueError):  # also when constructed directly or replaced
+        dataclasses.replace(LiveConfig(), **bad)

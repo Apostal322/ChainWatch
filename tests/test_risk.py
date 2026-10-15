@@ -130,10 +130,14 @@ def test_sdn_xml_streams_from_a_file_with_bounded_memory(tmp_path):
     big = SDN_XML.replace(b"<DistinctParties>", f"<DistinctParties>{filler}".encode())
     path = tmp_path / "sdn_advanced.xml"
     path.write_bytes(big)
+    already_tracing = tracemalloc.is_tracing()  # e.g. python -X tracemalloc
     tracemalloc.start()
+    tracemalloc.reset_peak()
+    base = tracemalloc.get_traced_memory()[0]
     snap = parse_ofac_sdn_advanced(path, retrieved_at=1.0)
-    peak = tracemalloc.get_traced_memory()[1]
-    tracemalloc.stop()
+    peak = tracemalloc.get_traced_memory()[1] - base
+    if not already_tracing:
+        tracemalloc.stop()
     assert [r.address for r in snap.records] == [LISTED]
     assert peak < 0.5 * len(big) + 5_000_000, f"peak {peak} for a {len(big)}-byte file"
 
