@@ -168,6 +168,7 @@ def _cmd_serve(args, cfg) -> None:
         access_log=False,
         limit_concurrency=served.serving.limit_concurrency if served.serving else 64,
         timeout_keep_alive=5,
+        timeout_graceful_shutdown=10,  # do not wait sse_max_seconds for open streams
     )
 
 
@@ -187,6 +188,14 @@ def _cmd_verify_replay(args, cfg) -> None:
     )
     if not r["all_within_tolerance"]:
         raise SystemExit(1)
+
+
+def _cmd_live_collect(args, cfg) -> None:
+    """Run the live mempool collector (same as ``chainwatch-live collect``)."""
+    from chainwatch.live.cli import cmd_collect
+
+    args.config = args.config or Path("configs/default.yaml")
+    cmd_collect(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -279,6 +288,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("backtest-report", help="tables, CIs and figures -> reports/phase2/backtest")
     s.set_defaults(func=_cmd_backtest_report)
+
+    # ---- Phase 5 ----------------------------------------------------------------
+    s = sub.add_parser(
+        "live-collect", help="collect REAL mempool observations from mempool.space (opt-in)"
+    )
+    s.add_argument("--duration", type=float, default=None, help="stop after N seconds")
+    s.add_argument("--max-fetches", type=int, default=None, help="stop after N detail requests")
+    s.add_argument("--db", type=Path, default=None, help="override live.db_path")
+    s.add_argument("--sample-rate", type=float, default=None, help="override live.sample_rate")
+    s.add_argument("--force", action="store_true", help="run even if live.enabled is false")
+    s.set_defaults(func=_cmd_live_collect)
     return p
 
 

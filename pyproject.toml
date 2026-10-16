@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chainwatch"
-version = "0.4.1"
+version = "0.8.0"
 description = "Temporal, leakage-aware detection of illicit Bitcoin transactions on the Elliptic++ dataset."
 readme = "README.md"
 license = "MIT"
@@ -29,6 +29,7 @@ dev = ["pytest>=8.0", "ruff>=0.5", "fastapi>=0.110", "uvicorn[standard]>=0.29", 
 
 [project.scripts]
 chainwatch = "chainwatch.cli:main"
+chainwatch-live = "chainwatch.live.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

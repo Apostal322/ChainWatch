@@ -21,6 +21,6 @@ services:
     volumes:
       - ./data/processed:/app/data/processed:ro
       - ./artifacts/registry:/app/artifacts/registry:ro
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]  # real-data registry: this machine only
     read_only: true
     tmpfs: ["/tmp"]

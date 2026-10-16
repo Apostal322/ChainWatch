@@ -5,15 +5,17 @@ given in brackets. If a number is not listed here, do not quote it.
 
 ## 60-second explanation
 
-"ChainWatch asks how well a fraud-style ranking model holds up when the world changes. I
+"ChainWatch asks how well an illicit-transaction ranking model holds up when the world changes. I
 used Elliptic++, a public dataset of about 204,000 Bitcoin transactions over 49 two-week
 time steps, where only 23% are labelled. With a strictly chronological evaluation,
 XGBoost looked strong overall (AP 0.80), but per-time-step reporting showed it collapsing
 after step 42: AP fell from 0.92 to 0.04, and ROC-AUC fell too, so the ranking itself
-broke, not just the base rate. I then pre-registered a backtest of retraining strategies
-with an explicit delay before labels arrive. Retraining as labels arrived lifted the
-late-period AP to about 0.46. I report that as exploratory, because I had already seen
-that period. Finally I built a FastAPI and React replay service that serves the frozen
+broke, not just the base rate. I then wrote a protocol for a backtest of retraining
+strategies with an explicit delay before labels arrive, before running it (that is my
+own record; the published git history cannot prove the timing). Over the whole later
+period, retraining as labels arrived raised AP modestly (+0.085, 95% CI 0.02–0.23); the
+gain was concentrated after the shift, where AP rose from 0.05 to about 0.46. I report
+all of that as exploratory, because I had already seen that period. Finally I built a FastAPI and React replay service that serves the frozen
 research models and reproduces their scores exactly, with a hardened synthetic-data demo
 in Docker and CI on Linux and Windows."
 
@@ -29,7 +31,9 @@ in Docker and CI on Linux and Windows."
 2. **Baselines.** Logistic regression got AP 0.23 and XGBoost 0.80 on test. Per-step
    metrics exposed the collapse after step 42. [reports/baseline_results.md]
 3. **Diagnosis (Phase 2).** I separated prior shift from ranking failure: ROC-AUC
-   0.97 → 0.70, and AP re-weighted to a fixed prevalence 0.92 → 0.17. A model fitted only
+   0.97 → 0.69 for the Phase 1 XGBoost model (0.97 → 0.70 for a past-only model fitted
+   on steps 1–34), and, for that past-only model, AP re-weighted to a fixed prevalence
+   0.93 → 0.18. A model fitted only
    on other late steps reaches AP 0.81 on the late period, while the past-only model gets
    0.05. So late illicit transactions are predictable from these features, but the old
    boundary does not transfer. This is a diagnostic, not a deployable model.
@@ -38,8 +42,11 @@ in Docker and CI on Linux and Windows."
    Five strategies: static, expanding, periodic, sliding window, recency-weighted. Strategy
    parameters are selected on steps 20–34, then frozen and confirmed on 35–49. Block
    bootstrap over time steps; 3 to 5 seeds. [docs/PHASE2_PROTOCOL.md]
-5. **Result.** Late-period AP 0.050 → 0.458 (+0.41, 95% CI 0.16–0.62). The gain shrinks
-   at L = 3, and the first steps after the shift stay poor for every method.
+5. **Result.** Primary comparison, pooled AP over 35–49: expanding vs static +0.085
+   (95% CI 0.024–0.229). On the 43–49 sub-period (boundary chosen from Phase 1
+   inspection): AP 0.050 → 0.458 (+0.41, CI 0.16–0.62, from only 7 steps, so coverage is
+   probably below nominal), positive at all 7 late steps. The gain shrinks at L = 3, and
+   the first steps after the shift stay poor for every method.
 6. **Service (Phase 3).** Frozen snapshots are re-exported through the exact backtest code
    path; a single `FeatureStore` builds every model input; the replay engine scores step
    *s* with the snapshot from *s−1*. `verify-replay` re-scores 234,596 transactions and
@@ -81,9 +88,10 @@ through the dataset's one-hop aggregate features.
 - In the backtest, a model retrained at τ only sees labels from steps ≤ τ − L. This is
   asserted for every fit, and **canary tests** corrupt the labels or features that should
   be unavailable and check that every score is bit-for-bit unchanged.
-- The protocol was committed to git before any Phase 2 experiment ran. Strategy
-  selection happens on dev only; the confirm run refuses to start without a frozen
-  selection.
+- The protocol was written before the Phase 2 runs by my own record, but the published
+  git history cannot verify that: the file first appears in the same commit as the
+  results. What the code does enforce: strategy selection happens on dev only, and the
+  confirm run refuses to start without a frozen selection.
 - **Residual issues (state them):** the publisher standardised features using all time
   steps (irrelevant for trees, a mild leak for linear models), and steps 35–49 were
   inspected in Phase 1, so no untouched holdout remains.
@@ -92,11 +100,14 @@ through the dataset's one-hop aggregate features.
 What the data shows:
 - **Prior shift:** the illicit share of labelled transactions fell from about 0.09 to
   0.025.
-- **More than prior shift:** ROC-AUC (prevalence-invariant) fell to 0.70, and late
-  illicit transactions get a median score of 0.002 from the old model.
+- **More than prior shift:** ROC-AUC (prevalence-invariant) fell to 0.69–0.73 on
+  43–49, depending on which static model (Phase 1, past-only 1–34, or Phase 2 static),
+  and the Phase 1 model's per-step median score for late illicit transactions is
+  ≤ 0.008 (except step 46, which has 2 illicit).
 - **Learnable from later labels:** a model trained on late labels ranks the late period
   well (AP 0.81).
-- **Calibration:** degrades (ECE 0.010 → 0.047).
+- **Calibration:** degrades (ECE 0.010 → 0.047). The 0.010 is in-sample, because the
+  Platt calibrator was fitted on 30–34, and both are means of per-step ECE.
 - **Not visible in the marginals:** bulk feature distributions (median KS) do not jump at
   step 43.
 
@@ -115,8 +126,8 @@ but I can only say my results are consistent with that, not confirm it.
   labels of steps 34–41 that the static model never saw (AP about 0.05 → about 0.25).
   Steps 47–49 recover to 0.49–0.99 once post-shift labels arrive.
 - **What it did not fix:** steps 43–45 stay poor for every method; the gain shrinks at
-  L = 3 (+0.05 to +0.07, some CIs include 0); and in the budget metric the pre-registered
-  robustness rule fails (a ceiling effect in 35–42).
+  L = 3 (+0.05 to +0.07; the sliding W = 10 CI includes 0); and in the budget metric the
+  protocol's robustness rule fails (a ceiling effect in 35–42).
 
 ### Why are unknown labels a problem?
 - **Volume and bias:** 77% of transactions are unlabelled, and the labelled subset is not
@@ -147,7 +158,7 @@ but I can only say my results are consistent with that, not confirm it.
    publisher and cannot be computed for new data.
 
 ### How was it tested?
-- **Python (265 tests):** schema and join, split and leakage guards, label-latency
+- **Python (350+ automated tests):** schema and join, data-provenance fingerprints, split and leakage guards, label-latency
   canaries, schedule causality (parametrised over strategies, origins and latencies),
   metrics against hand-computed values (including tie-aware P@K), block bootstrap,
   registry integrity (tampering, version mismatch, path traversal, per-card provenance),
@@ -173,8 +184,11 @@ but I can only say my results are consistent with that, not confirm it.
 ## Questions a senior ML engineer might ask
 
 **"Your confirm result reuses a period you had already looked at. Why should I believe it?"**
-The selection was frozen on dev (steps 20–34) and committed before confirm ran. The
-improvement also appears on dev (+0.16 AP, CI excludes 0). The mechanism is consistent:
+The selection was frozen on dev (steps 20–34) and written to `selection.json` before
+confirm ran; the confirm stage refuses to run without it, and the run timestamps are in
+that order, though git does not record it. The improvement also appears on dev (+0.16 AP
+for expanding, CI excludes 0; expanding has no tuned parameter, so that dev number has
+no selection bias). The mechanism is consistent:
 the gain tracks label arrival. But you are right that it is exploratory; the honest fix
 is fresh data.
 
@@ -197,7 +211,9 @@ evidence supports "use recent labels", not "down-weight old ones".
 **"Would you deploy this?"**
 Not as is. Real deployment needs features computable for new transactions, a measured
 label-latency process, calibration and thresholds tied to analyst capacity, and drift
-monitoring. The marginal-feature drift detectors I tried would *not* have flagged step 43.
+monitoring. Would a marginal-feature drift detector have flagged step 43? Probably not:
+median KS against the training period shows no jump there. But no drift detector was
+actually run, so that is an inference, not a measurement.
 
 **"Why no GNN?"**
 There are no edges between time steps, so message passing cannot carry information

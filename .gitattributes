@@ -3,3 +3,4 @@
 *.png binary
 *.joblib binary
 *.parquet binary
+tests/fixtures/ofac/*.xml -text

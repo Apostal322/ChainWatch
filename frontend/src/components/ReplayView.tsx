@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Info, type Policy, type Ranking, type StepMetrics, type StepSummary } from "../lib/api";
+import { revealIfStacked } from "../lib/dom";
 import { describeVersion, fmtHits, fmtInt, fmtPct, fmtScore } from "../lib/format";
 import { LabelChip, PolicyPicker, Tile } from "./common";
 import TransactionDetail from "./TransactionDetail";
@@ -16,6 +17,18 @@ export default function ReplayView({ info }: { info: Info }) {
   const [metrics, setMetrics] = useState<StepMetrics | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+
+  // Changing what is listed resets paging and selection in the same update, so no request is
+  // ever made for the new step with the old page offset.
+  const resetView = () => { setOffset(0); setSelected(null); };
+  const changeStep = (s: number) => { setStep(s); resetView(); };
+  const changePolicy = (p: Policy) => { setPolicy(p); resetView(); };
+  const changeLabels = (l: string) => { setLabels(l); resetView(); };
+  const selectRow = (id: number) => {
+    setSelected(id);
+    requestAnimationFrame(() => revealIfStacked(detailRef.current));
+  };
 
   useEffect(() => {
     api.steps().then((s) => {
@@ -26,21 +39,32 @@ export default function ReplayView({ info }: { info: Info }) {
 
   const available = useMemo(() => steps.find((s) => s.step === step)?.policies ?? [], [steps, step]);
   useEffect(() => {
-    if (available.length && !available.includes(policy)) setPolicy(available[0]);
+    if (available.length && !available.includes(policy)) {
+      setPolicy(available[0]);
+      setOffset(0);
+      setSelected(null);
+    }
   }, [available, policy]);
 
+  // Each effect ignores responses that arrive after its inputs changed (out-of-order replies).
   useEffect(() => {
     if (step === null || !available.includes(policy)) return;
+    let ignore = false;
     setError(null);
-    api.ranking(step, policy, labels, offset, PAGE).then(setRanking).catch((e) => setError(e.message));
+    api.ranking(step, policy, labels, offset, PAGE)
+      .then((r) => { if (!ignore) setRanking(r); })
+      .catch((e) => { if (!ignore) setError(e.message); });
+    return () => { ignore = true; };
   }, [step, policy, labels, offset, available]);
 
   useEffect(() => {
     if (step === null || !available.includes(policy)) return;
-    api.metrics(step, policy).then(setMetrics).catch((e) => setError(e.message));
+    let ignore = false;
+    api.metrics(step, policy)
+      .then((m) => { if (!ignore) setMetrics(m); })
+      .catch((e) => { if (!ignore) setError(e.message); });
+    return () => { ignore = true; };
   }, [step, policy, available]);
-
-  useEffect(() => { setOffset(0); setSelected(null); }, [step, policy, labels]);
 
   const b20 = metrics?.budgets["20"];
   return (
@@ -48,7 +72,7 @@ export default function ReplayView({ info }: { info: Info }) {
       <div className="filters">
         <label>
           Time step (≈2 weeks each)
-          <select value={step ?? ""} onChange={(e) => setStep(Number(e.target.value))}>
+          <select value={step ?? ""} onChange={(e) => changeStep(Number(e.target.value))}>
             {steps.map((s) => (
               <option key={s.step} value={s.step}>
                 Step {s.step} · {fmtInt(s.n_transactions)} transactions
@@ -56,13 +80,13 @@ export default function ReplayView({ info }: { info: Info }) {
             ))}
           </select>
         </label>
-        <label>
-          Replay policy
-          <PolicyPicker value={policy} available={available} onChange={setPolicy} />
-        </label>
+        <div className="field">
+          <span aria-hidden="true">Replay policy</span>
+          <PolicyPicker value={policy} available={available} onChange={changePolicy} />
+        </div>
         <label>
           Show
-          <select value={labels} onChange={(e) => setLabels(e.target.value)}>
+          <select value={labels} onChange={(e) => changeLabels(e.target.value)}>
             <option value="all">All transactions</option>
             <option value="labelled">Labelled only</option>
             <option value="unknown">Unknown (unlabelled) only</option>
@@ -100,18 +124,24 @@ export default function ReplayView({ info }: { info: Info }) {
             <table>
               <thead>
                 <tr>
-                  <th className="num">Rank</th>
-                  <th>Transaction</th>
-                  <th>Risk score</th>
-                  <th className="num">Percentile</th>
-                  <th>Label (retrospective)</th>
+                  <th scope="col" className="num">Rank</th>
+                  <th scope="col">Transaction</th>
+                  <th scope="col">Risk score</th>
+                  <th scope="col" className="num">Percentile</th>
+                  <th scope="col">Label (retrospective)</th>
                 </tr>
               </thead>
               <tbody>
                 {ranking?.rows.map((r) => (
-                  <tr key={r.tx_id} className="clickable" aria-selected={selected === r.tx_id}
-                      tabIndex={0} onClick={() => setSelected(r.tx_id)}
-                      onKeyDown={(e) => e.key === "Enter" && setSelected(r.tx_id)}>
+                  <tr key={r.tx_id} className={selected === r.tx_id ? "clickable selected" : "clickable"}
+                      aria-current={selected === r.tx_id ? "true" : undefined}
+                      tabIndex={0} onClick={() => selectRow(r.tx_id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          selectRow(r.tx_id);
+                        }
+                      }}>
                     <td className="num">{r.rank}</td>
                     <td>{r.tx_id}</td>
                     <td>
@@ -133,7 +163,7 @@ export default function ReplayView({ info }: { info: Info }) {
             </div>
           )}
         </div>
-        <div className="card">
+        <div className={selected !== null ? "card detail has-selection" : "card detail"} ref={detailRef}>
           {selected === null ? (
             <p className="muted">Select a transaction to see its score, explanation and graph neighbourhood.</p>
           ) : (

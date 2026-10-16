@@ -31,6 +31,7 @@ from chainwatch import __version__
 from chainwatch.config import REPO_ROOT, Config, load_config
 from chainwatch.data import schema as S
 from chainwatch.serving.export import REGISTRY_META
+from chainwatch.serving.live_api import install_live_routes
 from chainwatch.serving.registry import RegistryError, load_registry
 from chainwatch.serving.replay import POLICIES, ReplayEngine, ReplayError
 from chainwatch.serving.schemas import (
@@ -180,7 +181,9 @@ def _install_error_handlers(app: FastAPI) -> None:
 
 
 # --------------------------------------------------------------------------- app
-def create_app(cfg: Config | None = None, state: ServiceState | None = None) -> FastAPI:
+def create_app(
+    cfg: Config | None = None, state: ServiceState | None = None, live_backend=None
+) -> FastAPI:
     cfg = cfg or load_config(os.environ.get("CHAINWATCH_CONFIG"))
 
     @asynccontextmanager
@@ -247,6 +250,15 @@ def create_app(cfg: Config | None = None, state: ServiceState | None = None) -> 
         return response
 
     _routes(app)
+    app.state.live_enabled = cfg.live.enabled
+    # read-only; 404 live_disabled unless opted in; remote mode proxies to the collector VM
+    install_live_routes(
+        app,
+        cfg.live,
+        _error,
+        backend=live_backend,
+        trusted_proxy_hops=sv.trusted_proxy_hops if sv else 0,
+    )
     _mount_frontend(app, cfg)
     if sv and sv.rate_limit_per_minute > 0:
         app.add_middleware(
@@ -334,6 +346,7 @@ def _routes(app: FastAPI) -> None:
             "complete transaction graph of step s",
             "disclaimer": DISCLAIMER,
             "n_models": len(svc.bundles),
+            "live_enabled": request.app.state.live_enabled,
         }
 
     @app.get("/v1/models", tags=["models"])

@@ -10,7 +10,7 @@ was computed by `chainwatch prepare` / `chainwatch eda` (see `reports/eda/`).
 | Repository | <https://github.com/git-disl/EllipticPlusPlus> ("Transactions Dataset" folder) |
 | Paper | Elmougy & Liu, *Demystifying Fraudulent Transactions and Illicit Nodes in the Bitcoin Network for Financial Forensics*, KDD 2023. <https://doi.org/10.1145/3580305.3599803> |
 | Hosting | CSVs are stored with Git LFS on GitHub; the authors also mirror them on Google Drive |
-| Integrity | SHA-256 of each file equals the Git LFS object ID in the repository's pointer files (hard-coded in `src/chainwatch/data/download.py`, checked by `download` and recorded by `prepare`) |
+| Integrity | SHA-256 of each file equals the Git LFS object ID in the repository's pointer files (hard-coded in `src/chainwatch/data/download.py`, checked by `download`). `prepare` records the SHA-256 and size of each file actually read, the published digest and `matches_published` in `manifest.json` (`manifest_version` 2); run metadata copies these plus the processed-data fingerprint. Manifests and runs from before this change recorded the published digests regardless of the files on disk, so they do not fingerprint the data. |
 
 ### Licensing and redistribution
 
@@ -107,9 +107,15 @@ timestamps.
    because the raw values are not published. It is an affine transform, so tree models
    are unaffected and logistic regression re-standardises on the training split. It is a
    leak in principle but carries no label information.
-3. **Aggregate features summarise neighbours.** Because all edges stay within a single
-   time step, a neighbour of a test transaction is always another test-period transaction.
-   The features use neighbour *features*, never neighbour *labels*.
+3. **Aggregate features summarise neighbours.** Because all published edges stay within
+   a single time step, a neighbour of a test transaction in the edge list is always
+   another test-period transaction. According to the publisher, the features use
+   neighbour *features*, not neighbour *labels*. **Caveat:** the 72 aggregate features are
+   publisher-computed, and the neighbourhood they aggregate over is not fully documented.
+   They cannot be verified to use only within-step, pre-step-end information. A partial
+   check (not yet run): recompute one-hop aggregates of the local features from the
+   published edge list and measure how closely they reproduce the published aggregate
+   columns.
 4. **Label provenance is opaque.** Labels come from Elliptic's heuristics. Illicit means
    linked to known illicit categories (scams, ransomware, malware, darknet markets, and
    so on). Licit and illicit labels are therefore not ground truth about intent, and the

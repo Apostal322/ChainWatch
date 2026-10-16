@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "default.yaml"
 RAW_DIR_ENV_VAR = "CHAINWATCH_RAW_DIR"
 
-FEATURE_SETS = ("local", "local_aggregate", "all")
+FEATURE_SETS = ("local", "local_aggregate", "all", "augmented", "live_computable")
 THRESHOLD_STRATEGIES = ("max_f1", "fixed")
 
 
@@ -203,6 +203,93 @@ class ServingConfig:
 
 
 @dataclass
+class LiveConfig:
+    """Phase 5 live Bitcoin monitor (docs/LIVE_MONITOR.md). Disabled unless opted in.
+
+    ``enabled`` only exposes the read-only /v1/live API over ``db_path``; the collector that
+    talks to mempool.space is a separate process (``chainwatch live-collect``).
+    """
+
+    enabled: bool = False
+    db_path: Path = field(default_factory=lambda: _resolve("data/live/live.sqlite"))
+    ws_url: str = "wss://mempool.space/api/v1/ws"
+    rest_base: str = "https://mempool.space/api"
+    explorer_tx_url: str = "https://mempool.space/tx/"
+    sample_rate: float = 0.05  # fraction of announced txids whose details are fetched
+    fetch_per_minute: int = 30  # REST detail requests per minute (hard cap)
+    fetch_burst: int = 5
+    fetch_concurrency: int = 2
+    request_timeout_s: float = 10.0
+    queue_max: int = 200  # pending detail fetches; newer txids are dropped when full
+    max_queue_age_s: float = 300.0  # skip queued txids older than this (no stale backfill)
+    dedupe_max: int = 200_000  # txids remembered for deduplication (bounded LRU)
+    retention_rows: int = 20_000  # stored transactions kept in SQLite
+    retention_days: float = 7.0  # and none older than this
+    reconnect_base_s: float = 1.0
+    reconnect_max_s: float = 60.0
+    stale_after_s: float = 90.0  # reconnect if no message arrives for this long
+    heartbeat_s: float = 5.0
+    sse_max_clients: int = 20
+    sse_max_seconds: float = 300.0  # clients reconnect automatically after this
+    sse_max_per_client: int = 2  # per client address (a tab or two); the rest get 429
+    # Risk intelligence (docs/RISK_ENGINE.md). Screening needs indicator sources loaded with
+    # `chainwatch-live indicators update`; a source not refreshed for this long is "stale".
+    risk_enabled: bool = True
+    indicator_max_age_days: float = 7.0
+    # Remote collector (docs/LIVE_CLOUD.md). The edge API on the collector VM requires a
+    # bearer token read from the environment variable named here (never from the config);
+    # a dashboard with ``remote_url`` set proxies /v1/live/* to that edge API with it.
+    api_token_env: str = "CHAINWATCH_LIVE_TOKEN"
+    remote_url: str | None = None
+    remote_timeout_s: float = 5.0
+    remote_cache_s: float = 2.0
+    edge_rate_limit_per_minute: int = 240  # per client on the edge API (dashboards poll it)
+    edge_trusted_proxy_hops: int = 1  # Caddy terminates TLS in front of the edge API
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LiveConfig:
+        d = dict(d)
+        if "db_path" in d:
+            d["db_path"] = _resolve(d["db_path"])
+        url = d.get("remote_url")
+        if isinstance(url, str) and url.startswith("env:"):  # deployment-specific, not in Git
+            d["remote_url"] = os.environ.get(url[4:]) or None
+            if d["remote_url"] is None and d.get("enabled"):
+                raise ValueError(f"live.remote_url: environment variable {url[4:]} is not set")
+        return cls(**d)
+
+    def __post_init__(self) -> None:
+        """Reject syntactically valid but unsafe values (e.g. ``retention_rows: 0`` made every
+        prune delete all stored rows; ``heartbeat_s: 0`` made the heartbeat loop spin)."""
+        if not 0.0 < self.sample_rate <= 1.0:
+            raise ValueError("live.sample_rate must be in (0, 1]")
+        at_least_one = ("fetch_per_minute", "fetch_burst", "fetch_concurrency", "queue_max",
+                        "dedupe_max", "retention_rows", "sse_max_per_client",
+                        "edge_rate_limit_per_minute")  # fmt: skip
+        positive = ("request_timeout_s", "max_queue_age_s", "retention_days", "reconnect_base_s",
+                    "reconnect_max_s", "stale_after_s", "heartbeat_s", "sse_max_seconds",
+                    "indicator_max_age_days", "remote_timeout_s")  # fmt: skip
+        for name in at_least_one:
+            if getattr(self, name) < 1:
+                raise ValueError(f"live.{name} must be at least 1")
+        for name in positive:
+            if not getattr(self, name) > 0:
+                raise ValueError(f"live.{name} must be positive")
+        # sse_max_clients: 0 turns the event stream off (503); the dashboard keeps polling
+        if self.remote_cache_s < 0 or self.edge_trusted_proxy_hops < 0 or self.sse_max_clients < 0:
+            raise ValueError(
+                "live.remote_cache_s, edge_trusted_proxy_hops and sse_max_clients must be >= 0"
+            )
+        if self.reconnect_max_s < self.reconnect_base_s:
+            raise ValueError("live.reconnect_max_s must be >= live.reconnect_base_s")
+        if not self.ws_url.startswith(("ws://", "wss://")):
+            raise ValueError("live.ws_url must be a ws:// or wss:// URL")
+        for name in ("rest_base", "explorer_tx_url"):
+            if not getattr(self, name).startswith(("http://", "https://")):
+                raise ValueError(f"live.{name} must be an http:// or https:// URL")
+
+
+@dataclass
 class Config:
     seed: int
     paths: PathsConfig
@@ -214,6 +301,7 @@ class Config:
     tracking: TrackingConfig
     backtest: BacktestConfig | None = None
     serving: ServingConfig | None = None
+    live: LiveConfig = field(default_factory=LiveConfig)
     source_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -229,10 +317,11 @@ class Config:
         d = asdict(self)
         d["paths"] = {k: str(v) for k, v in d["paths"].items()}
         d["source_path"] = str(self.source_path) if self.source_path else None
-        if d.get("serving"):
-            d["serving"] = {
-                k: str(v) if isinstance(v, Path) else v for k, v in d["serving"].items()
-            }
+        for section in ("serving", "live"):
+            if d.get(section):
+                d[section] = {
+                    k: str(v) if isinstance(v, Path) else v for k, v in d[section].items()
+                }
         return d
 
 
@@ -280,5 +369,6 @@ def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None
         tracking=TrackingConfig(**raw.get("tracking", {})),
         backtest=BacktestConfig.from_dict(raw["backtest"]) if raw.get("backtest") else None,
         serving=ServingConfig.from_dict(raw["serving"]) if raw.get("serving") else None,
+        live=LiveConfig.from_dict(raw.get("live") or {}),
         source_path=path.resolve(),
     )

@@ -1,0 +1,10 @@
+# Feature-subset experiment (docs/LIVE_FEATURE_SUBSET_PROTOCOL.md): identical to the Phase 1
+# protocol in default.yaml except the feature set and the output folders.
+extends: default.yaml
+
+paths:
+  artifacts_dir: artifacts/runs-subset-live
+  reports_dir: reports/phase6/subset-live
+
+data:
+  feature_set: live_computable

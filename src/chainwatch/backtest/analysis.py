@@ -142,8 +142,9 @@ def cost_table(fits: pd.DataFrame) -> pd.DataFrame:
 def select_per_family(
     summary: pd.DataFrame, fits: pd.DataFrame, families: dict[str, str], tolerance: float
 ) -> dict[str, str]:
-    """Pre-registered rule: best seed-mean pooled AP; near-ties -> fewer fits, then the
-    larger window / longer half-life / lower frequency (closest to the expanding model)."""
+    """Selection rule fixed in the protocol before the runs: best seed-mean pooled AP;
+    near-ties -> fewer fits, then the larger window / longer half-life / lower frequency
+    (closest to the expanding model)."""
     n_fits = cost_table(fits).set_index("strategy")["n_fits"]
     chosen = {}
     for family in sorted(set(families.values())):

@@ -1,0 +1,17 @@
+# ALWAYS-ON COLLECTOR VM (docs/LIVE_CLOUD.md). Used by systemd units in deploy/oracle/.
+# Conservative 24/7 limits for the free public mempool.space API: one WebSocket and at most
+# 12 detail requests per minute (~17k/day). Coverage is a SAMPLE, never the whole network.
+extends: default.yaml
+
+live:
+  enabled: true
+  db_path: /var/lib/chainwatch/live.sqlite   # persistent boot volume, not /tmp
+  sample_rate: 0.02          # ~2% of announced txids
+  fetch_per_minute: 12
+  fetch_burst: 3
+  fetch_concurrency: 1
+  queue_max: 100
+  retention_rows: 50000      # plus retention_days; bounds the database (measured: 63 MB at the cap)
+  retention_days: 7
+  edge_rate_limit_per_minute: 240
+  edge_trusted_proxy_hops: 1 # Caddy in front of the edge API

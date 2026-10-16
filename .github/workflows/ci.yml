@@ -2,7 +2,14 @@ name: CI
 
 on:
   push:
+    branches: [main]  # pull requests run through pull_request; avoids running every check twice
   pull_request:
+  workflow_dispatch:
+
+# a newer push to the same branch or PR supersedes the running checks
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 # least privilege: CI only needs to read the repository
 permissions:
@@ -12,6 +19,7 @@ jobs:
   python:
     name: python / ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30  # the suite takes 2-4 min; a hung async test must not hold a runner for 6 h
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +42,7 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
@@ -49,8 +58,17 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Shellcheck (installer, smoke tests)
+        run: shellcheck deploy/oracle/*.sh scripts/*.sh
+
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [python, frontend]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
