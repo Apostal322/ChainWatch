@@ -48,7 +48,7 @@
 - **Data feasibility and Layer C decision** ([RISK_DATA_FEASIBILITY.md](docs/RISK_DATA_FEASIBILITY.md)):
   - no labelled dataset maps to live features under usable terms, so no live model is
     trained;
-  - a pre-registered offline diagnostic ([results](docs/LIVE_FEATURE_SUBSET_RESULTS.md))
+  - an offline diagnostic whose protocol was committed before the runs ([results](docs/LIVE_FEATURE_SUBSET_RESULTS.md))
     restricted Elliptic++ to the 16 live-computable features;
   - XGBoost AP fell from 0.797 to 0.646 (paired Δ −0.151, 95% [−0.216, −0.089]) and
     collapses after step 42;
@@ -201,7 +201,7 @@ service that serves the frozen research models.
 - **Phase 1, chronological baselines.** XGBoost pooled test AP 0.797 (logistic regression
   0.231). Per-step evaluation shows a collapse after step 42: AP 0.917 on steps 35–42 vs
   0.043 on 43–49.
-- **Phase 2, pre-registered rolling-origin backtest.** Five retraining strategies with
+- **Phase 2 rolling-origin backtest (protocol fixed before the runs, author's record).** Five retraining strategies with
   explicit label latency, several seeds and a block bootstrap over time steps. Retraining
   as labels arrive raises AP on steps 43–49 from 0.050 to 0.458 (+0.41, 95% CI
   0.16–0.62). This is **exploratory**, because that period had been inspected in Phase 1.

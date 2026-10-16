@@ -20,6 +20,7 @@ import pandas as pd
 from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score
 
 from chainwatch.config import REPO_ROOT
+from chainwatch.evaluation.metrics import precision_at_k
 from chainwatch.evaluation.uncertainty import block_bootstrap, percentile_interval
 
 RUN_ROOTS = {
@@ -42,10 +43,11 @@ def ap(df: pd.DataFrame) -> float:
 
 
 def p_at_k(df: pd.DataFrame, k: int = 20) -> float:
-    vals = []
-    for _, g in df.groupby("time_step"):
-        top = g.sort_values("score", ascending=False).head(k)
-        vals.append(top["label"].mean())
+    """Mean per-step precision@k, tie-aware (the repository's metric, not head(k))."""
+    vals = [
+        precision_at_k(g["label"].to_numpy(), g["score"].to_numpy(), k)
+        for _, g in df.groupby("time_step")
+    ]
     return float(np.mean(vals))
 
 
@@ -56,8 +58,15 @@ def leakage_checks(run: Path) -> dict:
     tx = pd.read_parquet(REPO_ROOT / "data" / "processed" / "transactions.parquet")
     df = pd.read_parquet(run / "test_predictions.parquet").merge(tx[["tx_id", *cols]], on="tx_id")
     miss = df[cols].isna().any(axis=1)
-    booster = joblib.load(run / "model.joblib").steps[-1][1].get_booster()
-    gain = booster.get_score(importance_type="gain")
+    est = joblib.load(run / "model.joblib").steps[-1][1]
+    # share of TOTAL gain over the trees prediction uses (up to best_iteration): mean gain
+    # per split ("gain") over all trees, as published before, misstated fees ~2.4x
+    trees = est.get_booster().trees_to_dataframe()
+    best = getattr(est, "best_iteration", None)
+    if best is not None:
+        trees = trees[trees["Tree"] <= best]
+    splits = trees[trees["Feature"] != "Leaf"]
+    gain = splits.groupby("Feature")["Gain"].sum().to_dict()
     names = {f"f{i}": c for i, c in enumerate(cols)}
     total = sum(gain.values())
     return {
@@ -66,7 +75,7 @@ def leakage_checks(run: Path) -> dict:
         "ap_all_rows": round(ap(df), 4),
         "ap_complete_rows_only": round(ap(df[~miss]), 4),
         "val_ap_selected_model": round(meta["val_metrics"]["average_precision"], 4),
-        "gain_share": {
+        "total_gain_share": {
             names.get(k, k): round(v / total, 3)
             for k, v in sorted(gain.items(), key=lambda kv: -kv[1])
         },

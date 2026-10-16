@@ -177,7 +177,7 @@ them changed a pre-specified metric, split, strategy grid, selection rule or see
    first and last steps. Block length and resample count are as pre-registered.
 3. **Implementation-only changes:** a vectorised, exact pooled-AP computation for
    bootstrap replicates (tested against explicit concatenation), and a configurable
-   confirm sub-period boundary (`confirm_split_after: 42`, the pre-registered 35–42 /
-   43–49 split).
+   confirm sub-period boundary (`confirm_split_after: 42`, the 35–42 / 43–49 split
+   fixed before the Phase 2 runs, itself chosen from the Phase 1 per-step results).
 4. **Operational:** the first shift-diagnostic run was killed by a 2-hour tool time limit
    and was re-run in full.

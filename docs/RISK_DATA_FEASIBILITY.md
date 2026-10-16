@@ -49,7 +49,7 @@ How to read the evidence tags:
 * E2 Weber et al. 2019, https://arxiv.org/abs/1908.02591
 * E3 PyG docstring (counts, label semantics), https://raw.githubusercontent.com/pyg-team/pytorch_geometric/master/torch_geometric/datasets/elliptic.py [local]
 * E4 ChainWatch docs/DATASET.md (time-step semantics, 93 local + 72 aggregate features)
-* E5 Šafář et al., "The Enemy of Reproducibility is Opacity: What's Inside the Elliptic Bitcoin Dataset (and Why It Is Wrong)", DFRWS USA 2026, https://dfrws.org/?p=20997 [search]: reverse-engineered features, train/test leakage. Also https://arxiv.org/pdf/2604.19514 [search]: an RF on raw features beats GNNs under a leakage-free inductive protocol, and a sharp illicit-rate drop in steps 43–49 (step 46 has 3 illicit out of 960 labelled).
+* E5 Šafář et al., "The Enemy of Reproducibility is Opacity: What's Inside the Elliptic Bitcoin Dataset (and Why It Is Wrong)", DFRWS USA 2026, https://dfrws.org/?p=20997 [search]: reverse-engineered features, train/test leakage. Also https://arxiv.org/pdf/2604.19514 [search]: an RF on raw features beats GNNs under a leakage-free inductive protocol, and a sharp illicit-rate drop in steps 43–49 (that paper reports step 46 with 3 illicit out of 960 labelled; the verified Elliptic++ files used here have 2 illicit out of 712 labelled at step 46).
 * P1 https://raw.githubusercontent.com/git-disl/EllipticPlusPlus/main/README.md [local]
 * P2 LFS files at https://media.githubusercontent.com/media/git-disl/EllipticPlusPlus/main/Actors%20Dataset/wallets_classes.csv and `wallets_features.csv` [local; header and rows inspected]
 * P3 https://doi.org/10.1145/3580305.3599803
@@ -106,7 +106,7 @@ would be disqualifying.
 5. **Temporal and population shift.**
    * Every labelled dataset ends by 2021 (most by 2018–2019), and Elliptic++ contains 0 bech32 addresses [local].
    * The 2026 mempool is dominated by SegWit and Taproot, and the OFAC XBT list has 0 Taproot addresses [local].
-   * Even inside Elliptic, a strong model collapses after step 43: ChainWatch measured AP 0.917 → 0.043, and an independent study reports a sharp drop in illicit rate after step 43 [E5].
+   * Even inside Elliptic, a strong model collapses from step 43: ChainWatch measured AP 0.917 → 0.043, and an independent study reports a sharp drop in illicit rate after step 43 [E5].
 6. **Licences.**
    * Elliptic and Elliptic2 are reportedly CC BY-NC-ND [search], and Elliptic++ has no licence. Their data cannot be shipped in an MIT repo, and a model trained on them can at most be shared with care (NC, no derivatives).
    * Chainabuse is proprietary, with personal non-commercial use and 10 calls a month.
@@ -123,6 +123,7 @@ would be disqualifying.
 **Elliptic++ transactions, restricted to the features ChainWatch can also compute.**
 * Train on the 17 augmented raw features only: degree, fees, size, number of input/output addresses, BTC in/out min/max/mean/median/total.
 * Use the same chronological splits as Phase 1/2 (train ≤34, test 35–49, with steps 43–49 reported separately), labelled rows only.
+* *Superseded by the protocol committed before the runs* ([LIVE_FEATURE_SUBSET_PROTOCOL.md](LIVE_FEATURE_SUBSET_PROTOCOL.md)): it drops `out_txs_degree` (it counts later transactions) and uses the Phase 1 splits (train 1–29, validation 30–34).
 * Compare against the full 182-feature model.
 
 This measures how much signal survives when the features are restricted to quantities a
