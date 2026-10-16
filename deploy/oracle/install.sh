@@ -77,14 +77,16 @@ run "$VENV/bin/pip" install -q --no-deps --no-build-isolation -e "$APP"
 note "secret: edge API token (generated here, never committed)"
 if [ ! -s "$ETC/live.env" ]; then
   if [ "$DRY_RUN" != "1" ]; then
-    umask 077
-    printf 'CHAINWATCH_LIVE_TOKEN=%s\n' "$(openssl rand -hex 32)" > "$ETC/live.env"
+    token=$(openssl rand -hex 32) || { echo "openssl rand failed" >&2; exit 1; }
+    [ "${#token}" -eq 64 ] || { echo "generated token has the wrong length" >&2; exit 1; }
+    (umask 077 && printf 'CHAINWATCH_LIVE_TOKEN=%s\n' "$token" > "$ETC/live.env")
+    unset token
     chown root:root "$ETC/live.env"
     chmod 0600 "$ETC/live.env"  # systemd reads it as root; the service user cannot
     echo "   created $ETC/live.env. Read it ONCE with: sudo cat $ETC/live.env"
     echo "   and store the value as the Render secret CHAINWATCH_LIVE_TOKEN."
   else
-    echo "+ (write $ETC/live.env with a random 64-hex token, mode 0640 root:chainwatch)"
+    echo "+ (write $ETC/live.env with a random 64-hex token, mode 0600 root:root)"
   fi
 else
   echo "   $ETC/live.env exists; keeping the current token"
@@ -130,7 +132,10 @@ if [ "$SKIP_CADDY" != "1" ]; then
   if [ -f /etc/iptables/rules.v4 ] && command -v iptables >/dev/null; then
     for port in 80 443; do
       if ! iptables -C INPUT -p tcp --dport "$port" -m state --state NEW -j ACCEPT 2>/dev/null; then
-        run iptables -I INPUT 5 -p tcp --dport "$port" -m state --state NEW -j ACCEPT
+        # before Oracle's catch-all REJECT rule (its position varies), else at the end
+        pos=$(iptables -L INPUT --line-numbers -n | awk '$2 == "REJECT" {print $1; exit}')
+        run iptables -I INPUT "${pos:-$(( $(iptables -L INPUT --line-numbers -n | tail -n +3 | wc -l) + 1 ))}" \
+          -p tcp --dport "$port" -m state --state NEW -j ACCEPT
       fi
     done
     command -v netfilter-persistent >/dev/null && run netfilter-persistent save

@@ -84,10 +84,10 @@ def cmd_collect(args) -> int:
 def cmd_serve_edge(args) -> int:
     import uvicorn
 
-    from chainwatch.live.edge import create_edge_app, edge_token
+    from chainwatch.live.edge import create_edge_app, edge_tokens
 
     live = _live(args)
-    app = create_edge_app(live, edge_token(live))
+    app = create_edge_app(live, edge_tokens(live))
     uvicorn.run(
         app,
         host=args.host,

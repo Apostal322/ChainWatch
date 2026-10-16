@@ -1,9 +1,23 @@
 # HTTPS front for the edge API. install.sh replaces __CHAINWATCH_HOST__ with the VM's
 # hostname, e.g. 203-0-113-7.sslip.io (free wildcard DNS for the public IP); Caddy then
 # obtains and renews a Let's Encrypt certificate automatically.
+{
+	servers {
+		# slow or idle clients must not hold the edge API's 32 connections
+		timeouts {
+			read_header 10s
+			read_body 10s
+			idle 60s
+		}
+	}
+}
+
 __CHAINWATCH_HOST__ {
 	encode zstd gzip
-	@edge path /v1/live/* /health/live /health/ready
+	@edge {
+		path /v1/live/* /health/live /health/ready
+		method GET HEAD
+	}
 	handle @edge {
 		reverse_proxy 127.0.0.1:8100
 	}

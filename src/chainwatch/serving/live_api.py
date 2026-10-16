@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import hmac
 import json
+import logging
 import os
 import re
 import threading
@@ -27,6 +28,7 @@ from collections import OrderedDict
 from typing import Any
 from urllib.parse import urlparse
 
+import anyio
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -50,11 +52,37 @@ MOCK_NOTICE = (
     "not the public mempool.space service. Everything shown here is constructed or unverified "
     "data, not real Bitcoin network observations."
 )
+log = logging.getLogger("chainwatch.serving.live")
 MAX_REMOTE_BYTES = 2_000_000
 RECENT_WINDOW = 100  # rows polled for the event stream (shared by all clients)
 CACHE_MAX_KEYS = 256  # RemoteBackend LRU size
 UPSTREAM_PER_S = 3.0  # RemoteBackend cache misses per second (edge allows 240/min per client)
 UPSTREAM_BURST = 20
+RISK_SUMMARY_TTL_S = 15.0
+STALE_OK_S = 60.0  # RemoteBackend serves a key's last good answer this long on failure
+HOURS_STEPS = (1, 6, 24, 168, 720)  # remote queries are snapped to these (bounded key space)
+WINDOW_STEPS = (60, 240, 1440)
+
+
+_USERINFO = re.compile(r"(?<=://)[^/@\s]+@")
+
+
+def _redact(value: Any) -> Any:
+    """Drop ``user:password@`` from URLs (in settings and error texts) before they reach the
+    anonymous status route: a custom source URL may carry credentials."""
+    if isinstance(value, str):
+        return _USERINFO.sub("", value)
+    if isinstance(value, dict):
+        return {k: _redact(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
+
+def _snap(value: float, steps: tuple[int, ...]) -> int:
+    return next((s for s in steps if value <= s), steps[-1])
+
+
 EVENT_ID_RE = re.compile(r"[0-9]{1,18}")
 RISK_LAYERS = {
     "screening": "Source-backed screening: exact matches of input/output addresses against "
@@ -106,9 +134,11 @@ class LocalBackend:
     def __init__(self, live: LiveConfig) -> None:
         self.live = live
         self.reader = LiveReader(live.db_path)
+        self._summary_cache: dict[float, tuple[float, dict[str, Any]]] = {}
+        self._summary_lock = threading.Lock()
 
     def status(self, now: float) -> dict[str, Any]:
-        live, st = self.live, self.reader.status()
+        live, st = self.live, _redact(self.reader.status())
         counters = (st or {}).get("counters", {})
         received = counters.get("received", 0)
         settings = (st or {}).get("settings") or {}
@@ -160,6 +190,19 @@ class LocalBackend:
         return self.reader.list(limit=RECENT_WINDOW, sort="id", descending=True, outcome=None)[1]
 
     def risk_summary(self, hours: float) -> dict[str, Any]:
+        # aggregate over up to the whole retention window (~0.5 s at 50k rows): computed at
+        # most once per RISK_SUMMARY_TTL_S per window, however many callers ask
+        with self._summary_lock:
+            hit = self._summary_cache.get(hours)
+            if hit and time.monotonic() - hit[0] < RISK_SUMMARY_TTL_S:
+                return hit[1]
+            value = self._risk_summary(hours)
+            self._summary_cache[hours] = (time.monotonic(), value)
+            while len(self._summary_cache) > 16:
+                self._summary_cache.pop(next(iter(self._summary_cache)))
+            return value
+
+    def _risk_summary(self, hours: float) -> dict[str, Any]:
         now = time.time()
         summary = self.reader.risk_summary(now - hours * 3600)
         st = self.reader.status() or {}
@@ -213,8 +256,12 @@ class RemoteBackend:
       (single flight);
     * failures are cached too, so an outage does not turn every page view into a slow
       upstream timeout that ties up the dashboard's worker threads;
-    * all cache misses share a token bucket (``UPSTREAM_PER_S``), so varying query
-      parameters cannot multiply upstream traffic; over budget, requests fail fast (502).
+    * all cache misses of arbitrary queries share a token bucket (``UPSTREAM_PER_S``), so
+      varying query parameters cannot multiply upstream traffic; over budget they fail fast.
+      The dashboard's own polling queries (a fixed, small set: ``priority``) are not drawn
+      from that budget, so an anonymous visitor cycling parameters cannot starve them;
+    * on failure a key's last good answer (at most ``STALE_OK_S`` old) is served instead of
+      an error, and every request has an overall deadline (a dripping edge cannot hold it).
     """
 
     kind = "remote"
@@ -236,6 +283,7 @@ class RemoteBackend:
         )
         # key -> (stored_at, value or exception); LRU order
         self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+        self._good: OrderedDict[str, tuple[float, Any]] = OrderedDict()  # last good answers
         self._inflight: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self._tokens, self._last = float(UPSTREAM_BURST), time.monotonic()
@@ -248,7 +296,9 @@ class RemoteBackend:
             return True, hit[1]
         return False, None
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def _get(
+        self, path: str, params: dict[str, Any] | None = None, *, priority: bool = False
+    ) -> Any:
         params = {k: v for k, v in (params or {}).items() if v is not None}
         key = path + "?" + "&".join(f"{k}={params[k]}" for k in sorted(params))
         while True:
@@ -260,23 +310,38 @@ class RemoteBackend:
                         self._inflight[key] = threading.Event()
                         break
             if found:
-                if isinstance(value, Exception):
-                    raise value
-                return value
+                return self._result(key, value)
             event.wait(self.live.remote_timeout_s + 1.0)
+        value: Any = UpstreamUnavailable("internal error")
         try:
-            value = self._fetch(path, params)
+            value = self._fetch(path, params, priority)
         except (UpstreamUnavailable, NoLiveData) as e:
             value = e
+        except Exception as e:  # never leave waiters hanging or leak internals to the browser
+            log.warning("remote collector request failed: %s", type(e).__name__)
+            value = UpstreamUnavailable(type(e).__name__)
         finally:
             with self._lock:
                 event = self._inflight.pop(key)
-        with self._lock:
-            self._cache[key] = (time.monotonic(), value)
-            self._cache.move_to_end(key)
-            while len(self._cache) > CACHE_MAX_KEYS:
-                self._cache.popitem(last=False)
-        event.set()
+                now = time.monotonic()
+                self._cache[key] = (now, value)
+                self._cache.move_to_end(key)
+                while len(self._cache) > CACHE_MAX_KEYS:
+                    self._cache.popitem(last=False)
+                if not isinstance(value, Exception):
+                    self._good[key] = (now, value)
+                    self._good.move_to_end(key)
+                    while len(self._good) > CACHE_MAX_KEYS:
+                        self._good.popitem(last=False)
+            event.set()
+        return self._result(key, value)
+
+    def _result(self, key: str, value: Any) -> Any:
+        if isinstance(value, UpstreamUnavailable):
+            with self._lock:
+                good = self._good.get(key)
+            if good is not None and time.monotonic() - good[0] < STALE_OK_S:
+                return good[1]  # a slightly old answer beats an error page
         if isinstance(value, Exception):
             raise value
         return value
@@ -291,10 +356,11 @@ class RemoteBackend:
             self._tokens -= 1.0
             return True
 
-    def _fetch(self, path: str, params: dict[str, Any]) -> Any:
-        if not self._take_token():
+    def _fetch(self, path: str, params: dict[str, Any], priority: bool = False) -> Any:
+        if not priority and not self._take_token():
             raise UpstreamUnavailable("upstream request budget exhausted")
         self.upstream_requests += 1
+        t0 = time.monotonic()
         try:
             with self.client.stream("GET", self.base + path, params=params) as r:
                 chunks, size = [], 0
@@ -302,6 +368,9 @@ class RemoteBackend:
                     size += len(chunk)
                     if size > MAX_REMOTE_BYTES:
                         raise UpstreamUnavailable("response too large")
+                    if time.monotonic() - t0 > self.live.remote_timeout_s:
+                        # httpx's timeout is per read: a dripping body needs a total deadline
+                        raise UpstreamUnavailable("edge API too slow")
                     chunks.append(chunk)
         except httpx.HTTPError as e:
             raise UpstreamUnavailable(type(e).__name__) from e
@@ -316,12 +385,16 @@ class RemoteBackend:
             raise NoLiveData(self.base)
         if r.status_code == 404 and path.startswith("/v1/live/transactions/"):
             return None
+        if r.status_code == 401:  # e.g. the edge token was rotated but not this side
+            log.warning("edge API rejected the dashboard's token (rotated? check %s)",
+                        self.live.api_token_env)  # fmt: skip
+            raise UpstreamUnavailable("edge API rejected the token (401)")
         if r.status_code != 200 or body is None:
             raise UpstreamUnavailable(f"edge API answered {r.status_code} ({_code(body)})")
         return body
 
     def status(self, now: float) -> dict[str, Any]:
-        body = dict(self._get("/v1/live/status"))
+        body = dict(self._get("/v1/live/status", priority=True))
         body["via"] = "remote collector (edge API)"
         body["server_time"] = now
         return body
@@ -330,7 +403,9 @@ class RemoteBackend:
         params = dict(q)
         params["order"] = "desc" if params.pop("descending", True) else "asc"
         params["outcome"] = params.get("outcome") or "all"
-        body = self._get("/v1/live/transactions", params)
+        feed = {"limit": 200, "offset": 0, "sort": "id", "order": "desc", "outcome": "all"}
+        polled = {k: v for k, v in params.items() if v is not None} == feed  # dashboard feed
+        body = self._get("/v1/live/transactions", params, priority=polled)
         return {k: body[k] for k in ("total", "offset", "rows")}
 
     def transaction(self, txid: str) -> dict[str, Any] | None:
@@ -338,30 +413,36 @@ class RemoteBackend:
         return None if body is None else {k: v for k, v in body.items() if k != "mode"}
 
     def stats(self, window_minutes: int) -> dict[str, Any]:
-        body = self._get("/v1/live/stats", {"window_minutes": window_minutes})
+        window = _snap(window_minutes, WINDOW_STEPS)
+        body = self._get("/v1/live/stats", {"window_minutes": window}, priority=window == 60)
         return {k: v for k, v in body.items() if k != "mode"}
 
     def outages(self, hours: float, limit: int) -> list[dict[str, Any]]:
-        return self._get("/v1/live/outages", {"hours": hours, "limit": limit})["outages"]
+        q = {"hours": _snap(hours, HOURS_STEPS), "limit": limit}
+        polled = q == {"hours": 24, "limit": 50}
+        return self._get("/v1/live/outages", q, priority=polled)["outages"]
 
     def recent(self) -> list[dict[str, Any]]:
         q = {"limit": RECENT_WINDOW, "sort": "id", "order": "desc", "outcome": "all"}
-        return self._get("/v1/live/transactions", q)["rows"]
+        return self._get("/v1/live/transactions", q, priority=True)["rows"]
 
     def max_id(self) -> int:
         rows = self.recent()
         return max((r["id"] for r in rows), default=0)
 
     def risk_summary(self, hours: float) -> dict[str, Any]:
-        body = self._get("/v1/live/risk/summary", {"hours": hours})
+        h = _snap(hours, HOURS_STEPS)
+        body = self._get("/v1/live/risk/summary", {"hours": h}, priority=h == 24)
         return {k: v for k, v in body.items() if k != "mode"}
 
     def findings(self, max_priority: int, limit: int, before_id: int | None) -> list[dict]:
         q = {"max_priority": max_priority, "limit": limit, "before_id": before_id}
-        return self._get("/v1/live/findings", q)["findings"]
+        polled = (max_priority, limit, before_id) == (4, 50, None)
+        return self._get("/v1/live/findings", q, priority=polled)["findings"]
 
     def alerts(self, status: str | None, limit: int) -> list[dict]:
-        return self._get("/v1/live/alerts", {"status": status, "limit": limit})["alerts"]
+        q = {"status": status, "limit": limit}
+        return self._get("/v1/live/alerts", q, priority=limit == 200)["alerts"]
 
 
 def _code(body: Any) -> str:
@@ -374,8 +455,8 @@ def _code(body: Any) -> str:
 def make_backend(live: LiveConfig) -> LocalBackend | RemoteBackend:
     if not live.remote_url:
         return LocalBackend(live)
-    token = os.environ.get(live.api_token_env, "")
-    if len(token) < 32:
+    token = os.environ.get(live.api_token_env, "").strip()
+    if len(token) < 32 or any(c.isspace() for c in token):
         raise ValueError(
             f"live.remote_url is set but ${live.api_token_env} is missing or shorter than "
             "32 characters"
@@ -389,13 +470,14 @@ def install_live_routes(
     live: LiveConfig,
     error,
     *,
-    token: str | None = None,
+    token: str | tuple[str, ...] | None = None,
     backend: LocalBackend | RemoteBackend | None = None,
     trusted_proxy_hops: int = 0,
 ) -> None:
     """Register /v1/live/*. ``token`` makes every route require a bearer token (edge API).
     ``trusted_proxy_hops`` identifies clients for the per-client event-stream cap."""
     be = backend or (make_backend(live) if live.enabled else LocalBackend(live))
+    tokens = (token,) if isinstance(token, str) else token  # several during a rotation
     streams: dict[str, int] = {}  # open event streams per client; total = sum
     streams_lock = threading.Lock()
 
@@ -427,10 +509,12 @@ def install_live_routes(
     def guard(request: Request) -> None:
         if not live.enabled:
             raise LiveDisabled
-        if token is not None:
+        if tokens is not None:
             header = request.headers.get("authorization", "")
-            given = header[7:] if header.lower().startswith("bearer ") else ""
-            if not hmac.compare_digest(given.encode(), token.encode()):
+            given = (header[7:] if header.lower().startswith("bearer ") else "").encode()
+            # compare against every accepted token (no early exit: constant work)
+            ok = [hmac.compare_digest(given, t.encode()) for t in tokens]
+            if not any(ok):
                 raise LiveUnauthorized
 
     r = APIRouter(prefix="/v1/live", tags=["live"], dependencies=[Depends(guard)])
@@ -563,7 +647,12 @@ def install_live_routes(
         class _Stream(StreamingResponse):
             async def __call__(self, scope, receive, send):  # release even if never iterated
                 try:
-                    await super().__call__(scope, receive, send)
+                    # a client that never reads blocks send(): the in-loop deadline is then
+                    # never checked, so the slot is also bounded from outside
+                    with anyio.move_on_after(
+                        live.sse_max_seconds + min(10.0, live.sse_max_seconds)
+                    ):
+                        await super().__call__(scope, receive, send)
                 finally:
                     release()
 
