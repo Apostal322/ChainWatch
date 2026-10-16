@@ -156,7 +156,7 @@ Nothing has been deployed, and no 24/7 reliability is claimed. See
 [docs/LIVE_CLOUD.md](docs/LIVE_CLOUD.md) for provider limits, Oracle's idle-reclamation
 risk, the manual activation steps and the 24-hour test plan.
 
-### Risk intelligence (v0.7.0, live monitor)
+### Risk intelligence (v0.7.0, hardened in v0.8.0; live monitor)
 
 Every fetched transaction is assessed by separate layers that are never blended into one
 score ([contracts](docs/RISK_ENGINE.md)):
@@ -165,11 +165,13 @@ score ([contracts](docs/RISK_ENGINE.md)):
 |---|---|---|---|
 | A. Screening | `SCREENING_MATCH` + provenance, or `NO_KNOWN_SCREENING_MATCH`, `SCREENING_DATA_UNAVAILABLE`, `INSUFFICIENT_INFORMATION` | an enabled source (OFAC SDN, refreshed daily, versioned) lists an input or output address | fraud, or who controls the funds |
 | A'. Observed graph | `RELATION_FOUND` (distance 2, observed data only) | the tx spends an output of an observed tx that spent from a listed address | ownership or culpability |
-| B. Behavioural anomaly | `ANOMALY` with per-measurement explanations | tail of recent sampled traffic (empirical p ≤ 0.002 and robust z ≥ 3) | wrongdoing (batch payouts and CoinJoins are unusual) |
+| B. Behavioural anomaly | `ANOMALY` with per-measurement explanations | tail of recent sampled traffic (empirical p ≤ 0.002 and robust z ≥ 3; "strong" needs two such measurements; baseline of 1,000 fetched transactions) | wrongdoing (batch payouts and CoinJoins are unusual) |
 | C. Supervised | `NO_VALIDATED_MODEL`, always | no labelled data maps to live features ([feasibility](docs/RISK_DATA_FEASIBILITY.md)) | |
 
 * Screening is point in time: a listing counts only from when this deployment fetched it,
   and matches found later are separate retrospective alerts that never rewrite records.
+* A snapshot that would empty or mostly empty the list is refused, and the official SDN
+  file and its mirror count as one authority (a delisting in either closes the other).
 * Alerts are grouped and deduplicated in a review queue (new, under review, dismissed,
   resolved, insufficient evidence). Statuses change only via the collector's CLI, and
   nothing is sent externally.

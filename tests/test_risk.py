@@ -693,6 +693,21 @@ def test_alert_group_includes_the_role(tmp_path):
     assert len(titles) == 2 and "pays to" in titles[0] and "spends from" in titles[1]
 
 
+def test_alert_upserts_are_idempotent_beyond_the_displayed_txids(tmp_path):
+    """Dedupe used the ``txids`` column, which keeps only the latest MAX_ALERT_TXIDS, so a
+    re-run over an older transaction counted it again."""
+    store = _store(tmp_path)
+    spec = dict(group_key="g", layer="screening", kind="source_match", priority=1,
+                title="t", evidence={})  # fmt: skip
+    n = rp.MAX_ALERT_TXIDS + 10
+    for i in range(n):
+        rp.upsert_alert(store.db, txid=f"{i:064x}", at=float(i), **spec)
+    for i in range(n):  # the same transactions again, e.g. a repeated retrospective pass
+        rp.upsert_alert(store.db, txid=f"{i:064x}", at=float(n + i), **spec)
+    (a,) = rp.alerts(store.db)
+    assert a["occurrences"] == n and len(a["txids"]) == rp.MAX_ALERT_TXIDS
+
+
 def test_retro_screening_covers_the_reload_window_and_is_idempotent(tmp_path):
     """A transaction assessed after a snapshot was stored but before the collector loaded it
     was missed by live and retrospective screening alike (retro only looked at

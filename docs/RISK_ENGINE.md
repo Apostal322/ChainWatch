@@ -52,13 +52,31 @@ time reflect what was known.
 | `ofac-sdn` | official `sdn_advanced.xml` (~122 MB), parsed as a stream | US government work, public domain | party names (all parties if several), SDN profile ids, programmes, party designation date |
 | `ofac-sdn-mirror` | third-party nightly extraction of the XBT addresses (github.com/0xB10C/...) | data public domain; tool MIT | none (addresses only) |
 
-Each snapshot is versioned by the SHA-256 of its content (`indicator_versions`). Unchanged
-content only refreshes `checked_at` (freshness). A source not refreshed for
-`indicator_max_age_days` (default 7) is reported **stale**. Before the first snapshot, screening
-returns `SCREENING_DATA_UNAVAILABLE`, never "no match".
+Each snapshot is versioned by the SHA-256 of its content (`indicator_versions`) and **diffed
+against the active listings**: new addresses become available at its retrieval time, missing
+ones are closed. Content that reverts to an earlier version therefore re-lists what that
+version listed (v0.7 treated a previously seen hash as "unchanged"). Nothing to change and the
+same content as the source's latest version only refreshes `checked_at` (freshness).
 
-External data is untrusted: content is parsed (never evaluated), DTDs and entities are
-refused, sizes are capped (400 MB), downloads are HTTPS-only, and every address is validated
+* **Refusals.** A snapshot with no valid address, or one that would delist more than 25% of
+  the active listings (beyond 5), is refused (`SnapshotRejected`): an error page, a truncated
+  download or a schema change must not silently empty the list. The CLI then tries the
+  fallback; `--allow-mass-removal` accepts a genuine mass delisting after checking it.
+* **One list, two channels.** `ofac-sdn` and `ofac-sdn-mirror` share the authority
+  `ofac-sdn`. A newer snapshot from either closes the listings the other copy still has but
+  the newer one does not, so a superseded copy cannot keep a delisted address alive.
+  Screening reports one match per authority and address (the official file preferred, for
+  its party metadata). The older copy is reported `superseded_by`, not stale.
+* A source not refreshed for `indicator_max_age_days` (default 7) is reported **stale**.
+  Before the first snapshot, screening returns `SCREENING_DATA_UNAVAILABLE`, never "no match".
+* The mirror is a third-party extraction, not an authoritative copy: on 2026-01-30 it listed
+  531 addresses against 516 valid ones in the official file (16 added, 1 removed between the
+  two). Every record shows which source matched.
+
+External data is untrusted: content is parsed (never evaluated), only UTF-8 is accepted (a
+UTF-16 document could hide a DOCTYPE from the byte scan), DTDs and entities are refused anywhere
+in the file, sizes are capped (400 MB, and 10,000 addresses per party), every finished record
+is freed while streaming, downloads are HTTPS-only on every redirect hop, and every address is validated
 (base58check version 0x00/0x05; bech32/bech32m with HRP `bc`). Invalid entries are rejected
 with a reason; for example OFAC files a TRON address under XBT.
 
@@ -99,20 +117,28 @@ staleness, and the coverage counts.
 
 ## 5. Observed-graph relations
 
-Distance 2 only: a parent transaction **observed by this collector** whose assessment had
-an input-side match. Coverage (`parents`, `parents_observed`) is reported, because the sample
+Distance 2 only: a parent transaction **observed by this collector** that spent from an
+address listed *at the child's evaluation time*. The parents' stored input addresses are
+screened again (a listing added after the parent was assessed counts; a delisting does too),
+at most 200 parents per transaction, one relation per (parent, address, authority).
+Coverage (`parents`, `parents_checked`, `parents_observed`) is reported, because the sample
 sees only a few percent of parents. No clustering, no multi-hop search, no address reuse
-inference.
+inference. A relation that only appears after the child was assessed is not raised
+retrospectively.
 
-## 6. Behavioural anomalies (`robust-tail/1`)
+## 6. Behavioural anomalies (`robust-tail/2`)
 
 Eight measurements: fee rate (both tails), vsize, inputs, outputs, sum of outputs, dust
 outputs, largest equal-value output group, output script-type count. For each, the empirical
 tail probability `p = (#reference >= x + 1)/(n + 1)` against the previous `window` = 2,000
 fetched transactions, plus a robust z-score. A measurement is flagged when `p <= 0.002` and
-`|z| >= 3`; `strong` = two or more flags or a value outside the reference range. Fewer than
-500 reference transactions gives `INSUFFICIENT_BASELINE` (with fewer, `p` could never reach
-0.002; the configuration is validated). The score is `-log10(p)`: rarity in recent traffic,
+`|z| >= 3`; `strong` = two or more flagged measurements (robust-tail/1 also counted one value
+outside the reference range, which with a small window is true of every flag: on pure noise
+all flags were "strong"). Fewer than 1,000 reference transactions gives
+`INSUFFICIENT_BASELINE`: the two-sided fee test needs `2/(n+1) <= alpha`, and the
+configuration is validated (alpha in (0, 1), finite `min_z`, `min_reference <= window`). On the
+VM (12 fetches per minute) a fresh install needs about 83 minutes to build the baseline; a
+restart rebuilds it from stored rows of the current feature schema. The score is `-log10(p)`: rarity in recent traffic,
 not a probability of anything illicit. Cost: about 2 ms per assessment with a full window
 (screening against 531 indicators included).
 
@@ -142,9 +168,17 @@ promotion.
 `insufficient_evidence` is true when screening could not run (no source, no screenable
 address, error) **and** the anomaly layer had no baseline or failed.
 
-Alerts are raised for priorities 1–3 and grouped: `screening:<source>:<address>`,
-`relation:<source>:<address>`, `anomaly:<measurement>:<hour>`, and for retrospective matches
-`retro:<source>:<address>`. A repeat of the same transaction is ignored. A repeat of a
+Alerts are raised for priorities 1–3 and grouped: `screening:<authority>:<role>:<address>`,
+`relation:<authority>:<address>`, `anomaly:<measurement>:<hour>`, and for retrospective
+matches `retro:<authority>:<role>:<address>`. A repeat of the same transaction is ignored
+(`alert_txids` remembers every transaction an alert counted; the API shows the latest 50).
+
+Retrospective screening runs when a snapshot is stored (CLI) and again when the collector
+loads it: every stored transaction that involves a newly available address and whose own
+record has no match for it under the same authority gets a retrospective alert. That covers
+transactions observed before the listing and those assessed in the seconds between the
+snapshot being stored and the collector loading it. Only retained rows (the retention window)
+can be screened retrospectively. A repeat of a
 dismissed alert is counted as `suppressed` (no new notification). A repeat of a resolved
 alert reopens it. Statuses: `new`, `under_review`, `dismissed`, `resolved`,
 `insufficient_evidence`. Changes are logged in `alert_events`. Over HTTP the queue is
@@ -164,8 +198,11 @@ alert reopens it. Statuses: `new`, `under_review`, `dismissed`, `resolved`,
   pending. List rows carry `risk_assessed` so that "assessed, no finding" (`risk_priority`
   null) is distinguishable from "not assessed".
 * Indicators are refreshed daily by `chainwatch-indicators.timer` (official XML, falling back
-  to the mirror). A failed refresh keeps the previous version and exits 1. The collector
-  reloads its screening index when a new version appears (checked every heartbeat).
+  to the mirror). A failed or refused refresh keeps the previous version and exits 1. The
+  collector reloads its screening index when a new version appears (checked every heartbeat)
+  and screens the transactions it assessed meanwhile retrospectively.
+* If the risk engine cannot be built at start, the collector still collects and reports
+  `risk_unavailable`; rows are then marked not assessed.
 * API: `/v1/live/risk/summary` (per-source `age_s` and `stale` by the collector's
   `indicator_max_age_days`; the anomaly `min_reference`, `window` and `alpha`; alert counts
   are all-time, marked `alerts_by_status_scope`), `/v1/live/findings` (with

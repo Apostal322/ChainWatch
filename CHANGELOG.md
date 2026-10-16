@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.8.0: independent hardening audit (2026-10, not deployed)
+
+Every defect below was reproduced first; each regression test fails on v0.7.0 (`f9f8765`)
+and passes now. Full matrix: [docs/AUDIT.md](docs/AUDIT.md#v080-independent-hardening-audit).
+
+- **Indicator data.**
+  - Empty or mass-delisting snapshots are refused unless `--allow-mass-removal`.
+  - Snapshots are diffed against active listings (reverted content re-lists).
+  - The official SDN file and its mirror are one authority; one match per authority.
+  - Truncated XML falls back to the mirror; `--fallback` with `--file` is refused.
+  - XML parser: UTF-8 only, bounded memory per record and per party, https on every
+    redirect hop.
+- **Screening and alerts.**
+  - Retrospective screening covers the reload window and runs in the collector on reload.
+  - Graph relations re-screen parents at the child's time, deduplicated, with coverage.
+  - Alert keys carry authority and role; `alert_txids` makes upserts idempotent.
+  - Anomaly detector `robust-tail/2`: "strong" needs two flagged measurements;
+    `min_reference` 1,000. Risk engine `risk-engine/2`.
+- **Collector.**
+  - Overall REST deadline and 16 MB body cap; lifecycle (mined is final) remembered
+    across waits; block conflicts not fetched.
+  - A repeated `mempoolSequence` is a re-sync, not new traffic.
+  - DB errors contained per write; disk-full rollback detected; counters after commit.
+  - Feature and sequence validation; single-transaction migrations; consistent reads.
+  - Configuration ranges validated (exit 78 on invalid config).
+- **Edge API and dashboard proxy.**
+  - The dashboard's own polling cannot be starved by anonymous cache-busting; snapped
+    windows; 60 s last-good fallback; overall upstream deadline; 15 s risk summary cache
+    (cold 0.48 s → 0.10 s at the cap).
+  - SSE hard deadline; token format checked; `CHAINWATCH_LIVE_TOKEN_NEXT` for rotation
+    without downtime; credentials redacted from status.
+- **Deployment.** Caddy read/idle timeouts and GET/HEAD only; `install.sh` token and
+  firewall fixes; CI job timeouts, one run per PR, shellcheck.
+- **Dashboard.** No silent feed freeze; explicit unavailable states; server-provided
+  anomaly baseline; superseded sources labelled; accessibility fixes.
+- **Research documents.** Feature-subset gain shares recomputed over the trees prediction
+  uses; tie-aware P@20; below-chance late ranking reported; amendments section. No
+  published AP, interval or split changed.
+
 ## v0.7.0: risk intelligence for the live monitor (2026-10, not deployed)
 
 - **Separate assessment layers.** Every fetched transaction is assessed by separate layers

@@ -91,8 +91,8 @@ happens and you accept the card risk.
 | Resource | Needed | Always Free |
 |---|---|---|
 | CPU | < 2 % of one core on average | E2.1.Micro (1/8 OCPU) or 1 A1 OCPU |
-| Memory | about 40 MB collector + 60 MB edge API + Caddy (≈ 40 MB) + OS | 1 GB (E2.1.Micro) is enough; 6 GB on A1 is plenty |
-| Disk | 63 MB database at the 50,000-row cap, 7 daily backups ≤ 450 MB, 68 MB virtualenv | 47 GB default boot volume |
+| Memory | about 40–95 MB collector (more with risk screening; grows with stored indicator rows, about 2 KB each) + 60 MB edge API + Caddy (≈ 40 MB) + OS | 1 GB (E2.1.Micro) is enough; 6 GB on A1 is plenty |
+| Disk | ≈ 285 MB database at the 50,000-row cap with risk records, 7 uncompressed daily backups ≈ 2 GB, 68 MB virtualenv | 47 GB default boot volume |
 | Network | 1 outbound WebSocket and ≤ 12 HTTPS requests per minute to mempool.space; inbound 443 only | 10 TB per month outbound |
 | OS | Ubuntu 24.04 (Python 3.12, systemd 255, `caddy` in universe) | standard platform image |
 
@@ -152,12 +152,20 @@ happens and you accept the card risk.
     address Caddy appends; IPv6 by /64). The token holder is not rate limited, so floods
     from a shared egress IP (Render's) cannot lock the dashboard out. 64 KB bodies,
     `limit ≤ 200`, GET only, no docs or OpenAPI schema; uvicorn `limit_concurrency=32`.
+  * Caddy: header and body read timeouts of 10 s and a 60 s idle timeout (slow-client
+    connections cannot hold the 32 uvicorn slots), and only `GET`/`HEAD` reach the edge
+    routes.
   * dashboard: its existing 120/min public limit; the remote backend fetches each query at
     most once per 2 s (single flight for concurrent misses), caches failures for the same
     period, and caps all upstream traffic at 3 requests/s (burst 20), so neither visitor
-    count nor varied query parameters multiply edge load.
+    count nor varied query parameters multiply edge load. The fixed queries the dashboard
+    polls bypass that budget, so a visitor scanning many parameter combinations cannot
+    starve the dashboard; arbitrary `hours`/`window` values are snapped to a few steps, a
+    failed refresh serves the last good answer for up to 60 s (flagged stale), and every
+    upstream call has an overall deadline.
   * event streams: at most 10 on Render (below its 32-connection limit) and 2 per client;
-    slots are reserved before any await and always released; each stream ends after 300 s.
+    slots are reserved before any await and always released; each stream ends after 300 s,
+    and a hard deadline closes it even if the client never reads.
 * **Sandbox:** units run as the `chainwatch` user with `ProtectSystem=strict`,
   `NoNewPrivileges`, an empty capability set, `SystemCallFilter=@system-service` (minus
   privileged, resource, mount and debug calls), `ProtectProc=invisible`, `RemoveIPC`, and
@@ -226,7 +234,7 @@ the edge API every 2 s:
 | Collector memory (peak RSS) | **39.4 MB** (VmHWM) |
 | Edge API memory (peak RSS) | **56.6 MB** (VmHWM) |
 | Container test (fresh Ubuntu 24.04, install.sh) | collector 37 MB, edge API 57 MB RSS; < 1 % CPU |
-| Database at the retention cap | **62.7 MB** for 50,000 rows (1,253 bytes per row) |
+| Database at the retention cap | **283.4 MB** for 50,000 transaction rows with 47,525 risk records, 699,894 address rows and the v0.8 covering indexes (277.8 MB before them; the risk table alone is 67 MB). The v0.5 figure of 62.7 MB had no risk tables |
 | Virtualenv on the VM | 68 MB |
 
 Edge API latency at the 50,000-row cap (synthetic rows, one persistent client like the
@@ -240,6 +248,24 @@ Render proxy; p50). The audit found three slow read paths; the fix is a covering
 | store `stats(60)` | 91.8 ms | 14.4 ms |
 | store `list` with `flag=` | 26.4 ms | 27.3 ms (unchanged: every row's flags are read) |
 | HTTP `/v1/live/status`, `/transactions?limit=50`, `/stats` | — | 3.0 / 5.6 / 18.8 ms |
+
+v0.8 measurement over HTTP at the cap (50,000 synthetic rows with risk records, 480 alerts;
+one persistent client; p50 / p95 in ms):
+
+| Request | p50 | p95 |
+|---|---|---|
+| status, transaction detail, outages | 2.4–4.1 | 3.7–5.7 |
+| `/transactions` default, `limit=200`, `first_seen` offset 45,000 | 6.6–8.0 | 7.5–9.4 |
+| `/stats?window=60` | 10.8 | 12.8 |
+| `/risk/summary` (cached for 15 s; cold 0.48 s → **0.10 s** after the covering-index rewrite) | 2.0 | 2.9 |
+| `/risk/findings`, `/risk/alerts` with `limit=200` | 8.8–13.5 | 10.3–16.2 |
+| slow: `/transactions` with flag + fee range + deep offset | 209.8 | 248.5 |
+| slow: `/stats?window=1440` (24 h histogram) | 254.1 | 301.9 |
+| slow: `sort=vsize` with offset 100,000 | 144.8 | 161.0 |
+
+The slow paths are bounded (offset and window are capped, the Render proxy snaps windows to
+60 / 240 / 1,440 and caches results) and acceptable at demo traffic; they are listed as
+open performance work in docs/AUDIT.md.
 
 (A first soak run reported ~55 ms per edge request: that was the probe opening a new HTTP
 client, and loading a CA bundle, per request, not the server.)
@@ -267,7 +293,7 @@ Monthly estimates (derived, not measured on the network):
 | Dashboard "Connected, no new data" | the WebSocket is up but nothing was fetched for 2 min: check the report's `failures` (429 → lower `fetch_per_minute`; `http_5xx` → mempool.space trouble) |
 | Dashboard "Status unknown" | Render cannot reach the edge API: `curl https://$HOST/health/live`, then `systemctl status caddy chainwatch-live-api`, then the Render logs (`live_upstream_unavailable`) |
 | Restore a backup | `sudo systemctl stop chainwatch-collector chainwatch-live-api`; `sudo -u chainwatch /opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml restore /var/backups/chainwatch/live-<stamp>.sqlite` (integrity-checked; refuses while the collector runs; keeps the replaced files as `*.pre-restore-<stamp>`); start both units |
-| Rotate the token | 1. `sudo sh -c 'umask 077; printf "CHAINWATCH_LIVE_TOKEN=%s\n" "$(openssl rand -hex 32)" > /etc/chainwatch/live.env'`; 2. `sudo systemctl restart chainwatch-live-api`; 3. update the Render secret and redeploy. Between steps 2 and 3 the dashboard shows "Status unknown" (502s): about a minute |
+| Rotate the token (no downtime) | 1. add `CHAINWATCH_LIVE_TOKEN_NEXT=<new>` (generate with `openssl rand -hex 32`) to `/etc/chainwatch/live.env` (mode 0600) and `sudo systemctl restart chainwatch-live-api`: the edge now accepts both tokens; 2. update the Render secret to the new token and redeploy; 3. make the new token `CHAINWATCH_LIVE_TOKEN`, delete the `_NEXT` line and restart the edge again. Tokens must match `[A-Za-z0-9._~+/=-]{32,}`; a malformed or whitespace-padded token makes the edge exit 78 (systemd does not restart-loop) |
 | Upgrade | `sudo REF=<new tag> EXPECTED_SHA=<commit> CHAINWATCH_HOST=$HOST bash /opt/chainwatch/app/deploy/oracle/install.sh` (idempotent; keeps the token and data; schema migrations run at start-up) |
 | Roll back | the same command with the previous tag. Schema changes so far only add columns and indexes, so an older collector still opens a newer database; take a backup first anyway |
 | Uninstall | `systemctl disable --now chainwatch-*`; remove `/opt/chainwatch`, `/var/lib/chainwatch`, `/etc/chainwatch`; then terminate the VM in the Console |
@@ -298,6 +324,7 @@ Monthly estimates (derived, not measured on the network):
 | Test | Result |
 |---|---|
 | Real systemd (Ubuntu 24.04 container booted with systemd 255 as PID 1; real `install.sh`; units pointed at a local mock by drop-ins) | **all 10 sections PASS**: install 20 s; token file 0600 root:root and unreadable by the service user; units enabled; no seccomp kills under `SystemCallFilter`; `smoke_live.sh` PASS; SIGKILL → restarted by systemd after 10 s, 15.4 s `collector_down` "unclean exit"; another process holding an exclusive SQLite lock for 25 s → edge reads continue (WAL) → collector `task heartbeat died: OperationalError: database is locked` → exit 1 → restarted; backup through `chainwatch-backup.service`; `restore` refused while running, works after stop; re-running `install.sh` keeps token and data; bad host / REF / `EXPECTED_SHA` rejected; `caddy validate` (2.6.2) on the rendered template; exposure 1.3 / 1.1 / 2.3; container reboot → all units back, 0.9 s "clean stop" gap |
+| Same real-systemd test, v0.8 (commit `53f6f65`, 14 sections) | **35/35 PASS** (sections 1–10 as above, plus): 11. `chainwatch-indicators.service` with no route to the official file exits 1 and keeps the loaded list (versions 1 → 1), and every fetched row (98) has a risk record; 12. an invalid config (`retention_rows: 0`) exits 78 with `NRestarts=0`, no restart loop; 13. a whitespace-padded token makes the edge exit 78 and stay down; 14. token rotation: the current and `CHAINWATCH_LIVE_TOKEN_NEXT` tokens are both accepted. `caddy validate` passes with the new timeouts. Container reboot: both units active, timers enabled, ready, 1.0 s "clean stop" gap, integrity ok |
 | Fault-injection soak, 6 min, one fault every 25 s (`scripts/soak_test.py`) | **11/11 checks PASS**: REST 429 / 500 / malformed JSON / schema drift / slow, WebSocket drop / 40 s silence / 5,000-txid burst / sequence gap, collector SIGKILL, edge restart, 5 SSE clients dropped mid-stream. Recovery: WS drop 4.6 s, kill 5.6 s, edge restart 0.6 s, silence 23 s (watchdog 20 s). Edge and dashboard availability 100 % (169 probes each), integrity ok, 0 tracebacks, clean SIGTERM for every process |
 | Full system in a browser (`scripts/e2e_live_browser.py`: mock → collector → SQLite → edge API with token → dashboard in remote mode → SSE → React) | **10/10 PASS**: mock source labelled (not REAL); connected; new transactions arrive live; the detail panel matches the API (txid, vsize, fee); collector SIGKILL shown as "Disconnected" after 13 s; recovery shown 10 s after restart; the gap appears in the gaps table; the Replay tab stays synthetic; 0 console errors |
 | Fault-injection soak, **110 min** (6,601 s), one fault every 2 min, commit `06d59da` (`scripts/soak_test.py --minutes 110 --fault-every 120`) | 52 faults (each of the 12 kinds 4–5 times, incl. 4 collector SIGKILLs and 4 edge restarts); every recovery within 90 s (WS drop median 5.2 s, kill 5.6 s, edge restart 0.7 s, 40 s silence 22.3 s); edge and dashboard availability **99.97 %** (1 failed probe of 3,072 each, during edge restarts); SQLite integrity ok; 0 tracebacks; clean SIGTERM shutdown of every process; collector 0.23 % CPU, RSS 38 → 44 MB (peak 43.8 MB first half, 44.2 MB second half: the bounded dedupe LRU filling); edge 0.57 % CPU, 57 MB flat; queue max 61/100; 4 `collector_down`, 13 `disconnected`, 4 `sequence_gap` outages recorded. **10/11 checks passed**: the final row count was 3,026 against a 3,000 cap, because retention runs every 60 s and the run ended between prunes. Fixed afterwards: a clean stop now prunes, and the check now uses the documented bound (cap + one minute of fetches) (`test_clean_stop_leaves_the_database_within_the_row_cap`). An earlier 3-hour attempt was cut off after 17 minutes when the build container was recycled; that partial run had 0 tracebacks and integrity ok, but produced no report |

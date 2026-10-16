@@ -1,8 +1,93 @@
 # Engineering audits
 
+* [v0.8.0 independent hardening audit](#v080-independent-hardening-audit) (2026-10): all components, re-audited by independent reviewers; adversarial cases reproduced before fixing.
 * [v0.7.0 risk intelligence audit](#v070-risk-intelligence-audit) (2026-10): screening, indicator parsing, anomaly detector, engine, alerts, dashboard.
 * [v0.6.0 audit](#v060-engineering-audit-live-monitor-cloud-kit-research-claims) (2026-10): live collector, edge API and remote proxy, deployment kit, dashboard, research claims.
 * [Phase 4 audit](#phase-4-engineering-audit-release-readiness): serving layer and release.
+
+## v0.8.0 independent hardening audit
+
+Baseline: `f9f8765` (v0.7.0). Independent reviewers audited the collector, risk engine,
+API and proxy, deployment kit, dashboard and research claims. Each code defect was
+reproduced first: **every new regression test fails on `f9f8765` and passes after the fix**
+(checked by running the tests against a worktree of the baseline). Severity: P1 = wrong
+results, data loss or availability loss reachable in normal operation or by an anonymous
+visitor; P2 = wrong results under plausible faults; P3 = misleading output or robustness.
+None of these problems was deployed: the risk layers had never run on the public network.
+
+### Code and deployment
+
+| # | Sev | Component | Problem (root cause) | Fix | Test / evidence | Commit |
+|---|---|---|---|---|---|---|
+| V1 | P1 | config | `retention_rows: 0` was accepted and `prune()` deleted every stored row; `heartbeat_s: 0` spun the heartbeat loop (no range validation) | `LiveConfig.__post_init__` validates every count, duration and URL scheme; invalid config exits 78 | `test_live_config_rejects_unsafe_values`; systemd §12 (exit 78, no restart loop) | `dc8d428` |
+| V2 | P1 | indicator refresh | An empty or truncated snapshot (error page, schema change) silently delisted every address | an empty snapshot, or one that would delist more than max(5, 25 % of the active listings), is refused (`SnapshotRejected`) unless `--allow-mass-removal`; truncated XML falls back | `test_empty_or_mass_delisting_snapshot_is_refused`, `test_truncated_official_xml_falls_back_and_file_inputs_never_do` | `a2d0802` |
+| V3 | P1 | indicator versions | `UNIQUE(source, sha256)` made a snapshot that reverts to earlier content "unchanged", so a re-listed address stayed delisted | diff against active listings; uniqueness dropped by an id-preserving migration | `test_content_reverting_to_an_earlier_version_relists_it` | `a2d0802` |
+| V4 | P1 | screening | The official SDN file and its mirror were independent sources: an address delisted officially stayed listed through the mirror | one authority (`ofac-sdn`, official rank 0); a newer snapshot closes the other copy's listings; one match per authority | `test_official_list_and_its_mirror_are_one_list` | `a2d0802` |
+| V5 | P1 | retro screening | Transactions assessed while a new snapshot was loading were missed by both the live path and the retrospective pass | retro covers every stored transaction whose own record lacks the match; the collector runs it on reload, in a transaction | `test_retro_screening_covers_the_reload_window_and_is_idempotent`, `test_collector_retro_screens_when_it_loads_a_new_snapshot` | `a2d0802` |
+| V6 | P1 | collector | A trickling REST body held a fetch worker forever while health said connected (per-read timeout only) | overall `asyncio.timeout` deadline and a 16 MB body cap | `test_rest_read_has_an_overall_deadline` | `a2d0802` |
+| V7 | P1 | proxy | An anonymous visitor cycling query parameters missed the cache each time, drained the shared upstream budget and turned the dashboard's own polling into 502s | fixed polling queries bypass the budget; `hours`/`window` snapped; 60 s last-good fallback; edge caches risk summary 15 s | `test_anonymous_parameter_cycling_cannot_starve_the_dashboards_own_polling`, `test_last_good_answer_is_served_when_the_edge_fails` | `064612f` |
+| V8 | P2 | XML parser | UTF-16 input could hide a DOCTYPE from the byte scan; one party with 1 M features peaked at 749 MB | UTF-8 only; every finished top-level record freed; features dropped as they end; 10,000 addresses per party → 21 MB | `test_utf16_and_bom_inputs`; 1 M-feature stress run | `a2d0802` |
+| V9 | P2 | indicator fetch | https was checked only on the first URL, not on redirect hops | checked on every hop | `test_fetch_refuses_a_redirect_through_plain_http` | `a2d0802` |
+| V10 | P2 | graph relations | Parents' inputs were screened at the parent's time, duplicates per address, and coverage overstated | re-screened at the child's time; deduplicated per (parent, address, authority), capped at 20; `parents_checked` reported | `test_graph_relations_screen_parents_at_the_childs_time` | `a2d0802` |
+| V11 | P2 | alerts | Upserts deduplicated only over the 50 displayed txids; keys ignored authority and role | `alert_txids` table; keys `screening:{authority}:{role}:{address}` | `test_alert_group_includes_the_role`, `test_alert_upserts_are_idempotent_beyond_the_displayed_txids` (added after the second review) | `a2d0802` |
+| V12 | P2 | anomaly | One flag outside a small window was always "strong"; the two-sided fee test could not reach alpha | `robust-tail/2`: strong needs ≥ 2 flags; `min_reference` 1,000; reachability validated two-sided | `test_strong_means_several_measurements_not_a_small_window` | `a2d0802` |
+| V13 | P2 | collector lifecycle | `replaced` could override `mined`; txids leaving the mempool during a token wait or an in-flight GET were forgotten; block conflicts were fetched | mined is final; `LifecycleMemo` applied at store time; gone txids not fetched | `test_mined_overrides_replaced`, `test_lifecycle_event_during_fetch_is_not_lost`, `test_gone_is_rechecked_after_waiting_for_a_token`, `test_block_conflicts_are_not_fetched` | `a2d0802` |
+| V14 | P2 | collector protocol | A repeated `mempoolSequence` (mempool.space re-sync; checked in its `websocket-handler.ts`) re-announced the whole mempool as new | repeated sequence = re-sync: added txids skipped and counted | `test_live.py` backpressure test (resync counters) | `a2d0802` |
+| V15 | P2 | collector | A DB error on lifecycle/gap writes dropped the frame's new txids and tore down the socket; a disk-full auto-rollback went undetected; counters were incremented before commit | `sqlite3.Error` contained per write; `_tx` checks `in_transaction`; counters after commit | `test_db_error_in_frame_does_not_drop_new_txids_or_the_connection`, `test_disk_full_in_the_risk_write_does_not_count_a_phantom_fetch` | `a2d0802` |
+| V16 | P2 | migrations | Two processes starting together raced on `ALTER TABLE` ("duplicate column name") | one `BEGIN IMMEDIATE` migration | `test_concurrent_migrations_do_not_collide` (deterministic interleaving) | `a2d0802` |
+| V16b | P3 | reader | `LiveReader.get` read the row and its risk record in separate snapshots, so a concurrent prune could return a half-deleted transaction | one read transaction | `test_reader_get_survives_a_concurrent_prune` | `a2d0802` |
+| V17 | P2 | proxy | A dripping edge held callers past the timeout; an exception stranded single-flight waiters | overall deadline; any exception becomes a clean 502 and releases waiters | `test_upstream_has_an_overall_deadline_and_errors_never_strand_waiters` | `064612f` |
+| V18 | P2 | SSE | A client that never reads held its slot past the stream deadline | hard `move_on_after` deadline | `test_a_client_that_never_reads_cannot_hold_a_stream_slot` | `064612f` |
+| V19 | P2 | deploy | Slow-header clients could hold the 32 uvicorn slots; non-GET reached the edge | Caddy read/idle timeouts; `GET`/`HEAD` only | systemd §9 (`caddy validate`) | `064612f` |
+| V20 | P2 | token | A whitespace-padded token passed the length check; rotation needed downtime | token regex, exit 78; `CHAINWATCH_LIVE_TOKEN_NEXT` | `test_token_rotation_and_token_format`; systemd §13–14 | `064612f` |
+| V21 | P2 | features, protocol | Output sum, fee = in − out and weight/size were not validated; a sequence of 2**63 raised `OverflowError` in the heartbeat task (fatal exit, restart loop) | validated; invalid input rejected; sequence outside 0 ≤ s < 2**53 ignored | `test_sum_of_outputs_above_max_money_is_malformed`, `test_fee_must_equal_inputs_minus_outputs_when_all_prevouts_are_known`, `test_huge_sequence_does_not_break_the_heartbeat` | `a2d0802` |
+| V22 | P3 | status | `/v1/live/status` could echo `user:password@` from URLs and error texts | redacted | `test_status_never_shows_credentials_from_a_source_url` | `064612f` |
+| V23 | P3 | install.sh | A failed token generation wrote an empty token; umask leaked to later steps; the firewall rule could land after Oracle's REJECT | checked, scoped umask, inserted before REJECT | shellcheck job; systemd §1 | `064612f` |
+| V24 | P3 | supervised gate | Malformed model-card evidence raised instead of abstaining | types checked; never raises | `test_supervised_gate_rejects_empty_or_malformed_evidence` | `a2d0802` |
+| V25 | P3 | performance | `risk_summary` scanned the risk table (0.48 s cold at the cap) | covering indexes, one pass: 0.10 s cold, 2 ms cached | 50k-row bench | `53f6f65` |
+| V26 | P3 | CI | No job timeouts (6 h default), PR checks ran twice, no shell lint | timeouts, concurrency, shellcheck | CI | `dc8d428` |
+| V27 | P3 | demo | Generated synthetic data printed a "published hashes" mismatch warning | info message for synthetic data | — | `4cb20c1` |
+
+### Dashboard (`f1b552d`)
+
+| # | Sev | Problem | Fix |
+|---|---|---|---|
+| D1 | P1 | The feed could freeze silently while the badge said Connected (event stream closed, no fallback) | polling fallback, lag notice, txid dedupe, recovery after a restore |
+| D2 | P2 | "No alerts" / "No findings" shown when risk or screening data was unavailable; unassessed rows looked clean | explicit unavailable states; `n/a` for unassessed rows |
+| D3 | P2 | Anomaly baseline progress used a hardcoded 500 | the server's `min_reference` |
+| D4 | P2 | Superseded sources counted as current; no authority, metadata version or graph coverage | labelled and shown |
+| D5 | P3 | Accessibility: duplicate toggle names, no skip link or `<main>` landmark, very long alert lists | fixed; first 20 alerts with "show all" |
+| D6 | P3 | Explorer links for mock data; replay label bug; clock skew applied inconsistently; overflow at 390 px; "-dirty" lost | fixed |
+
+### Research claims (`62bf8bd`)
+
+No published AP, interval or split changed; an independent reviewer recomputed every
+headline number from the raw CSVs and saved predictions, and a scratch retrain reproduced
+the live-computable XGBoost run exactly.
+
+| # | Sev | Problem | Fix |
+|---|---|---|---|
+| M1 | P2 | The feature-subset "gain share" was XGBoost's mean gain per split over all trees, including 50 after early stopping; the "mostly shape" claim rested on it | share of total gain over the trees prediction uses (`fees` 0.08 → 0.19, `size` 0.26 → 0.46); claim corrected |
+| M2 | P3 | Per-step P@20 used `head(20)`, not the tie-aware repository metric | tie-aware (0.5100 → 0.5133) |
+| M3 | P3 | Below-chance late ranking (LR ROC-AUC 0.31 / 0.34 on steps 43–49) not reported; "pre-registered" overstated what the commit order proves | reported; amendments section |
+| M4 | P3 | A third-party count presented as local data; missingness means not labelled as per-step vs pooled | corrected |
+
+### Accepted or open (not changed in v0.8)
+
+* **Open, MEDIUM:** 500 responses from the edge do not carry the security headers.
+* **Open, MEDIUM (supply chain):** no Dependabot; CI installs `.[dev]` without a lock; the
+  publish workflow does not wait for CI. Recommendations only; no workflow that publishes
+  was changed.
+* **Open, MEDIUM:** a fetch that failed transiently is never retried (the row stays
+  `failed`); `restore` is refused while the collector runs but not while systemd is about
+  to restart it (stop both units first, as the runbook says).
+* **Open, LOW (performance):** three read paths exceed 100 ms at the cap (flag + fee range +
+  deep offset 210 ms; 24 h stats 254 ms; `sort=vsize` with offset 100,000 145 ms).
+* **Accepted:** uvicorn `limit_concurrency=32` (mitigated by Caddy timeouts); a single
+  150 MB XML attribute still peaks near 470 MB (expat limitation; the source is a trusted
+  HTTPS host and the refresh unit has a memory cap).
+* **External:** Render's real `X-Forwarded-For` hop count, real mempool.space traffic, the
+  Oracle VM and a 24-hour run on the public network were not available here.
 
 ## v0.7.0 risk intelligence audit
 
