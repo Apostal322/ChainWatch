@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api";
 import {
   ago,
+  applyRecentPage,
   confirmedLabel,
+  explorerHref,
+  FEED_LAG_S,
+  feedLag,
+  relatedExplorerHref,
   connectionLabel,
   connectionView,
   eventsUrl,
@@ -49,6 +54,47 @@ describe("live feed helpers", () => {
     expect(merged.map((r) => r.id)).toEqual([5, 4, 3]);
   });
 
+  it("de-duplicates by txid and lets the newer copy of a row win", () => {
+    const tx = "ab".repeat(32);
+    // the same transaction stored again under a new id (e.g. re-observed): one row, the newest id
+    const merged = mergeFeed([row(3, { txid: tx }), row(2)], [row(7, { txid: tx }), row(6, { txid: tx })]);
+    expect(merged.map((r) => r.id)).toEqual([7, 2]);
+    expect(merged.filter((r) => r.txid === tx)).toHaveLength(1);
+    // an incoming copy of a held id replaces it (e.g. now carries its assessment)
+    const updated = mergeFeed([row(3, { risk_assessed: false })], [row(3, { risk_assessed: true })]);
+    expect(updated).toHaveLength(1);
+    expect(updated[0].risk_assessed).toBe(true);
+    expect(mergeFeed([row(1)], [])).toEqual([row(1)]);
+  });
+
+  it("applies a polled page and resets after a database restore or reset", () => {
+    const first = applyRecentPage([], null, [row(10), row(9)]);
+    expect(first).toMatchObject({ lastId: 10, reset: false });
+    const more = applyRecentPage(first.feed, 10, [row(12), row(11), row(10)]);
+    expect(more.feed.map((r) => r.id)).toEqual([12, 11, 10, 9]);
+    expect(more).toMatchObject({ lastId: 12, reset: false });
+    // a stream row (15) arrived while the request was in flight: not a reset, lastId stays 15
+    expect(applyRecentPage(more.feed, 12, [row(12)], 15)).toMatchObject({ lastId: 15, reset: false });
+    // server's newest id below the client's: restored / reset database; old rows dropped
+    const reset = applyRecentPage(more.feed, 12, [row(3, { txid: "cd".repeat(32) }), row(2)]);
+    expect(reset.reset).toBe(true);
+    expect(reset.lastId).toBe(3);
+    expect(reset.feed.map((r) => r.id)).toEqual([3, 2]);
+    // emptied database
+    expect(applyRecentPage(more.feed, 12, [])).toEqual({ feed: [], lastId: null, reset: true });
+    expect(applyRecentPage([], null, [])).toEqual({ feed: [], lastId: null, reset: false });
+  });
+
+  it("reports a feed that lags behind the collector's observations", () => {
+    const st = (over: Partial<LiveStatus> = {}) => status({ last_observation_at: 2000, ...over });
+    expect(feedLag(st(), [row(1, { fetched_at: 2000 - FEED_LAG_S - 30 })])).toBe(FEED_LAG_S + 30);
+    expect(feedLag(st(), [row(1, { fetched_at: 1990 })])).toBeNull();
+    expect(feedLag(st({ connection: "reconnecting" }), [row(1, { fetched_at: 0 })])).toBeNull();
+    expect(feedLag(st({ last_observation_at: null }), [row(1, { fetched_at: 0 })])).toBeNull();
+    expect(feedLag(st(), [])).toBeNull();
+    expect(feedLag(null, [row(1)])).toBeNull();
+  });
+
   it("filters by fee rate, flag and outcome, then sorts", () => {
     const rows = [row(1), row(2), row(3), row(4, { outcome: "failed", fee_rate: null, flags: [] })];
     const base = { minFeeRate: null, flag: null, showFailed: false, sort: "newest" as const };
@@ -65,6 +111,8 @@ describe("live feed helpers", () => {
     expect(formatSat(null)).toBe("—");
     expect(shortTxid("a".repeat(64))).toBe(`${"a".repeat(10)}…${"a".repeat(6)}`);
     expect(ago(100, 165)).toBe("1m ago");
+    expect(ago(0, 47 * 3600)).toBe("47h ago");
+    expect(ago(0, 49 * 3600)).toBe("2d ago");
     expect(connectionLabel(null)).toBe("Disconnected");
     expect(connectionLabel("reconnecting")).toBe("Reconnecting");
   });
@@ -75,6 +123,7 @@ describe("collection gaps", () => {
     expect(formatDuration(45)).toBe("45s");
     expect(formatDuration(725)).toBe("12m 5s");
     expect(formatDuration(11_040)).toBe("3h 4m");
+    expect(formatDuration(3 * 86400 + 5 * 3600)).toBe("3d 5h");
     expect(formatDuration(null)).toBe("—");
     const base = { id: 1, started_at: 100, detail: null };
     expect(outageDuration({ ...base, kind: "collector_down", ended_at: 160 }, 1000)).toBe(60);
@@ -136,6 +185,18 @@ describe("connection badge", () => {
     expect(view(status({ last_observation_at: null }), 1000, 1000).detail).toBe("no transaction fetched yet");
   });
 
+  it("says no live data yet (not unreachable) and refreshing after the tab was hidden", () => {
+    expect(connectionView(null, { now: 1000, statusAt: null, apiError: false, noData: true }))
+      .toMatchObject({ label: "No live data", detail: "no live data yet (collector not started)" });
+    // tab hidden for 10 min: the old status is stale, but a refresh is under way
+    expect(connectionView(status(), { now: 1600, statusAt: 1000, apiError: false, refreshing: true }))
+      .toMatchObject({ label: "Refreshing…", detail: "refreshing…" });
+    // a failed refresh is reported as such
+    expect(connectionView(status(), { now: 1600, statusAt: 1000, apiError: true, refreshing: true }).label).toBe("Status unknown");
+    // a fresh status is shown normally
+    expect(connectionView(status(), { now: 1001, statusAt: 1000, apiError: false, refreshing: true }).label).toBe("Connected");
+  });
+
   it("compares against the server clock, not the client clock", () => {
     // client clock 1 h ahead of the server: the observation is 5 s old on the server's clock
     expect(view(status({ server_time: 1000 }), 4600, 4600).label).toBe("Connected");
@@ -192,6 +253,23 @@ describe("event stream helpers", () => {
       expect(d).toBeGreaterThanOrEqual(1500);
       expect(d).toBeLessThanOrEqual(60000);
     }
+  });
+});
+
+describe("explorer links", () => {
+  const tx = "ab".repeat(32);
+  const parent = "cd".repeat(32);
+  const url = `https://mempool.space/tx/${tx}`;
+  it("links only real network data over https", () => {
+    expect(explorerHref(url, "real")).toBe(url);
+    expect(explorerHref(url, "mock")).toBeNull();
+    expect(explorerHref(url, "unknown")).toBeNull();
+    expect(explorerHref("javascript:alert(1)", "real")).toBeNull();
+    expect(explorerHref(`http://mempool.space/tx/${tx}`, "real")).toBeNull();
+    expect(explorerHref(null, "real")).toBeNull();
+    expect(relatedExplorerHref(url, "real", tx, parent)).toBe(`https://mempool.space/tx/${parent}`);
+    expect(relatedExplorerHref(url, "mock", tx, parent)).toBeNull();
+    expect(relatedExplorerHref(url, "real", tx, "not-a-txid")).toBeNull();
   });
 });
 

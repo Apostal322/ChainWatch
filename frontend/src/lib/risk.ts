@@ -41,6 +41,10 @@ export interface ScreeningMatch {
   /** Point-in-time availability: when ChainWatch first had a snapshot containing the address. */
   available_at: number;
   programs: string[];
+  /** Publisher the source speaks for (the official file and its mirror share "ofac-sdn"). */
+  authority?: string;
+  /** Short hash of the listing metadata the match was made with. */
+  metadata_version?: string;
 }
 
 export interface GraphRelation {
@@ -51,6 +55,9 @@ export interface GraphRelation {
   source_id: string;
   label: string;
   reference: string;
+  authority?: string;
+  /** Point-in-time availability of the listing the relation leads to. */
+  available_at?: number;
 }
 
 export interface AnomalyIndicator {
@@ -120,6 +127,10 @@ export interface IndicatorSource {
   /** Server-side staleness (collector's `indicator_max_age_days`); absent on older servers. */
   stale?: boolean;
   age_s?: number | null;
+  /** Publisher the source speaks for; sources of one authority describe the same list. */
+  authority?: string;
+  /** A newer source of the same authority replaced this one (its source_id); it is then never stale. */
+  superseded_by?: string | null;
 }
 
 export interface RiskSummaryCounts {
@@ -167,6 +178,8 @@ export interface RecordSource {
   age_s: number;
   stale: boolean;
   active_indicators: number | null;
+  authority?: string;
+  superseded_by?: string | null;
 }
 
 export interface RiskRecord {
@@ -192,7 +205,10 @@ export interface RiskRecord {
   graph: {
     status: GraphStatus;
     relations?: GraphRelation[];
-    coverage?: { parents: number; parents_observed: number };
+    /** All relations found; `relations` may be truncated. */
+    relations_total?: number;
+    /** `parents_checked`: parents actually looked up (capped by the collector). */
+    coverage?: { parents: number; parents_observed: number; parents_checked?: number };
     limitation?: string;
   };
   anomaly: {
@@ -260,9 +276,17 @@ export function isPriority(v: unknown): v is PriorityLevel {
   return v === 1 || v === 2 || v === 3 || v === 4;
 }
 
-/** Marker for a feed row. `null` is ambiguous on the wire: no finding, or not (yet) assessed. */
-export function priorityMarker(level: number | null | undefined): { short: string; aria: string } {
+/**
+ * Marker for a feed row. A null level is "assessed, no finding" when `assessed` is true,
+ * "not assessed" when it is false, and ambiguous (older server) when it is unknown.
+ */
+export function priorityMarker(
+  level: number | null | undefined,
+  assessed?: boolean | null,
+): { short: string; aria: string } {
   if (isPriority(level)) return { short: PRIORITY_INFO[level].short, aria: PRIORITY_INFO[level].aria };
+  if (assessed === false) return { short: "n/a", aria: "Not assessed: no risk assessment for this transaction" };
+  if (assessed === true) return { short: "—", aria: "No review priority: assessed, no finding" };
   return { short: "—", aria: "No review priority: no finding, or not assessed yet" };
 }
 
@@ -433,7 +457,7 @@ export const SOURCE_MAX_AGE_S = SOURCE_MAX_AGE_DAYS * 86400;
 
 export const SOURCE_NAME: Record<string, string> = {
   "ofac-sdn": "OFAC SDN (official list)",
-  "ofac-sdn-mirror": "OFAC SDN (third-party extraction)",
+  "ofac-sdn-mirror": "OFAC SDN (third-party mirror)",
 };
 
 export function sourceName(id: string): string {
@@ -441,14 +465,15 @@ export function sourceName(id: string): string {
 }
 
 export interface SourceFreshness {
-  state: "fresh" | "stale" | "never";
+  /** "superseded": a newer source of the same authority replaced it (not a current source). */
+  state: "fresh" | "stale" | "never" | "superseded";
   age_s: number | null;
   /** The source content was loaded from a local file, not fetched from its publisher. */
   localFile: boolean;
 }
 
 export function sourceFreshness(
-  s: Pick<IndicatorSource, "checked_at" | "retrieved_at" | "url" | "stale"> | null | undefined,
+  s: Pick<IndicatorSource, "checked_at" | "retrieved_at" | "url" | "stale" | "superseded_by"> | null | undefined,
   now: number,
   maxAge = SOURCE_MAX_AGE_S,
 ): SourceFreshness {
@@ -457,6 +482,7 @@ export function sourceFreshness(
   const localFile = typeof s.url === "string" && s.url.startsWith("file:");
   if (checked === null || !Number.isFinite(checked)) return { state: "never", age_s: null, localFile };
   const age = Math.max(0, now - checked);
+  if (s.superseded_by) return { state: "superseded", age_s: age, localFile };
   const stale = typeof s.stale === "boolean" ? s.stale : age > maxAge; // the server's rule wins
   return { state: stale ? "stale" : "fresh", age_s: age, localFile };
 }
@@ -467,7 +493,11 @@ export interface ScreeningAvailability {
   headline: string;
 }
 
-/** Screening is unavailable when no source was ever loaded; stale sources still screen (with a warning). */
+/**
+ * Screening is unavailable when no source was ever loaded; stale sources still screen (with a
+ * warning). A superseded source (replaced by a newer one of the same authority) is not counted
+ * as a current, independent source.
+ */
 export function screeningAvailability(
   sources: IndicatorSource[] | null | undefined,
   now: number,
@@ -475,21 +505,58 @@ export function screeningAvailability(
 ): ScreeningAvailability {
   const list = sources ?? [];
   const states = list.map((s) => sourceFreshness(s, now, maxAgeDays * 86400).state);
-  const loaded = states.filter((s) => s !== "never").length;
-  if (loaded === 0) return { available: false, anyStale: false, headline: "Screening data unavailable" };
+  const current = states.filter((s) => s === "fresh" || s === "stale").length;
+  const superseded = states.filter((s) => s === "superseded").length;
+  if (current + superseded === 0) return { available: false, anyStale: false, headline: "Screening data unavailable" };
   const anyStale = states.includes("stale");
+  const extra = superseded ? ` (${superseded} superseded)` : "";
   return {
     available: true,
     anyStale,
-    headline: anyStale ? `STALE: source not refreshed within ${maxAgeDays} days` : `${loaded} source${loaded === 1 ? "" : "s"} loaded`,
+    headline: anyStale
+      ? `STALE: source not refreshed within ${maxAgeDays} days`
+      : `${current} source${current === 1 ? "" : "s"} loaded${extra}`,
   };
+}
+
+/** What the risk panels may say when they are empty. */
+export type RiskState = "loading" | "unavailable" | "no-screening" | "ok";
+
+export function riskState(data: RiskSummary | null | undefined, now: number): RiskState {
+  if (!data) return "loading";
+  if (!data.enabled || !data.summary) return "unavailable";
+  const maxAge = data.engine?.indicator_max_age_days ?? SOURCE_MAX_AGE_DAYS;
+  return screeningAvailability(data.summary.sources, now, maxAge).available ? "ok" : "no-screening";
+}
+
+export const RISK_UNAVAILABLE_TEXT = "Risk assessment unavailable on this server";
+export const NO_SCREENING_TEXT = "Screening data unavailable: source matches (P1/P2) cannot occur";
+
+/** Empty-list text for the investigation queue / recent findings. */
+export function emptyRiskText(what: "alerts" | "findings", state: RiskState, filterText = ""): string {
+  if (state === "unavailable") {
+    return `${RISK_UNAVAILABLE_TEXT}: no ${what === "alerts" ? "alerts are raised" : "findings are produced"}.`;
+  }
+  const base = what === "alerts"
+    ? `No alerts${filterText}.`
+    : "No findings yet. Absence of findings is not a statement that transactions are legitimate.";
+  return state === "no-screening" ? `${base} ${NO_SCREENING_TEXT}; only behavioural anomalies (P3/P4) can be reported.` : base;
+}
+
+/** Overview tile for the supervised layer, from `engine.supervised.state`. */
+export function supervisedTile(s: { state: string; reason: string | null } | null | undefined): { v: string; h: string } {
+  if (!s || !s.state) return { v: "not reported", h: "the collector did not report the supervised layer" };
+  if (s.state === "abstaining") {
+    return { v: LAYER_TEXT.supervised, h: s.reason ? `gate: ${s.reason}` : "no model passed the promotion gate" };
+  }
+  return { v: `State: ${s.state}`, h: s.reason ? `gate: ${s.reason}` : "as reported by the collector" };
 }
 
 export const shortSha = (sha: string | null | undefined): string => (sha ? sha.slice(0, 12) : "—");
 
 // ------------------------------------------------------------------ anomaly baseline
 /** Fallback for servers that do not report `anomaly_min_reference` (DetectorConfig default). */
-export const ANOMALY_MIN_REFERENCE = 500;
+export const ANOMALY_MIN_REFERENCE = 1000;
 
 export function baselineProgress(size: number | null | undefined, need = ANOMALY_MIN_REFERENCE): {
   ready: boolean;

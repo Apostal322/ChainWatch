@@ -152,7 +152,7 @@ try:
         )
         btn = pg.locator("tbody tr button.rowbtn").first
         btn.click()
-        pg.wait_for_selector("text=View on mempool.space", timeout=15000)
+        pg.wait_for_selector("text=mock data: no explorer link", timeout=15000)
         detail = pg.locator(".detail, aside").last.inner_text()
         api_rows = httpx.get(
             "http://127.0.0.1:8973/v1/live/transactions?limit=200&outcome=fetched"
@@ -189,7 +189,7 @@ try:
         check(
             "summary: source fresh, settings reported, supervised abstains",
             summ["summary"]["sources"][0]["stale"] is False
-            and summ["engine"]["anomaly_min_reference"] == 500
+            and summ["engine"]["anomaly_min_reference"] == 1000
             and summ["engine"]["supervised"]["state"] == "abstaining"
             and set(summ["summary"]["supervised"]) == {"NO_VALIDATED_MODEL"},
             json.dumps({k: summ["engine"].get(k) for k in ("supervised", "anomaly_min_reference")}),
@@ -238,7 +238,7 @@ try:
         pg.wait_for_selector("text=SYNTHETIC DEMO DATA", timeout=30000)
         check(
             "replay tab still synthetic, no live rows mixed in",
-            "LOCAL MOCK" not in pg.locator("main, body").inner_text().split("Replay")[-1][:2000],
+            "LOCAL MOCK" not in pg.locator("main").inner_text().split("Replay")[-1][:2000],
         )
         b.close()
     check("no browser console errors", not errors, str(errors[:3]))

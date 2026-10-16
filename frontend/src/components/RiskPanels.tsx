@@ -1,7 +1,7 @@
 // Risk intelligence UI for the live monitor: layer health, investigation queue, recent findings
 // and the per-transaction assessment. Every finding is shown per layer with its evidence and
 // limitations; nothing is combined into a single score.
-import { memo, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import { ago, formatDuration, shortTxid, utcStamp } from "../lib/live";
 import {
   ALERT_STATUSES,
@@ -10,6 +10,8 @@ import {
   alertStatusLabel,
   anomalyStatusText,
   baselineProgress,
+  emptyRiskText,
+  NO_SCREENING_TEXT,
   findingLayers,
   findingLines,
   formatIndicator,
@@ -37,6 +39,7 @@ import {
   STATUS_CLI_COMMAND,
   STATUS_CLI_NOTE,
   supervisedStatusText,
+  supervisedTile,
   type Alert,
   type AlertStatus,
   type AnomalyIndicator,
@@ -47,6 +50,7 @@ import {
   type Lifecycle,
   type PriorityLevel,
   type RiskRecord,
+  type RiskState,
   type RiskSummary,
   type ScreeningMatch,
   type Tone,
@@ -62,9 +66,14 @@ function Ago({ ts, skew = 0 }: { ts: number; skew?: number }) {
 
 /** P1..P4 marker; the accessible text is the full meaning. `decorative` when the meaning is
  * already written next to it. */
-export function PriorityMarker({ level, decorative = false }: { level: number | null | undefined; decorative?: boolean }) {
-  const m = priorityMarker(level);
-  const cls = isPriority(level) ? `prio p${level}` : "prio none";
+export function PriorityMarker({ level, decorative = false, assessed }: {
+  level: number | null | undefined;
+  decorative?: boolean;
+  /** Feed rows: false shows "n/a" (not assessed), true "—" (assessed, no finding). */
+  assessed?: boolean | null;
+}) {
+  const m = priorityMarker(level, assessed);
+  const cls = isPriority(level) ? `prio p${level}` : assessed === false ? "prio na" : "prio none";
   if (decorative) return <span className={cls} aria-hidden="true">{m.short}</span>;
   return (
     <span className={cls}>
@@ -80,7 +89,8 @@ export function PriorityLegend() {
       {([1, 2, 3, 4] as PriorityLevel[]).map((k) => (
         <li key={k}><PriorityMarker level={k} decorative /> <span><span className="sr-only">{PRIORITY_INFO[k].short}: </span>{PRIORITY_INFO[k].name}</span></li>
       ))}
-      <li><span className="prio none" aria-hidden="true">—</span> <span>no finding (not a statement of legitimacy) or not assessed yet</span></li>
+      <li><span className="prio none" aria-hidden="true">—</span> <span>assessed, no finding (not a statement of legitimacy)</span></li>
+      <li><span className="prio na" aria-hidden="true">n/a</span> <span>not assessed (no risk record: failed fetch, risk assessment off or unavailable)</span></li>
     </ul>
   );
 }
@@ -107,9 +117,9 @@ export function MockNotice({ kind }: { kind: DataKind }) {
 }
 
 // ------------------------------------------------------------------ overview
-function RiskTile(props: { k: string; v: ReactNode; h?: ReactNode; warn?: boolean }) {
+function RiskTile(props: { k: string; v: ReactNode; h?: ReactNode; warn?: boolean; cls?: string }) {
   return (
-    <div className={props.warn ? "tile warn" : "tile"}>
+    <div className={["tile", props.warn ? "warn" : "", props.cls ?? ""].filter(Boolean).join(" ")}>
       <div className="k">{props.k}</div>
       <div className="v">{props.v}</div>
       {props.h && <div className="h">{props.h}</div>}
@@ -121,6 +131,22 @@ function SourceTile({ s, skew, maxAgeDays }: { s: IndicatorSource; skew: number;
   const now = useNow() + skew;
   const f = sourceFreshness(s, now, maxAgeDays * 86400);
   const checked = s.checked_at ?? s.retrieved_at;
+  if (f.state === "superseded") {
+    return (
+      <RiskTile
+        cls="superseded"
+        k="Screening source (superseded)"
+        v={<>{sourceName(s.source_id)} <span className="chip">superseded by {sourceName(s.superseded_by ?? "")}</span></>}
+        h={
+          <>
+            <code>{s.source_id}</code>{s.authority && <> · authority <code>{s.authority}</code></>} · last checked{" "}
+            {checked ? ago(checked, now) : "never"} · not a current, independent source: the newer
+            source of the same list is used
+          </>
+        }
+      />
+    );
+  }
   return (
     <RiskTile
       warn={f.state !== "fresh"}
@@ -128,7 +154,7 @@ function SourceTile({ s, skew, maxAgeDays }: { s: IndicatorSource; skew: number;
       v={<>{sourceName(s.source_id)}{f.state === "stale" && <> <span className="chip stale">STALE</span></>}</>}
       h={
         <>
-          <code>{s.source_id}</code> · version <code>{shortSha(s.sha256)}</code> · last checked{" "}
+          <code>{s.source_id}</code>{s.authority && s.authority !== s.source_id && <> · authority <code>{s.authority}</code></>} · version <code>{shortSha(s.sha256)}</code> · last checked{" "}
           {checked ? ago(checked, now) : "never"} · {s.active_indicators.toLocaleString("en-US")} active listings
           {f.localFile && " · loaded from a local file (test or offline copy)"}
           {f.state === "stale" && ` · not refreshed within ${maxAgeDays} days: listings may be out of date`}
@@ -143,17 +169,22 @@ export const RiskOverview = memo(function RiskOverview(props: {
   error: string | null;
   skew: number;
   kind: DataKind;
+  /** Collector counter `risk_unavailable`: why the risk engine could not start (null: it runs). */
+  riskUnavailable?: string | null;
 }) {
-  const { data, error, skew, kind } = props;
+  const { data, error, skew, kind, riskUnavailable } = props;
   const now = Date.now() / 1000 + skew; // only for the availability headline (sources tick in SourceTile)
   const sum = data?.summary ?? null;
   const eng = data?.engine ?? null;
   const maxAgeDays = eng?.indicator_max_age_days ?? SOURCE_MAX_AGE_DAYS;
   const avail = screeningAvailability(sum?.sources, now, maxAgeDays);
-  const base = baselineProgress(eng?.anomaly_reference_size, eng?.anomaly_min_reference ?? ANOMALY_MIN_REFERENCE);
+  const need = eng?.anomaly_min_reference ?? ANOMALY_MIN_REFERENCE;
+  const base = baselineProgress(eng?.anomaly_reference_size, need);
   const prio = sum?.by_priority ?? {};
   const openAlerts = (sum?.alerts_by_status?.new ?? 0) + (sum?.alerts_by_status?.under_review ?? 0);
   const lc = sum?.lifecycle ?? {};
+  const sup = supervisedTile(eng?.supervised);
+  const screened = data?.enabled === true && avail.available;
 
   return (
     <section className="card risk" aria-labelledby="risk-h" style={{ marginTop: 16 }}>
@@ -165,6 +196,11 @@ export const RiskOverview = memo(function RiskOverview(props: {
       <MockNotice kind={kind} />
       {error && <p className="err">{data ? "Could not refresh risk summary (showing the last loaded data)" : "Could not load the risk summary"}: {error}</p>}
       {!data && !error && <p className="muted">Loading…</p>}
+      {riskUnavailable && (
+        <p className="err small" role="note">
+          The collector reports that risk assessment is unavailable: <code>{riskUnavailable}</code>
+        </p>
+      )}
       {data && !data.enabled && (
         <p className="notice">
           Risk intelligence has no data in this database (collected by an older collector, or risk
@@ -183,16 +219,12 @@ export const RiskOverview = memo(function RiskOverview(props: {
             warn={!base.ready}
             k="Anomaly baseline"
             v={eng?.anomaly_reference_size == null ? "—"
-              : base.ready ? `${eng.anomaly_reference_size.toLocaleString("en-US")} ready` : `${eng.anomaly_reference_size} / 500`}
+              : base.ready ? `${eng.anomaly_reference_size.toLocaleString("en-US")} ready` : `${eng.anomaly_reference_size.toLocaleString("en-US")} / ${need.toLocaleString("en-US")}`}
             h={base.ready
-              ? "reference transactions (500 needed): anomalies are reported"
+              ? `reference transactions (${need.toLocaleString("en-US")} needed): anomalies are reported`
               : `reference transactions: ${base.text}; no anomaly is reported until then`}
           />
-          <RiskTile
-            k="Supervised model"
-            v={LAYER_TEXT.supervised}
-            h={eng?.supervised?.reason ? `gate: ${eng.supervised.reason}` : "no model passed the promotion gate"}
-          />
+          <RiskTile k="Supervised model" v={sup.v} h={sup.h} />
           <RiskTile
             k="Assessment latency"
             v={eng?.risk_latency_ms_p50 == null && sum?.latency_ms.p50 == null ? "—" : `p50 ${formatMs(eng?.risk_latency_ms_p50 ?? sum?.latency_ms.p50)}`}
@@ -207,7 +239,11 @@ export const RiskOverview = memo(function RiskOverview(props: {
           <RiskTile
             k={`Assessed (${data.window_hours} h)`}
             v={sum ? `${sum.assessed.toLocaleString("en-US")} / ${sum.fetched.toLocaleString("en-US")}` : "—"}
-            h={sum ? `of fetched · P1 ${prio["1"] ?? 0} · P2 ${prio["2"] ?? 0} · P3 ${prio["3"] ?? 0} · P4 ${prio["4"] ?? 0} · no finding ${prio.none ?? 0}` : undefined}
+            warn={sum !== null && !screened}
+            h={!sum ? undefined
+              : screened
+                ? `of fetched · P1 ${prio["1"] ?? 0} · P2 ${prio["2"] ?? 0} · P3 ${prio["3"] ?? 0} · P4 ${prio["4"] ?? 0} · no finding ${prio.none ?? 0}`
+                : `of fetched · nothing was screened (no source loaded), so “no finding” is not meaningful · P3 ${prio["3"] ?? 0} · P4 ${prio["4"] ?? 0} · without an anomaly ${prio.none ?? 0}`}
           />
           <RiskTile
             k="Open alerts"
@@ -254,7 +290,9 @@ function MatchEvidence({ m, skew }: { m: Partial<ScreeningMatch>; skew?: number 
         {parties.length === 1 ? `: ${parties[0]}` : ""} <span className="muted">({LISTING_CAVEAT})</span>
       </p>
       <dl className="kv small">
-        <dt>Source</dt><dd><code>{m.source_id ?? "—"}</code>{m.source_version ? <> version <code>{m.source_version}</code></> : null}</dd>
+        <dt>Source</dt><dd><code>{m.source_id ?? "—"}</code>{m.source_version ? <> version <code>{m.source_version}</code></> : null}
+          {m.authority && m.authority !== m.source_id ? <> · authority <code>{m.authority}</code></> : null}
+          {m.metadata_version ? <> · metadata <code>{m.metadata_version}</code></> : null}</dd>
         {m.category && <><dt>Category</dt><dd>{m.category}</dd></>}
         {parties.length > 1 && <><dt>Listed parties</dt><dd><ul className="plain">{parties.map((p) => <li key={p}>{p}</li>)}</ul></dd></>}
         <dt>Reference{refs.length > 1 ? "s" : ""}</dt>
@@ -327,7 +365,7 @@ function AlertItem({ a, onSelect, skew }: { a: Alert; onSelect: (txid: string) =
       </p>
       {a.note && <p className="small">Reviewer note: {a.note}</p>}
       <details>
-        <summary>Evidence and transactions</summary>
+        <summary>Evidence and transactions<span className="sr-only"> for alert #{a.id}: {a.title}</span></summary>
         {ev.match && <MatchEvidence m={ev.match} skew={skew} />}
         {ev.relation && <RelationEvidence r={ev.relation} onSelect={onSelect} />}
         {ev.limitation && <p className="small muted">Limitation: {ev.limitation}</p>}
@@ -351,6 +389,9 @@ function AlertItem({ a, onSelect, skew }: { a: Alert; onSelect: (txid: string) =
   );
 }
 
+/** Alerts rendered before "Show all": each one has interactive controls (tab stops). */
+export const QUEUE_INITIAL = 20;
+
 const FILTER_LABEL: Record<string, string> = { all: "All statuses", open: "Open (new or under review)" };
 
 export const InvestigationQueue = memo(function InvestigationQueue(props: {
@@ -361,8 +402,12 @@ export const InvestigationQueue = memo(function InvestigationQueue(props: {
   onSelect: (txid: string) => void;
   skew: number;
   kind: DataKind;
+  riskState?: RiskState;
 }) {
-  const { alerts, error, filter, onFilter, onSelect, skew, kind } = props;
+  const { alerts, error, filter, onFilter, onSelect, skew, kind, riskState = "ok" } = props;
+  const [showAll, setShowAll] = useState(false);
+  const shown = alerts && !showAll ? alerts.slice(0, QUEUE_INITIAL) : alerts;
+  const filterText = filter ? ` with status “${FILTER_LABEL[filter] ?? alertStatusLabel(filter)}”` : "";
   return (
     <section className="card" aria-labelledby="queue-h">
       <h2 id="queue-h">Investigation queue</h2>
@@ -382,13 +427,20 @@ export const InvestigationQueue = memo(function InvestigationQueue(props: {
       </div>
       {error && <p className="err">{alerts ? "Could not refresh alerts (showing the last loaded list)" : "Could not load alerts"}: {error}</p>}
       {alerts === null && !error && <p className="muted">Loading…</p>}
-      {alerts !== null && alerts.length === 0 && (
-        <p className="muted">No alerts{filter ? ` with status “${FILTER_LABEL[filter] ?? alertStatusLabel(filter)}”` : ""}.</p>
-      )}
+      {alerts !== null && alerts.length === 0 && <p className="muted">{emptyRiskText("alerts", riskState, filterText)}</p>}
+      {alerts !== null && alerts.length > 0 && riskState === "no-screening" && <p className="muted small">{NO_SCREENING_TEXT}.</p>}
       {alerts !== null && alerts.length > 0 && (
-        <ul className="alerts scroll-y" aria-label="Alerts, open first, then by priority and last seen">
-          {alerts.map((a) => <AlertItem key={a.id} a={a} onSelect={onSelect} skew={skew} />)}
-        </ul>
+        <>
+          <a className="skip-inline" href="#findings-h">Skip the alert list to recent findings</a>
+          <ul className="alerts scroll-y" aria-label="Alerts, open first, then by priority and last seen">
+            {(shown ?? []).map((a) => <AlertItem key={a.id} a={a} onSelect={onSelect} skew={skew} />)}
+          </ul>
+          {alerts.length > QUEUE_INITIAL && (
+            <button type="button" className="linkbtn small" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+              {showAll ? `Show the first ${QUEUE_INITIAL} only` : `Show all ${alerts.length} alerts`}
+            </button>
+          )}
+        </>
       )}
       <p className="muted small">
         Grouped: repeats of the same address, relation or anomaly type update one item. Up to 200
@@ -406,18 +458,18 @@ export const RecentFindings = memo(function RecentFindings(props: {
   onSelect: (txid: string) => void;
   skew: number;
   kind: DataKind;
+  riskState?: RiskState;
 }) {
-  const { findings, error, selected, onSelect, skew, kind } = props;
+  const { findings, error, selected, onSelect, skew, kind, riskState = "ok" } = props;
   return (
     <section className="card" aria-labelledby="findings-h">
-      <h2 id="findings-h">Recent findings</h2>
+      <h2 id="findings-h" tabIndex={-1}>Recent findings</h2>
       <p className="muted small">Assessed transactions with a finding (P1–P4), newest first. Select one to see its full assessment.</p>
       <MockNotice kind={kind} />
       {error && <p className="err">{findings ? "Could not refresh findings (showing the last loaded list)" : "Could not load findings"}: {error}</p>}
       {findings === null && !error && <p className="muted">Loading…</p>}
-      {findings !== null && findings.length === 0 && (
-        <p className="muted">No findings yet. Absence of findings is not a statement that transactions are legitimate.</p>
-      )}
+      {findings !== null && findings.length === 0 && <p className="muted">{emptyRiskText("findings", riskState)}</p>}
+      {findings !== null && findings.length > 0 && riskState === "no-screening" && <p className="muted small">{NO_SCREENING_TEXT}.</p>}
       {findings !== null && findings.length > 0 && (
         <ul className="findings scroll-y">
           {findings.map((f) => {
@@ -538,7 +590,8 @@ export function RiskAssessment(props: {
             <span key={s.source_id}>
               {i > 0 && "; "}
               <code>{s.source_id}</code> version <code>{s.version}</code>, checked {formatDuration(s.age_s)} before evaluation
-              {s.stale && <> <span className="chip stale">STALE</span></>}
+              {s.superseded_by ? <> <span className="chip">superseded by {sourceName(s.superseded_by)}</span></>
+                : s.stale && <> <span className="chip stale">STALE</span></>}
             </span>
           ))}
         </p>
@@ -551,6 +604,10 @@ export function RiskAssessment(props: {
         <p className="small">
           Coverage: {gr.coverage.parents_observed} of {gr.coverage.parents} parent transaction
           {gr.coverage.parents === 1 ? "" : "s"} observed by this collector
+          {typeof gr.coverage.parents_checked === "number" && gr.coverage.parents_checked < gr.coverage.parents
+            ? ` · ${gr.coverage.parents_checked} looked up (capped)` : ""}
+          {typeof gr.relations_total === "number" && gr.relations_total > (gr.relations ?? []).length
+            ? ` · ${gr.relations_total} relations found, ${(gr.relations ?? []).length} shown` : ""}
         </p>
       )}
       {gr.limitation && <p className="small muted">Limitation: {gr.limitation}</p>}

@@ -4,9 +4,13 @@ import { ApiError, type Info } from "../lib/api";
 import { revealIfStacked } from "../lib/dom";
 import {
   ago,
+  applyRecentPage,
   confirmedLabel,
   connectionView,
   eventsUrl,
+  explorerHref,
+  FEED_LAG_S,
+  feedLag,
   filterSort,
   formatDuration,
   formatSat,
@@ -16,6 +20,7 @@ import {
   OUTAGE_LABEL,
   outageDuration,
   reconnectDelay,
+  relatedExplorerHref,
   shortTxid,
   sourceBadge,
   throughputSeries,
@@ -33,6 +38,7 @@ import {
   filterAlerts,
   priorityByTxid,
   riskApi,
+  riskState as riskStateOf,
   type Alert,
   type Finding,
   type PriorityLevel,
@@ -62,6 +68,8 @@ const SORTS: Record<SortKey, string> = {
 const STATUS_POLL_MS = 5000;
 const STATS_POLL_MS = 15000;
 const RISK_POLL_MS = 15000;
+/** Fallback for the event stream: poll the newest rows while it is not open or the feed lags. */
+const FEED_POLL_MS = 15000;
 const ALERTS_LIMIT = 200;
 
 // Recharts' default tooltip is white with inherited text colour: unreadable in dark mode.
@@ -86,11 +94,11 @@ function describeRiskError(e: unknown): string {
   return errText(e);
 }
 
-function describeLiveError(e: unknown): string {
-  if (e instanceof ApiError && e.code === "live_no_data") {
-    return "No live data yet: start `chainwatch --config configs/live.yaml live-collect`.";
-  }
-  return `Live API unavailable: ${errText(e)}`;
+type LiveProblem = { noData: true } | { noData: false; text: string };
+
+function describeLiveError(e: unknown): LiveProblem {
+  if (e instanceof ApiError && e.code === "live_no_data") return { noData: true };
+  return { noData: false, text: `Live API unavailable: ${errText(e)}` };
 }
 
 function SourceBadge({ status }: { status: LiveStatus | null }) {
@@ -100,9 +108,17 @@ function SourceBadge({ status }: { status: LiveStatus | null }) {
 }
 
 /** Re-renders each second (staleness depends on the clock); nothing else does. */
-function ConnectionBadge(props: { status: LiveStatus | null; statusAt: number | null; apiError: boolean }) {
+function ConnectionBadge(props: {
+  status: LiveStatus | null;
+  statusAt: number | null;
+  apiError: boolean;
+  noData: boolean;
+  refreshing: boolean;
+}) {
   const now = useNow();
-  const v = connectionView(props.status, { now, statusAt: props.statusAt, apiError: props.apiError });
+  const v = connectionView(props.status, {
+    now, statusAt: props.statusAt, apiError: props.apiError, noData: props.noData, refreshing: props.refreshing,
+  });
   return (
     <>
       <span className={`badge conn ${v.tone}`} role="status">
@@ -113,12 +129,13 @@ function ConnectionBadge(props: { status: LiveStatus | null; statusAt: number | 
   );
 }
 
-function Ago({ ts }: { ts: number }) {
-  return <>{ago(ts, useNow())}</>;
+/** `skew` (server minus client clock) puts server timestamps on the client's clock. */
+function Ago({ ts, skew = 0 }: { ts: number; skew?: number }) {
+  return <>{ago(ts, useNow() + skew)}</>;
 }
 
-function LastObservationTile({ status }: { status: LiveStatus | null }) {
-  const now = useNow();
+function LastObservationTile({ status, skew }: { status: LiveStatus | null; skew: number }) {
+  const now = useNow() + skew;
   const t = status?.last_observation_at ?? null;
   return (
     <Tile
@@ -213,8 +230,9 @@ const FeedTable = memo(function FeedTable(props: {
   onSelect: (txid: string) => void;
   /** Priorities known from /findings, for rows the event stream sent before their assessment. */
   findingPriority: Map<string, PriorityLevel>;
+  skew: number;
 }) {
-  const { rows, selected, onSelect, findingPriority } = props;
+  const { rows, selected, onSelect, findingPriority, skew } = props;
   return (
     <table>
       <thead>
@@ -229,8 +247,8 @@ const FeedTable = memo(function FeedTable(props: {
           const isSel = selected === r.txid;
           return (
             <tr key={r.id} className={isSel ? "clickable selected" : "clickable"} onClick={() => onSelect(r.txid)}>
-              <td><PriorityMarker level={r.risk_priority ?? findingPriority.get(r.txid) ?? null} /></td>
-              <td className="muted nowrap"><Ago ts={r.first_seen} /></td>
+              <td><PriorityMarker level={r.risk_priority ?? findingPriority.get(r.txid) ?? null} assessed={r.risk_assessed} /></td>
+              <td className="muted nowrap"><Ago ts={r.first_seen} skew={skew} /></td>
               <td>
                 <button type="button" className="rowbtn" aria-pressed={isSel}
                         aria-label={`Show details for transaction ${r.txid}`}
@@ -263,11 +281,13 @@ function locktimeText(f: NonNullable<LiveDetail["features"]>): string {
 
 function Detail({ detail, onSelect, kind }: { detail: LiveDetail; onSelect: (txid: string) => void; kind: DataKind }) {
   const f = detail.features;
+  const href = explorerHref(detail.explorer_url, kind);
   return (
     <div>
       <p>
         <code style={{ wordBreak: "break-all" }}>{detail.txid}</code>{" "}
-        <a href={detail.explorer_url} target="_blank" rel="noopener noreferrer">View on mempool.space ↗</a>
+        {href ? <a href={href} target="_blank" rel="noopener noreferrer">View on mempool.space ↗</a>
+          : <span className="muted small">{kind === "real" ? "(no explorer link)" : "(mock data: no explorer link)"}</span>}
       </p>
       {detail.outcome === "failed" ? (
         <p className="muted">Details could not be fetched ({detail.error}). The transaction may have been replaced, mined or evicted.</p>
@@ -293,11 +313,14 @@ function Detail({ detail, onSelect, kind }: { detail: LiveDetail; onSelect: (txi
           <ul className="refs">
             {f.input_refs.map((ref) => {
               const [parent = "", vout = ""] = ref.split(":");
+              const parentHref = relatedExplorerHref(detail.explorer_url, kind, detail.txid, parent);
               return (
                 <li key={ref}>
-                  <a href={detail.explorer_url.replace(detail.txid, parent)} target="_blank" rel="noopener noreferrer">
-                    <code>{shortTxid(parent)}</code>
-                  </a>
+                  {parentHref ? (
+                    <a href={parentHref} target="_blank" rel="noopener noreferrer">
+                      <code>{shortTxid(parent)}</code>
+                    </a>
+                  ) : <code>{shortTxid(parent)}</code>}
                   :{vout}
                 </li>
               );
@@ -319,7 +342,8 @@ function Detail({ detail, onSelect, kind }: { detail: LiveDetail; onSelect: (txi
 export default function LiveView({ info }: { info: Info }) {
   const [status, setStatus] = useState<LiveStatus | null>(null);
   const [statusAt, setStatusAt] = useState<number | null>(null); // client seconds of last good status
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<LiveProblem | null>(null);
+  const [refreshing, setRefreshing] = useState(false); // tab visible again, fresh status pending
   const [stats, setStats] = useState<{ data: LiveStats; serverAt: number } | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [outages, setOutages] = useState<Outage[] | null>(null);
@@ -344,6 +368,9 @@ export default function LiveView({ info }: { info: Info }) {
   const detailRef = useRef<HTMLDivElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const skewRef = useRef(0); // server clock minus client clock, from the last status
+  const statusRef = useRef<LiveStatus | null>(null);
+  const feedRef = useRef<LiveRow[]>([]);
+  feedRef.current = feed;
 
   const enabled = info.live_enabled;
 
@@ -386,6 +413,7 @@ export default function LiveView({ info }: { info: Info }) {
           skewRef.current = s.server_time - at;
           setSkew((old) => (Math.abs(old - skewRef.current) > 2 ? skewRef.current : old));
         }
+        statusRef.current = s;
         setStatus(s);
         setStatusAt(at);
         setProblem(null);
@@ -393,6 +421,7 @@ export default function LiveView({ info }: { info: Info }) {
         if (alive) setProblem(describeLiveError(e));
       } finally {
         busy.status = false;
+        if (alive) setRefreshing(false);
       }
     };
     const pollStats = async () => {
@@ -434,7 +463,9 @@ export default function LiveView({ info }: { info: Info }) {
     };
     const onVisibility = () => {
       if (!document.hidden) {
+        setRefreshing(true);
         void pollStatus();
+        void pollFeed(true);
         void pollStats();
         void pollRisk();
       }
@@ -445,6 +476,7 @@ export default function LiveView({ info }: { info: Info }) {
     const t1 = setInterval(pollStatus, STATUS_POLL_MS);
     const t2 = setInterval(pollStats, STATS_POLL_MS);
     const t3 = setInterval(pollRisk, RISK_POLL_MS);
+    const t4 = setInterval(() => void pollFeed(false), FEED_POLL_MS);
     document.addEventListener("visibilitychange", onVisibility);
 
     // Server-sent events. On network errors the browser reconnects by itself (with Last-Event-ID).
@@ -453,16 +485,52 @@ export default function LiveView({ info }: { info: Info }) {
     let retry: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
     let lastId: number | null = null;
+    let streamOpen = false;
+    let feedBusy = false;
+    /** Fallback while the stream is not open (HTTP 429/503, backoff) or the feed lags behind the
+     * collector; also detects a restored / reset database (server ids below `lastId`). */
+    const pollFeed = async (force: boolean) => {
+      if (feedBusy || document.hidden) return;
+      if (!force && streamOpen && feedLag(statusRef.current, feedRef.current) === null) return;
+      feedBusy = true;
+      const sentAfter = lastId;
+      try {
+        const r = await liveApi.recent(200);
+        if (!alive) return;
+        // lastId / reset depend only on the page; the feed itself is merged functionally so a
+        // stream row that arrived meanwhile is kept
+        const next = applyRecentPage([], sentAfter, r.rows, lastId);
+        lastId = next.lastId;
+        setFeed((f) => (next.reset ? next.feed : mergeFeed(f, r.rows)));
+        if (next.reset) {
+          // the open stream resumes after the old database's ids and would never deliver: reopen
+          es?.close();
+          if (retry !== null) clearTimeout(retry);
+          retry = null;
+          attempt = 0;
+          open();
+        }
+      } catch {
+        // the status poll reports API problems
+      } finally {
+        feedBusy = false;
+      }
+    };
     const open = () => {
       if (!alive) return;
+      streamOpen = false;
       setStream("connecting");
       const src = new EventSource(eventsUrl(lastId));
       es = src;
       src.onopen = () => {
+        if (es !== src) return;
         attempt = 0;
+        streamOpen = true;
         setStream("open");
       };
       src.onerror = () => {
+        if (es !== src) return;
+        streamOpen = false;
         if (src.readyState === EventSource.CLOSED) {
           src.close();
           if (!alive) return;
@@ -474,6 +542,7 @@ export default function LiveView({ info }: { info: Info }) {
         }
       };
       src.addEventListener("tx", (ev) => {
+        if (es !== src) return;
         let row: LiveRow;
         try {
           row = JSON.parse((ev as MessageEvent<string>).data) as LiveRow;
@@ -501,6 +570,7 @@ export default function LiveView({ info }: { info: Info }) {
       clearInterval(t1);
       clearInterval(t2);
       clearInterval(t3);
+      clearInterval(t4);
       if (retry !== null) clearTimeout(retry);
       document.removeEventListener("visibilitychange", onVisibility);
       es?.close();
@@ -561,6 +631,8 @@ export default function LiveView({ info }: { info: Info }) {
     [alerts, alertFilter],
   );
   const kind: DataKind = sourceBadge(status).kind;
+  const riskState = riskStateOf(risk, Date.now() / 1000 + skew);
+  const lag = problem === null ? feedLag(status, feed) : null;
 
   if (!enabled) return <Disabled />;
 
@@ -568,6 +640,7 @@ export default function LiveView({ info }: { info: Info }) {
   const c = status?.collector?.counters ?? {};
   const upstream = num(c.upstream_errors);
   const internal = num(c.internal_errors);
+  const riskUnavailable = typeof c.risk_unavailable === "string" && c.risk_unavailable ? c.risk_unavailable : null;
   const lastFull = throughput.lastComplete;
   const shownDetail = detail && detail.txid === selected ? detail : null;
 
@@ -575,7 +648,8 @@ export default function LiveView({ info }: { info: Info }) {
     <div>
       <div className="live-head">
         <SourceBadge status={status} />
-        <ConnectionBadge status={status} statusAt={statusAt} apiError={problem !== null} />
+        <ConnectionBadge status={status} statusAt={statusAt} apiError={problem !== null && !problem.noData}
+                         noData={problem?.noData === true} refreshing={refreshing} />
         <span className="muted">
           event stream: {stream} · source: {status?.source_url ?? "—"}
           {status?.via ? ` · via ${status.via}` : ""}
@@ -587,7 +661,13 @@ export default function LiveView({ info }: { info: Info }) {
         Sampling: {status ? `${(status.coverage.sample_rate * 100).toFixed(0)}% of announced txids` : "—"}, at most{" "}
         {status?.coverage.fetch_per_minute ?? "—"} detail requests/min.
       </div>
-      {problem && <p className="err" role="alert">{problem}</p>}
+      {problem && !problem.noData && <p className="err" role="alert">{problem.text}</p>}
+      {problem?.noData && (
+        <p className="notice" role="status">
+          No live data yet (collector not started). Start it with{" "}
+          <code>chainwatch --config configs/live.yaml live-collect</code>.
+        </p>
+      )}
 
       <div className="tiles">
         <Tile k="Announced txids (last full minute)" v={lastFull?.announced != null ? String(lastFull.announced) : "—"}
@@ -605,17 +685,17 @@ export default function LiveView({ info }: { info: Info }) {
               h={status?.collector
                 ? `since collector start${upstream !== null || internal !== null ? ` · ${upstream ?? 0} upstream / ${internal ?? 0} internal errors` : ""}`
                 : undefined} />
-        <LastObservationTile status={status} />
+        <LastObservationTile status={status} skew={skew} />
         <Tile k="Observed share (24 h)" v={status?.availability_24h?.observed_share != null ? `${(status.availability_24h.observed_share * 100).toFixed(1)}%` : "—"}
               h={status?.availability_24h ? `down ${formatDuration(status.availability_24h.down_s)} of ${formatDuration(status.availability_24h.window_s)} · ${status.availability_24h.sequence_gaps} missed-update gaps` : undefined} />
       </div>
 
-      <RiskOverview data={risk} error={riskError} skew={skew} kind={kind} />
+      <RiskOverview data={risk} error={riskError} skew={skew} kind={kind} riskUnavailable={riskUnavailable} />
       <div className="split" style={{ marginTop: 16 }}>
         <InvestigationQueue alerts={shownAlerts} error={alertsError} filter={alertFilter} onFilter={onAlertFilter}
-                            onSelect={onSelectFar} skew={skew} kind={kind} />
+                            onSelect={onSelectFar} skew={skew} kind={kind} riskState={riskState} />
         <RecentFindings findings={findings} error={findingsError} selected={selected} onSelect={onSelectFar}
-                        skew={skew} kind={kind} />
+                        skew={skew} kind={kind} riskState={riskState} />
       </div>
 
       <div className="split" style={{ marginTop: 16 }}>
@@ -658,7 +738,14 @@ export default function LiveView({ info }: { info: Info }) {
 
       <div className="split" style={{ marginTop: 16 }}>
         <div className="card">
-          <h2>Incoming transactions</h2>
+          <h2 id="feed-h">Incoming transactions</h2>
+          {lag !== null && (
+            <p className="notice" role="status">
+              This page’s feed has not updated for {formatDuration(lag)} although the collector reports
+              newer observations (more than {FEED_LAG_S / 60} minutes behind). It is catching up by polling
+              every {FEED_POLL_MS / 1000} s; reloading the page also helps.
+            </p>
+          )}
           <div className="filters">
             <label>
               Sort
@@ -684,7 +771,7 @@ export default function LiveView({ info }: { info: Info }) {
             </label>
           </div>
           <div className="scroll feed">
-            <FeedTable rows={rows} selected={selected} onSelect={onSelect} findingPriority={findingPriority} />
+            <FeedTable rows={rows} selected={selected} onSelect={onSelect} findingPriority={findingPriority} skew={skew} />
             {rows.length === 0 && <p className="muted">No observations match yet.</p>}
           </div>
           <PriorityLegend />

@@ -80,10 +80,10 @@ export default function ReplayView({ info }: { info: Info }) {
             ))}
           </select>
         </label>
-        <label>
-          Replay policy
+        <div className="field">
+          <span aria-hidden="true">Replay policy</span>
           <PolicyPicker value={policy} available={available} onChange={changePolicy} />
-        </label>
+        </div>
         <label>
           Show
           <select value={labels} onChange={(e) => changeLabels(e.target.value)}>

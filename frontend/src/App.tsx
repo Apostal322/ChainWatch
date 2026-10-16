@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api, type Info } from "./lib/api";
+import { shortCommit } from "./lib/format";
 import ReplayView from "./components/ReplayView";
 import PerformanceView from "./components/PerformanceView";
 import ModelsView from "./components/ModelsView";
@@ -16,9 +17,11 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("Replay");
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  useEffect(() => {
+  const loadInfo = useCallback(() => {
+    setError(null);
     api.info().then(setInfo).catch((e) => setError(String(e.message ?? e)));
   }, []);
+  useEffect(loadInfo, [loadInfo]);
 
   useEffect(() => {
     document.title = `${tab} · ChainWatch`;
@@ -40,15 +43,19 @@ export default function App() {
   };
 
   const live = tab === "Live monitor";
-  const synthetic = info?.data_mode === "synthetic" && !live;
+  const syntheticData = info?.data_mode === "synthetic";
+  const synthetic = syntheticData && !live;
   return (
     <div className="app">
+      <a className="skip-link" href="#main">Skip to content</a>
       <header className="top">
         <h1>ChainWatch</h1>
         <span className="sub">
           {live
             ? "Live Bitcoin mempool monitor"
-            : "Historical replay of illicit-transaction risk ranking on Elliptic++"}
+            : syntheticData
+              ? "Replay of risk ranking on synthetic demo data (Elliptic++ schema)"
+              : "Historical replay of illicit-transaction risk ranking on Elliptic++"}
         </span>
         {info && !live && (
           <span className={`badge ${synthetic ? "synthetic" : ""}`}>
@@ -66,12 +73,21 @@ export default function App() {
       )}
       {!live && (
         <div className="notice">
-          Replay of a published, historical dataset: not live blockchain monitoring. Scores rank
+          {synthetic
+            ? "Replay of synthetic demo data shaped like the published Elliptic++ dataset (not the dataset itself): not live blockchain monitoring."
+            : "Replay of a published, historical dataset: not live blockchain monitoring."}{" "}
+          Scores rank
           transactions by similarity to past illicit labels. They are not verdicts and not calibrated
           probabilities. “Unknown” transactions are unlabelled, never assumed licit.
         </div>
       )}
-      {error && <p className="err" role="alert">API unavailable: {error}</p>}
+      {error && (
+        <p className="err" role="alert">
+          API unavailable: {error}{" "}
+          <button type="button" className="linkbtn" onClick={loadInfo}>Retry</button>
+        </p>
+      )}
+      <main id="main" tabIndex={-1}>
       <nav className="tabs" role="tablist" aria-label="Dashboard sections">
         {TABS.map((t, i) => (
           <button key={t} ref={(el) => { tabRefs.current[i] = el; }} type="button" role="tab"
@@ -92,8 +108,9 @@ export default function App() {
           {tab === t && info && t === "Live monitor" && <LiveView info={info} />}
         </div>
       ))}
+      </main>
       <footer className="muted" style={{ marginTop: 24, fontSize: 12 }}>
-        {info && `API v${info.service_version} · ${info.n_models} model versions · commit ${info.git_commit?.slice(0, 10) ?? "n/a"}`}
+        {info && `API v${info.service_version} · ${info.n_models} model versions · commit ${shortCommit(info.git_commit)}`}
       </footer>
     </div>
   );

@@ -3,8 +3,16 @@ import {
   ALERT_STATUS_LABEL,
   alertEvidence,
   anomalyStatusText,
+  ANOMALY_MIN_REFERENCE,
   baselineProgress,
+  emptyRiskText,
   FORBIDDEN_WORDS,
+  NO_SCREENING_TEXT,
+  RISK_UNAVAILABLE_TEXT,
+  riskState,
+  sourceName,
+  supervisedTile,
+  type RiskSummary,
   filterAlerts,
   findingLayers,
   findingLines,
@@ -90,6 +98,10 @@ describe("priorities", () => {
       expect(priorityMarker(v as number).short).toBe("—");
     }
     expect(priorityMarker(null).aria).toMatch(/not assessed/);
+    // feed rows carry risk_assessed: "n/a" (not assessed) is distinct from "—" (no finding)
+    expect(priorityMarker(null, false)).toEqual({ short: "n/a", aria: expect.stringMatching(/^Not assessed/) });
+    expect(priorityMarker(null, true)).toEqual({ short: "—", aria: "No review priority: assessed, no finding" });
+    expect(priorityMarker(2, false).short).toBe("P2");
   });
 
   it("fills feed priorities from findings, newest first wins", () => {
@@ -180,16 +192,74 @@ describe("source freshness", () => {
     expect(stale.headline).toMatch(/^STALE/);
   });
 
+  it("does not count a superseded source as a current, independent source", () => {
+    const official = source({ source_id: "ofac-sdn", authority: "ofac-sdn", superseded_by: null });
+    // superseded: checked long ago, but the server reports stale=false; never "stale" here either
+    const mirror = source({ source_id: "ofac-sdn-mirror", authority: "ofac-sdn", superseded_by: "ofac-sdn", checked_at: 0, stale: false });
+    expect(sourceFreshness(mirror, 1000 + 30 * DAY).state).toBe("superseded");
+    const a = screeningAvailability([official, mirror], now);
+    expect(a).toMatchObject({ available: true, anyStale: false });
+    expect(a.headline).toBe("1 source loaded (1 superseded)");
+    expect(sourceName("ofac-sdn-mirror")).toBe("OFAC SDN (third-party mirror)");
+  });
+
   it("shortens hashes", () => {
     expect(shortSha("0123456789abcdef")).toBe("0123456789ab");
     expect(shortSha(null)).toBe("—");
   });
 
   it("reports anomaly baseline progress", () => {
-    expect(baselineProgress(120)).toEqual({ ready: false, text: "120 of 500 needed", share: 0.24 });
-    expect(baselineProgress(800).ready).toBe(true);
+    expect(ANOMALY_MIN_REFERENCE).toBe(1000); // DetectorConfig default
+    expect(baselineProgress(120)).toEqual({ ready: false, text: "120 of 1000 needed", share: 0.12 });
+    expect(baselineProgress(700, 1000)).toEqual({ ready: false, text: "700 of 1000 needed", share: 0.7 });
+    expect(baselineProgress(1000).ready).toBe(true);
+    expect(baselineProgress(800).ready).toBe(false);
     expect(baselineProgress(null).ready).toBe(false);
     expect(baselineProgress(800, 1000)).toMatchObject({ ready: false, text: "800 of 1000 needed" });
+  });
+});
+
+describe("risk availability", () => {
+  const summary = (over: Partial<RiskSummary> = {}, sources: IndicatorSource[] = [source()]): RiskSummary => ({
+    mode: "live",
+    enabled: true,
+    window_hours: 24,
+    summary: {
+      since: 0, fetched: 10, assessed: 10, not_assessed: 0, by_priority: {}, screening: {}, graph: {}, anomaly: {},
+      supervised: {}, assessments_with_layer_errors: 0, latency_ms: { p50: null, p95: null, max: null },
+      lifecycle: {}, alerts_by_status: {}, sources,
+    },
+    engine: null,
+    layers: null,
+    ...over,
+  });
+
+  it("distinguishes unavailable risk, missing screening data and normal operation", () => {
+    expect(riskState(null, 2000)).toBe("loading");
+    expect(riskState(summary({ enabled: false }), 2000)).toBe("unavailable");
+    expect(riskState(summary({ summary: null }), 2000)).toBe("unavailable");
+    expect(riskState(summary({}, []), 2000)).toBe("no-screening");
+    expect(riskState(summary(), 2000)).toBe("ok");
+  });
+
+  it("never says plain “No alerts” when nothing could raise one", () => {
+    expect(emptyRiskText("alerts", "ok")).toBe("No alerts.");
+    expect(emptyRiskText("alerts", "ok", " with status “New”")).toBe("No alerts with status “New”.");
+    expect(emptyRiskText("alerts", "unavailable")).toMatch(new RegExp(`^${RISK_UNAVAILABLE_TEXT}`));
+    expect(emptyRiskText("findings", "unavailable")).not.toMatch(/No findings yet/);
+    expect(emptyRiskText("alerts", "no-screening")).toContain(NO_SCREENING_TEXT);
+    expect(emptyRiskText("findings", "no-screening")).toContain("(P1/P2) cannot occur");
+    for (const st of ["ok", "unavailable", "no-screening"] as const) {
+      expect(emptyRiskText("alerts", st)).not.toMatch(FORBIDDEN_WORDS);
+      expect(emptyRiskText("findings", st)).not.toMatch(FORBIDDEN_WORDS);
+    }
+  });
+
+  it("derives the supervised tile from the reported state", () => {
+    expect(supervisedTile({ state: "abstaining", reason: null }).v).toBe("No validated model: abstaining");
+    expect(supervisedTile({ state: "abstaining", reason: "no gate" }).h).toBe("gate: no gate");
+    expect(supervisedTile(null).v).toBe("not reported");
+    expect(supervisedTile({ state: "active", reason: null }).v).toBe("State: active");
   });
 });
 
@@ -282,7 +352,7 @@ describe("explanations", () => {
         category: "sanctions", label: "P1; P2; P3", reference: "OFAC SDN profile 1; OFAC SDN profile 2", listed_on: null,
         party_designated_on: null, available_at: 0, programs: [] },
     ] };
-    expect(findingLines(f)[0].text).toBe("Pays to an address listed by OFAC SDN (third-party extraction) (P1 and 2 other parties)");
+    expect(findingLines(f)[0].text).toBe("Pays to an address listed by OFAC SDN (third-party mirror) (P1 and 2 other parties)");
   });
 
   it("describes roles and lifecycle", () => {

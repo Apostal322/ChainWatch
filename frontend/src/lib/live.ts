@@ -24,6 +24,8 @@ export interface LiveRow {
   flags: string[];
   /** Review priority of the assessment (1..4); null: no finding, or not assessed (yet). Absent before v0.7.0. */
   risk_priority?: PriorityLevel | null;
+  /** True when a risk record exists (a null priority then means "no finding"). Absent on older servers. */
+  risk_assessed?: boolean;
 }
 
 export interface LiveFeatures {
@@ -162,7 +164,8 @@ export function formatDuration(seconds: number | null | undefined): string {
   const s = Math.max(0, Math.round(seconds));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
-  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  if (s < 2 * 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
 
 /** Duration of an outage; open outages run until `now`. Gaps are instantaneous events. */
@@ -173,11 +176,77 @@ export function outageDuration(o: Outage, now: number): number | null {
 
 export const MAX_FEED = 500;
 
-/** Add new rows (newest first), drop duplicates by id, keep at most `max`. */
+/**
+ * Add rows (newest first), keep at most `max`. Rows are unique by id AND by txid: an incoming row
+ * replaces a held row with the same id or txid (it is the newer copy, e.g. now assessed).
+ */
 export function mergeFeed(feed: LiveRow[], incoming: LiveRow[], max = MAX_FEED): LiveRow[] {
-  const seen = new Set(feed.map((r) => r.id));
-  const fresh = incoming.filter((r) => !seen.has(r.id)).sort((a, b) => b.id - a.id);
-  return [...fresh, ...feed].slice(0, max);
+  if (incoming.length === 0) return feed;
+  const byTxid = new Map<string, LiveRow>();
+  for (const r of incoming) {
+    const prev = byTxid.get(r.txid);
+    if (!prev || r.id >= prev.id) byTxid.set(r.txid, r);
+  }
+  const ids = new Set([...byTxid.values()].map((r) => r.id));
+  const kept = feed.filter((r) => !byTxid.has(r.txid) && !ids.has(r.id));
+  return [...byTxid.values(), ...kept].sort((a, b) => b.id - a.id).slice(0, max);
+}
+
+/**
+ * Apply a page of the newest rows (`/v1/live/transactions?sort=id`) to the feed. `lastId` is the
+ * client's newest id when the request was SENT (every row up to it was stored by then, and ids
+ * never decrease), `lastIdNow` its newest id now (stream rows may have arrived meanwhile). When the
+ * page's newest id is below `lastId`, the database was restored or reset: the held rows belong to
+ * another database, so they are replaced and the id restarts from the page.
+ */
+export function applyRecentPage(
+  feed: LiveRow[],
+  lastId: number | null,
+  page: LiveRow[],
+  lastIdNow: number | null = lastId,
+  max = MAX_FEED,
+): { feed: LiveRow[]; lastId: number | null; reset: boolean } {
+  const serverMax = maxRowId(page);
+  if (lastId !== null && (serverMax === null || serverMax < lastId)) {
+    return { feed: mergeFeed([], page, max), lastId: serverMax, reset: true };
+  }
+  const ids = [lastIdNow, serverMax].filter((v): v is number => v !== null);
+  return { feed: mergeFeed(feed, page, max), lastId: ids.length ? Math.max(...ids) : null, reset: false };
+}
+
+/** Feed rows this far behind the collector's last observation (server seconds) count as not updating. */
+export const FEED_LAG_S = 120;
+
+/**
+ * Seconds the browser's feed lags behind the collector, when the collector says it is connected
+ * and observing but this page has received nothing newer for over `FEED_LAG_S`; otherwise null.
+ * Both timestamps are server clock, so client clock skew does not matter.
+ */
+export function feedLag(
+  status: Pick<LiveStatus, "connection" | "last_observation_at"> | null,
+  feed: Pick<LiveRow, "fetched_at">[],
+): number | null {
+  if (!status || status.connection !== "connected" || status.last_observation_at === null) return null;
+  if (feed.length === 0) return null; // initial load still pending, or the empty-feed message covers it
+  const newest = Math.max(...feed.map((r) => r.fetched_at));
+  const lag = status.last_observation_at - newest;
+  return lag > FEED_LAG_S ? lag : null;
+}
+
+/**
+ * Explorer link for a transaction, or null: never for mock / unconfirmed sources (the txid does not
+ * exist on the real network) and never for a URL that is not https.
+ */
+export function explorerHref(url: string | null | undefined, kind: SourceKind): string | null {
+  if (kind !== "real" || typeof url !== "string" || !url.startsWith("https:")) return null;
+  return url;
+}
+
+/** Explorer link for another transaction (e.g. a parent), derived from this transaction's link. */
+export function relatedExplorerHref(url: string | null | undefined, kind: SourceKind, txid: string, other: string): string | null {
+  const base = explorerHref(url, kind);
+  if (base === null || !base.includes(txid) || !/^[0-9a-f]{64}$/i.test(other)) return null;
+  return base.replace(txid, other);
 }
 
 export type SortKey = "newest" | "fee_rate" | "vsize" | "n_outputs" | "fee";
@@ -224,7 +293,8 @@ export function ago(ts: number, now: number): string {
   const s = Math.max(0, Math.round(now - ts));
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  return `${Math.floor(s / 3600)}h ago`;
+  if (s < 2 * 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 
 export function confirmedLabel(v: boolean | null | undefined): string {
@@ -271,13 +341,27 @@ export interface ConnectionView {
  */
 export function connectionView(
   status: LiveStatus | null,
-  opts: { now: number; statusAt: number | null; apiError: boolean },
+  opts: {
+    now: number;
+    statusAt: number | null;
+    apiError: boolean;
+    /** The API answered 503 live_no_data: reachable, but no collector has written yet. */
+    noData?: boolean;
+    /** The tab just became visible again and a fresh status is on its way. */
+    refreshing?: boolean;
+  },
 ): ConnectionView {
-  const { now, statusAt, apiError } = opts;
+  const { now, statusAt, apiError, noData = false, refreshing = false } = opts;
+  if (noData) {
+    return { tone: "off", label: "No live data", detail: "no live data yet (collector not started)" };
+  }
+  const age = statusAt === null ? Infinity : now - statusAt;
+  if (refreshing && !apiError && age > STATUS_STALE_S) {
+    return { tone: "off", label: "Refreshing…", detail: "refreshing…" };
+  }
   if (!status || statusAt === null) {
     return { tone: "off", label: "Status unknown", detail: apiError ? "live API unreachable" : "waiting for status" };
   }
-  const age = now - statusAt;
   if (apiError || age > STATUS_STALE_S) {
     return { tone: "off", label: "Status unknown", detail: `live API unreachable; last status ${ago(statusAt, now)}` };
   }

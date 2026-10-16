@@ -23,3 +23,11 @@ export function describeVersion(version: string): string {
   if (version === "phase1-xgboost-all") return "Phase 1 reference (steps 1–29)";
   return version;
 }
+
+/** Short git commit for the footer; keeps a "-dirty" suffix (uncommitted changes) when truncating. */
+export function shortCommit(c: string | null | undefined, n = 10): string {
+  if (!c) return "n/a";
+  const dirty = /-dirty$/.test(c);
+  const base = dirty ? c.slice(0, -"-dirty".length) : c;
+  return `${base.slice(0, n)}${dirty ? "-dirty" : ""}`;
+}

@@ -225,3 +225,16 @@ button.linkbtn { background: none; border: 0; padding: 0; font: inherit; color: 
   .risk-block .kv, .evidence .kv, .risk .kv { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .risk-block .kv dt, .evidence .kv dt, .risk .kv dt { margin-top: 6px; }
 }
+
+/* ---- audit fixes: skip links, landmarks, superseded sources, wrapping at narrow widths ---- */
+.skip-link { position: absolute; left: 8px; top: -40px; z-index: 10; background: var(--surface); color: var(--link);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+.skip-link:focus { top: 8px; }
+.skip-inline { position: absolute; left: -9999px; }
+.skip-inline:focus { position: static; display: inline-block; margin: 2px 0 6px; font-size: 12.5px; }
+main:focus { outline: none; }
+.filters .field { display: grid; gap: 4px; font-size: 12px; color: var(--ink-2); }
+.tile.superseded { opacity: 0.85; border-style: dashed; }
+.tile.superseded .v, .tile.superseded .k { color: var(--muted); }
+.alert-item code, .alert-item .small { overflow-wrap: anywhere; word-break: break-word; }
+.prio.na { color: var(--muted); border: 1px dashed var(--border); font-weight: 600; }
