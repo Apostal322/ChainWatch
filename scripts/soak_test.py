@@ -136,9 +136,20 @@ class Stack:
             "collector", [PY, "-m", "chainwatch.live.cli", "--config", str(self.cfg), "collect"]
         )
 
-    def ingest_test_list(self, step: int, offset: int, upto: int = 120_000) -> bool:
-        """A TEST indicator list: output 0 of every ``step``-th mock transaction."""
-        addrs = [p2wpkh_address(f"{txid(f'mock-0-{n}')}-out-0") for n in range(offset, upto, step)]
+    def ingest_test_list(self, refresh: int = 0, upto: int = 120_000) -> bool:
+        """A TEST indicator list: output 0 of every 10th mock transaction. Refresh ``k``
+        behaves like a real list update: it keeps most of that base list (3 more entries
+        delisted each time), adds up to 1,000 entries (output 0 of every ``9 + k``-th
+        transaction) and drops the previous refresh's additions, under 10 % of the list.
+        A wholesale replacement would be refused by the mass-removal guard, by design."""
+
+        def addr(n: int) -> str:
+            return p2wpkh_address(f"{txid(f'mock-0-{n}')}-out-0")
+
+        addrs = [addr(n) for n in range(10, upto, 10)][3 * refresh :]
+        if refresh:
+            addrs += [addr(n) for n in range(3 * refresh, upto, 9 + refresh)][:1000]
+        addrs = list(dict.fromkeys(addrs))
         path = self.work / "test-list.txt"
         path.write_text("\n".join(addrs) + "\n")
         r = subprocess.run(
@@ -216,7 +227,7 @@ def main() -> int:
 
     st.start_mock()
     st.wait_http(f"{mock}/__mock/stats")
-    indicator_updates = [st.ingest_test_list(step=10, offset=10)]
+    indicator_updates = [st.ingest_test_list()]
     t_start = time.time()
     st.start_collector()
     st.start_edge()
@@ -339,7 +350,7 @@ def main() -> int:
                 st.cpu_base["edge"] = (proc_stats(st.procs["edge"].pid) or (0,))[0]
             elif kind == "indicator_update":
                 k = len(indicator_updates)
-                indicator_updates.append(st.ingest_test_list(step=9 + k, offset=3 * k))
+                indicator_updates.append(st.ingest_test_list(refresh=k))
                 rec["ok"] = indicator_updates[-1]
             elif kind == "sse_clients":
                 ts = [threading.Thread(target=sse_client, args=(5 + k,)) for k in range(5)]
