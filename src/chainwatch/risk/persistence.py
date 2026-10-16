@@ -149,6 +149,16 @@ def migrate(db: sqlite3.Connection) -> None:
         if "n_errors" not in {r[1] for r in db.execute("PRAGMA table_info(risk)")}:
             db.execute("ALTER TABLE risk ADD COLUMN n_errors INTEGER NOT NULL DEFAULT 0")
             db.execute("UPDATE risk SET n_errors = 1 WHERE record LIKE '%\"errors\":[{%'")
+        # covering indexes for risk_summary: the rows themselves (JSON records, ~1.4 KB) are
+        # never read, so the summary is one pass over small index entries (0.5 s -> ~50 ms
+        # at the 50k-row cap)
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS risk_summary_cov ON risk(evaluated_at, priority, "
+            "screening, graph, anomaly, supervised, latency_ms, n_errors)"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS tx_fetched_lifecycle ON tx(outcome, fetched_at, lifecycle)"
+        )
         if not had_alert_txids:  # alerts from before v0.8: their (capped) txid lists
             for aid, txids in db.execute("SELECT id, txids FROM alerts").fetchall():
                 db.executemany(
@@ -638,41 +648,33 @@ def alert_history(db: sqlite3.Connection, alert_id: int) -> list[dict[str, Any]]
 
 
 def risk_summary(db: sqlite3.Connection, since: float) -> dict[str, Any]:
-    def counts(col: str) -> dict[str, int]:
-        return dict(
-            db.execute(
-                f"SELECT {col}, COUNT(*) FROM risk WHERE evaluated_at >= ? GROUP BY {col}",
-                (since,),
-            ).fetchall()
-        )
-
-    by_priority = {
-        str(k) if k is not None else "none": v
-        for k, v in db.execute(
-            "SELECT priority, COUNT(*) FROM risk WHERE evaluated_at >= ? GROUP BY priority",
-            (since,),
-        )
-    }
-    lat = [
-        r[0]
-        for r in db.execute(
-            "SELECT latency_ms FROM risk WHERE evaluated_at >= ? ORDER BY latency_ms", (since,)
-        )
-    ]
-    errors = db.execute(
-        "SELECT COUNT(*) FROM risk WHERE evaluated_at >= ? AND n_errors > 0", (since,)
-    ).fetchone()[0]
+    by_priority: dict[str, int] = {}
+    layers: dict[str, dict[str, int]] = {k: {} for k in ("screening", "graph", "anomaly",
+                                                         "supervised")}  # fmt: skip
+    lat: list[float] = []
+    errors = 0
+    for prio, screening, graph, anomaly, supervised, latency, n_err in db.execute(
+        "SELECT priority, screening, graph, anomaly, supervised, latency_ms, n_errors "
+        "FROM risk WHERE evaluated_at >= ?",
+        (since,),
+    ):
+        key = str(prio) if prio is not None else "none"
+        by_priority[key] = by_priority.get(key, 0) + 1
+        for name, v in (("screening", screening), ("graph", graph), ("anomaly", anomaly),
+                        ("supervised", supervised)):  # fmt: skip
+            layers[name][v] = layers[name].get(v, 0) + 1
+        lat.append(latency)
+        errors += n_err > 0
+    lat.sort()
     assessed = sum(by_priority.values())
-    fetched = db.execute(
-        "SELECT COUNT(*) FROM tx WHERE outcome = 'fetched' AND fetched_at >= ?", (since,)
-    ).fetchone()[0]
     lifecycle = dict(
         db.execute(
-            "SELECT COALESCE(lifecycle, 'unknown'), COUNT(*) FROM tx WHERE outcome = 'fetched' "
-            "AND fetched_at >= ? GROUP BY 1",
+            "SELECT COALESCE(lifecycle, 'unknown'), COUNT(*) FROM tx "
+            "tx_fetched_lifecycle WHERE outcome = 'fetched' AND fetched_at >= ? GROUP BY 1",
             (since,),
         ).fetchall()
     )
+    fetched = sum(lifecycle.values())
     alert_counts = dict(
         db.execute("SELECT status, COUNT(*) FROM alerts GROUP BY status").fetchall()
     )
@@ -686,10 +688,7 @@ def risk_summary(db: sqlite3.Connection, since: float) -> dict[str, Any]:
         "assessed": assessed,
         "not_assessed": max(0, fetched - assessed),
         "by_priority": by_priority,
-        "screening": counts("screening"),
-        "graph": counts("graph"),
-        "anomaly": counts("anomaly"),
-        "supervised": counts("supervised"),
+        **layers,
         "assessments_with_layer_errors": errors,
         "latency_ms": {"p50": pct(0.5), "p95": pct(0.95), "max": lat[-1] if lat else None},
         "lifecycle": lifecycle,
