@@ -171,7 +171,8 @@ score ([contracts](docs/RISK_ENGINE.md)):
 * Screening is point in time: a listing counts only from when this deployment fetched it,
   and matches found later are separate retrospective alerts that never rewrite records.
 * A snapshot that would empty or mostly empty the list is refused, and the official SDN
-  file and its mirror count as one authority (a delisting in either closes the other).
+  file and its mirror count as one authority (an official delisting closes the mirror's
+  copy; the fallback mirror can never delist an official listing).
 * Alerts are grouped and deduplicated in a review queue (new, under review, dismissed,
   resolved, insufficient evidence). Statuses change only via the collector's CLI, and
   nothing is sent externally.

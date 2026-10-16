@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from chainwatch.risk.indicators import Snapshot
-from chainwatch.risk.sources import authority_of, source_title
+from chainwatch.risk.sources import authority_of, rank_of, source_title
 
 _VERSIONS_TABLE = """indicator_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,7 +165,37 @@ def migrate(db: sqlite3.Connection) -> None:
                     "INSERT OR IGNORE INTO alert_txids (alert_id, txid) VALUES (?, ?)",
                     [(aid, t) for t in json.loads(txids or "[]")],
                 )
+            _rekey_v07_alerts(db)
         _drop_version_uniqueness(db)
+
+
+def _rekey_v07_alerts(db: sqlite3.Connection) -> None:
+    """v0.8 groups source alerts per authority and role (``screening:{authority}:{role}:
+    {address}``); v0.7 used ``screening:{source_id}:{address}``. Without re-keying, the next
+    occurrence after the upgrade would open a fresh ``new`` alert and lose the operator's
+    dismissed or resolved state. The role comes from the latest occurrence's evidence. When
+    two old alerts map to one new key (the official file and its mirror), the first keeps
+    it and the other stays under its old key, unchanged and visible."""
+    taken = {k for (k,) in db.execute("SELECT group_key FROM alerts")}
+    for aid, key, ev in db.execute("SELECT id, group_key, evidence FROM alerts").fetchall():
+        kind, _, rest = key.partition(":")
+        parts = rest.split(":")
+        if kind not in ("screening", "retro", "relation") or len(parts) != 2:
+            continue  # already a v0.8 key, or an anomaly key
+        source_id, address = parts
+        evidence = json.loads(ev or "{}")
+        role = (evidence.get("match") or evidence).get("role")
+        if kind == "relation":
+            new = f"relation:{authority_of(source_id)}:{address}"
+        elif role in ("in", "out"):
+            new = f"{kind}:{authority_of(source_id)}:{role}:{address}"
+        else:
+            continue
+        if new in taken:
+            continue
+        db.execute("UPDATE alerts SET group_key = ? WHERE id = ?", (new, aid))
+        taken.discard(key)
+        taken.add(new)
 
 
 def _has_table(db: sqlite3.Connection, name: str) -> bool:
@@ -244,8 +274,12 @@ def ingest_snapshot(
       the snapshot are closed (``removed_at``). This is a diff against what is *active*, so
       content that reverts to an earlier version re-lists what that version listed.
     * Sources of the same authority (the official SDN file and its mirror) describe one
-      list: addresses another such source still lists but this newer snapshot does not are
-      closed there too, so a superseded copy cannot keep a delisted address alive.
+      list, ranked by authoritativeness (official first). A snapshot closes the addresses a
+      *lower-ranked* copy still lists but it does not, so a superseded copy cannot keep a
+      delisted address alive. A lower-ranked copy (the fallback mirror, possibly days
+      behind) never closes a higher-ranked listing, and never re-lists an address that a
+      higher-ranked source delisted: it can only add addresses the official list has not
+      dealt with yet.
     * An empty snapshot, or one that would delist more than ``MASS_REMOVAL_SHARE`` of the
       active listings, is refused (:class:`SnapshotRejected`) unless ``allow_mass_removal``:
       a truncated download, an error page or a schema change must not silently empty the list.
@@ -267,16 +301,25 @@ def ingest_snapshot(
                 (snap.source_id,),
             )
         }
-        others = [
-            (i, a)
-            for i, a, src in db.execute(
-                "SELECT id, address, source_id FROM indicators "
-                "WHERE source_id != ? AND removed_at IS NULL",
-                (snap.source_id,),
-            )
-            if authority_of(src) == authority
-        ]
-        to_add = [r for r in snap.records if r.address not in active]
+        rank = rank_of(snap.source_id)
+        others: list[tuple[int, str]] = []  # active rows of lower-ranked copies
+        closed_above: set[str] = set()  # delisted by a higher-ranked copy
+        open_above: set[str] = set()
+        for i, a, src, removed in db.execute(
+            "SELECT id, address, source_id, removed_at FROM indicators WHERE source_id != ?",
+            (snap.source_id,),
+        ):
+            if authority_of(src) != authority:
+                continue
+            if rank_of(src) > rank:
+                if removed is None:
+                    others.append((i, a))
+            elif removed is None:
+                open_above.add(a)
+            else:
+                closed_above.add(a)
+        vetoed = closed_above - open_above
+        to_add = [r for r in snap.records if r.address not in active and r.address not in vetoed]
         close_own = [i for a, i in active.items() if a not in current]
         close_other = [i for i, a in others if a not in current]
         if latest and latest[1] == snap.sha256 and not (to_add or close_own or close_other):
@@ -329,6 +372,7 @@ def ingest_snapshot(
         )
     return {"status": "new_version", "version_id": vid, "added": len(to_add),
             "removed": len(close_own), "superseded_elsewhere": len(close_other),
+            "skipped_delisted": sum(r.address in vetoed for r in snap.records),
             **snap.summary()}  # fmt: skip
 
 
@@ -372,11 +416,13 @@ def source_status(db: sqlite3.Connection) -> list[dict[str, Any]]:
                 "superseded_by": None,
             }
         )  # fmt: skip
-    # a source whose list was refreshed more recently through another channel of the same
-    # authority (the official file after a mirror fallback, or vice versa) is superseded:
-    # its age is not a staleness problem
+    # a lower-ranked copy (the mirror) whose authority was refreshed more recently through a
+    # higher-ranked one (the official file) is superseded: its age is not a staleness
+    # problem. The official file is never superseded by its mirror: if only the fallback
+    # succeeds, the official source shows its real age.
     for s in out:
         newer = [o for o in out if o is not s and o["authority"] == s["authority"]
+                 and rank_of(o["source_id"]) < rank_of(s["source_id"])
                  and (o["checked_at"] or 0) > (s["checked_at"] or 0)]  # fmt: skip
         if newer:
             s["superseded_by"] = max(newer, key=lambda o: o["checked_at"] or 0)["source_id"]
@@ -669,8 +715,9 @@ def risk_summary(db: sqlite3.Connection, since: float) -> dict[str, Any]:
     assessed = sum(by_priority.values())
     lifecycle = dict(
         db.execute(
+            # covered by the tx_fetched_lifecycle index (the planner picks it)
             "SELECT COALESCE(lifecycle, 'unknown'), COUNT(*) FROM tx "
-            "tx_fetched_lifecycle WHERE outcome = 'fetched' AND fetched_at >= ? GROUP BY 1",
+            "WHERE outcome = 'fetched' AND fetched_at >= ? GROUP BY 1",
             (since,),
         ).fetchall()
     )
@@ -706,7 +753,7 @@ def retro_screen(db: sqlite3.Connection, version_id: int, at: float) -> int:
     in the moments between a snapshot being stored and the collector loading it. Their
     point-in-time assessments are left unchanged; each match is a separate alert marked
     ``retrospective`` (idempotent: running it again counts nothing twice). Returns the
-    number of such matches."""
+    number of matches not already counted by an earlier pass."""
     rows = db.execute(
         "SELECT t.id, t.txid, a.role, a.idx, i.address, i.source_id, i.category, i.label, "
         "i.reference, i.listed_on, i.available_at, i.details, v.sha256 FROM indicators i "
@@ -726,11 +773,18 @@ def retro_screen(db: sqlite3.Connection, version_id: int, at: float) -> int:
         if any(m["address"] == address and authority_of(m["source_id"]) == authority
                for m in matched):  # fmt: skip
             continue  # its own assessment already had this listing
+        key = f"retro:{authority}:{role}:{address}"
+        if db.execute(
+            "SELECT 1 FROM alerts a JOIN alert_txids x ON x.alert_id = a.id "
+            "WHERE a.group_key = ? AND x.txid = ?",
+            (key, txid),
+        ).fetchone():
+            continue  # an earlier pass (the CLI's, or a reload's) already counted it
         found += 1
         verb = "spent from" if role == "in" else "paid to"
         upsert_alert(
             db,
-            group_key=f"retro:{authority}:{role}:{address}",
+            group_key=key,
             layer="screening",
             kind="retrospective_source_match",
             priority=1,

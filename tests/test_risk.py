@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import sqlite3
 import time
 
 import httpx
@@ -678,6 +679,36 @@ def test_official_list_and_its_mirror_are_one_list(tmp_path):
     assert [s["group_key"] for s in alert_specs(rec)] == [f"screening:ofac-sdn:out:{LISTED_2}"]
 
 
+def test_a_lagging_mirror_never_delists_or_relists_official_listings(tmp_path):
+    """The mirror is the fallback when the official fetch fails. It used to supersede the
+    official list as well: a mirror a day behind delisted the newest designations (up to
+    the mass-removal threshold) and re-listed addresses OFAC had just delisted."""
+    store = _store(tmp_path)
+    old = [p2wpkh_address(f"o{i}") for i in range(20)]
+    new = p2wpkh_address("newly-designated")
+    fresh = p2wpkh_address("mirror-only")
+    _ingest(store, old, at=1.0, source_id="ofac-sdn")
+    _ingest(store, [*old[1:], new], at=2.0, source_id="ofac-sdn")  # adds new, delists old[0]
+    # official fetch fails on day 3; the mirror still has day-1 content, minus two entries
+    report = _ingest(store, [*old[:-2], fresh], at=3.0, source_id="ofac-sdn-mirror")
+    assert report["superseded_elsewhere"] == 0 and report["skipped_delisted"] == 1
+    sc = _screener(store)
+    for addr in (new, old[-1]):  # official listings the mirror lacks stay listed
+        assert sc.screen(_addrs(outputs=[addr]), 4.0)["status"] == "SCREENING_MATCH"
+    assert sc.screen(_addrs(outputs=[old[0]]), 4.0)["status"] == "NO_KNOWN_SCREENING_MATCH"
+    hit = sc.screen(_addrs(outputs=[fresh]), 4.0)  # what only the mirror has is still used
+    assert [m["source_id"] for m in hit["matches"]] == ["ofac-sdn-mirror"]
+    status = {s["source_id"]: s for s in rp.source_status(store.db)}
+    assert status["ofac-sdn"]["superseded_by"] is None  # its real age stays visible
+    # the official file comes back: it supersedes the mirror's extra listing
+    _ingest(store, [*old[1:], new], at=5.0, source_id="ofac-sdn")
+    assert _screener(store).screen(_addrs(outputs=[fresh]), 6.0)["status"] == (
+        "NO_KNOWN_SCREENING_MATCH"
+    )
+    status = {s["source_id"]: s for s in rp.source_status(store.db)}
+    assert status["ofac-sdn-mirror"]["superseded_by"] == "ofac-sdn"
+
+
 def test_alert_group_includes_the_role(tmp_path):
     """Dismissing a 'pays to X' alert used to suppress a later 'X spends' alert too."""
     store = _store(tmp_path)
@@ -691,6 +722,33 @@ def test_alert_group_includes_the_role(tmp_path):
             rp.upsert_alert(store.db, txid=f["txid"], at=2.0, **spec)
     titles = sorted(a["title"] for a in rp.alerts(store.db))
     assert len(titles) == 2 and "pays to" in titles[0] and "spends from" in titles[1]
+
+
+def test_v07_alert_states_survive_the_new_group_keys(tmp_path):
+    """v0.8 keys alerts by authority and role; without re-keying, an alert the operator
+    dismissed in v0.7 came back as a fresh 'new' alert on its next occurrence."""
+    store = _store(tmp_path)
+    _ingest(store, [LISTED], at=1.0, source_id="ofac-sdn")
+    db = store.db
+    db.execute("DROP TABLE alert_txids")  # the v0.7 schema
+    old = {"match": {"address": LISTED, "role": "out", "source_id": "ofac-sdn"}}
+    db.execute(
+        "INSERT INTO alerts (group_key, layer, kind, priority, status, title, created_at, "
+        "updated_at, last_seen_at, txids, evidence) VALUES (?, 'screening', 'source_match', "
+        "1, 'dismissed', 't', 1, 1, 1, ?, ?)",
+        (f"screening:ofac-sdn:{LISTED}", json.dumps(["a" * 64]), json.dumps(old)),
+    )
+    db.commit()
+    rp.migrate(db)
+    eng = RiskEngine(_screener(store), RobustTailDetector(), SupervisedLayer(None),
+                     clock=lambda: 2.0)  # fmt: skip
+    f, tx = _features("again", out_addresses=[LISTED])
+    for spec in alert_specs(eng.assess(f, feat.extract_addresses(tx), [])):
+        rp.upsert_alert(db, txid=f["txid"], at=2.0, **spec)
+    (a,) = rp.alerts(db)
+    assert a["status"] == "dismissed" and a["suppressed"] == 1
+    rp.migrate(db)  # idempotent
+    assert [x["group_key"] for x in rp.alerts(db)] == [f"screening:ofac-sdn:out:{LISTED}"]
 
 
 def test_alert_upserts_are_idempotent_beyond_the_displayed_txids(tmp_path):
@@ -729,7 +787,7 @@ def test_retro_screening_covers_the_reload_window_and_is_idempotent(tmp_path):
     report = _ingest(store, [LISTED, LISTED_2], at=20.0)
     assert rows[0]["screening"]["status"] == "NO_KNOWN_SCREENING_MATCH"
     assert rp.retro_screen(store.db, report["version_id"], 40.0) == 1  # only the window tx
-    assert rp.retro_screen(store.db, report["version_id"], 41.0) == 1
+    assert rp.retro_screen(store.db, report["version_id"], 41.0) == 0  # already counted
     retro = [a for a in rp.alerts(store.db) if a["retrospective"]]
     assert len(retro) == 1 and retro[0]["occurrences"] == 1  # idempotent
     assert retro[0]["evidence"]["source_version_id"] == report["version_id"]
@@ -751,6 +809,43 @@ def test_collector_retro_screens_when_it_loads_a_new_snapshot(tmp_path):
     col._reload_indicators_if_changed()
     assert col.c.retrospective_matches == 1
     assert [a["kind"] for a in rp.alerts(store.db)] == ["retrospective_source_match"]
+
+
+def test_collector_retro_survives_a_locked_database_and_a_restart(tmp_path):
+    """The reload's retrospective pass ran unguarded in the heartbeat: a locked database
+    killed the collector, and after the restart the pass was skipped for good. Matches the
+    CLI had already alerted on were counted again."""
+    store = _store(tmp_path)
+    cfg = _cfg(tmp_path, indicator_max_age_days=3650)
+    now = [1.8e9]
+    _ingest(store, [LISTED_2], at=now[0] - 3600)
+    col = Collector(cfg, store, http=None, clock=lambda: now[0])
+    col._build_engine()
+    now[0] += 20
+    f, tx = _features("between", out_addresses=[LISTED])
+    f["first_seen"] = f["fetched_at"] = now[0]
+    col._store_and_assess(f, [], tx)
+    _ingest(store, [LISTED, LISTED_2], at=now[0] - 10)
+    other = sqlite3.connect(cfg.db_path, timeout=0)
+    other.execute("BEGIN IMMEDIATE")  # another writer holds the lock
+    store.db.execute("PRAGMA busy_timeout = 50")
+    col._reload_indicators_if_changed()  # must not raise
+    assert col.c.db_errors == 1 and col.c.retrospective_matches == 0
+    other.rollback()
+    col._reload_indicators_if_changed()  # retried on the next heartbeat
+    assert col.c.retrospective_matches == 1
+    col._reload_indicators_if_changed()
+    assert col.c.retrospective_matches == 1  # nothing counted twice
+    # a snapshot stored while the collector is down is re-screened when it starts
+    third = p2wpkh_address("listed-3")
+    g, tx3 = _features("before-restart", out_addresses=[third])
+    g["first_seen"] = g["fetched_at"] = now[0]
+    col._store_and_assess(g, [], tx3)
+    _ingest(store, [LISTED, LISTED_2, third], at=now[0] + 5)
+    restarted = Collector(cfg, LiveStore(cfg.db_path), http=None, clock=lambda: now[0] + 30)
+    restarted._build_engine()
+    assert restarted.c.retrospective_matches == 1
+    assert sum(a["kind"] == "retrospective_source_match" for a in rp.alerts(store.db)) == 2
 
 
 def test_graph_relations_screen_parents_at_the_childs_time(tmp_path):

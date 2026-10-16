@@ -373,6 +373,10 @@ def test_remote_mode_requires_https_and_a_token(monkeypatch):
     monkeypatch.delenv(lc.api_token_env, raising=False)
     with pytest.raises(ValueError):
         make_backend(lc)
+    for bad in ("é" * 40, "a b" * 20):  # the edge would refuse it; fail at start-up instead
+        monkeypatch.setenv(lc.api_token_env, bad)
+        with pytest.raises(ValueError):
+            make_backend(lc)
 
 
 # ---- configs, isolation, units ---------------------------------------------------------------

@@ -62,11 +62,15 @@ same content as the source's latest version only refreshes `checked_at` (freshne
   the active listings (beyond 5), is refused (`SnapshotRejected`): an error page, a truncated
   download or a schema change must not silently empty the list. The CLI then tries the
   fallback; `--allow-mass-removal` accepts a genuine mass delisting after checking it.
-* **One list, two channels.** `ofac-sdn` and `ofac-sdn-mirror` share the authority
-  `ofac-sdn`. A newer snapshot from either closes the listings the other copy still has but
-  the newer one does not, so a superseded copy cannot keep a delisted address alive.
-  Screening reports one match per authority and address (the official file preferred, for
-  its party metadata). The older copy is reported `superseded_by`, not stale.
+* **One list, two channels, ranked.** `ofac-sdn` (rank 0) and `ofac-sdn-mirror` (rank 1)
+  share the authority `ofac-sdn`. An official snapshot also closes the mirror listings it
+  does not have, so the fallback copy cannot keep a delisted address alive. The mirror,
+  which may be days behind, **never** closes an official listing and never re-lists an
+  address the official file delisted (reported as `skipped_delisted`); it can only add
+  addresses the official list has not dealt with yet. Screening reports one match per
+  authority and address (the official file preferred, for its party metadata). A mirror
+  older than the official file is reported `superseded_by`, not stale; the official file is
+  never superseded by its mirror, so a failing official refresh shows its real age.
 * A source not refreshed for `indicator_max_age_days` (default 7) is reported **stale**.
   Before the first snapshot, screening returns `SCREENING_DATA_UNAVAILABLE`, never "no match".
 * The mirror is a third-party extraction, not an authoritative copy: on 2026-01-30 it listed
@@ -172,9 +176,15 @@ Alerts are raised for priorities 1–3 and grouped: `screening:<authority>:<role
 `relation:<authority>:<address>`, `anomaly:<measurement>:<hour>`, and for retrospective
 matches `retro:<authority>:<role>:<address>`. A repeat of the same transaction is ignored
 (`alert_txids` remembers every transaction an alert counted; the API shows the latest 50).
+The upgrade from v0.7 re-keys existing alerts (`screening:<source>:<address>` and the like)
+to these keys, using the role in their latest evidence, so dismissed and resolved states
+carry over.
 
-Retrospective screening runs when a snapshot is stored (CLI) and again when the collector
-loads it: every stored transaction that involves a newly available address and whose own
+Retrospective screening runs when a snapshot is stored (CLI), again when the collector
+loads it, and for each source's latest snapshot when the collector starts (a snapshot
+stored while it was down). A database error in the collector's pass is counted
+(`db_errors`) and retried on the next heartbeat; it never stops the collector. Matches an
+earlier pass already alerted on are not counted again. In each pass, every stored transaction that involves a newly available address and whose own
 record has no match for it under the same authority gets a retrospective alert. That covers
 transactions observed before the listing and those assessed in the seconds between the
 snapshot being stored and the collector loading it. Only retained rows (the retention window)

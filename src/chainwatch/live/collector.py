@@ -136,6 +136,8 @@ class LifecycleMemo:
         prev = self._items.pop(txid, None)
         if prev is not None and prev[0] == "mined":
             state, replaced_by = "mined", None  # mined is final
+        elif prev is not None and prev[0] == "replaced" and state == "removed":
+            state, replaced_by = "replaced", prev[2]  # as mark_lifecycle: replaced refines removed
         self._items[txid] = (state, at, replaced_by)
         if len(self._items) > self.max_items:
             self._items.popitem(last=False)
@@ -536,6 +538,29 @@ class Collector:
         self.engine = RiskEngine(
             self._load_screener(), detector, SupervisedLayer(None), parents, clock=self.clock
         )
+        # A snapshot stored while this process was down (or just before it died) was never
+        # reloaded here: re-screen the latest version of each source (idempotent).
+        latest = [v for (v,) in db.execute(
+            "SELECT MAX(id) FROM indicator_versions GROUP BY source_id"
+        )]  # fmt: skip
+        self._retro(latest)
+
+    def _retro(self, version_ids: list[int]) -> bool:
+        """Retrospective screening for these versions in one transaction. A database error
+        (e.g. locked) is counted and reported, never fatal: the caller retries."""
+        from chainwatch.risk import persistence as rp
+
+        try:
+            with rp.transaction(self.store.db):
+                found = sum(rp.retro_screen(self.store.db, v, self.clock()) for v in version_ids)
+        except sqlite3.Error as e:
+            self.c.db_errors += 1
+            self.last_error = f"database: {type(e).__name__}: {e}"[:200]
+            log.warning(json.dumps({"msg": "retrospective screening failed",
+                                    "error": self.last_error}))  # fmt: skip
+            return False
+        self.c.retrospective_matches += found
+        return True
 
     def _load_screener(self):
         from chainwatch.risk import persistence as rp
@@ -561,11 +586,8 @@ class Collector:
             new = [r[0] for r in self.store.db.execute(
                 "SELECT id FROM indicator_versions WHERE id > ? ORDER BY id", (previous,)
             )]  # fmt: skip
-            with rp.transaction(self.store.db):
-                for vid in new:
-                    self.c.retrospective_matches += rp.retro_screen(
-                        self.store.db, vid, self.clock()
-                    )
+            if not self._retro(new):
+                self._indicator_version = previous  # try again on the next heartbeat
         else:  # refresh freshness (checked_at) of unchanged sources
             self.engine.screener.sources = rp.source_status(self.store.db)
 

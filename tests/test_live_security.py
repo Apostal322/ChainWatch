@@ -252,6 +252,47 @@ def test_last_good_answer_is_served_when_the_edge_fails():
         be.recent()
 
 
+def test_refused_keys_cannot_evict_the_polling_answers_from_the_cache():
+    """Budget-refused failures were cached in the same LRU as the dashboard's polling
+    answers, so a flood of distinct keys evicted them and every poll went upstream."""
+    transport, calls = _edge(_any)
+    be = RemoteBackend(_live(remote_cache_s=60.0), TOKEN, transport=transport)
+    be.recent()
+    n = calls["n"]
+    for i in range(3 * live_api.CACHE_MAX_KEYS):
+        with contextlib.suppress(UpstreamUnavailable):
+            be.transaction(f"{i:064x}")
+    spent = calls["n"] - n
+    assert spent <= live_api.UPSTREAM_BURST + 1  # the rest were refused by the budget
+    be.recent()
+    assert calls["n"] - n == spent  # still served from the cache
+
+
+def test_event_stream_and_feed_poll_share_one_query():
+    """The stream polled limit=100 and the feed limit=200: two keys cached at different
+    moments made the feed look older than the stream, and the page reset itself."""
+    transport, calls = _edge(_any)
+    be = RemoteBackend(_live(remote_cache_s=60.0), TOKEN, transport=transport)
+    be.transactions(limit=200, offset=0, sort="id", descending=True, outcome=None)
+    be.recent()
+    assert calls["n"] == 1
+
+
+def test_status_is_never_served_stale():
+    """A stale /status said "connected" for a minute after the edge went down."""
+    state = {"ok": True}
+
+    def handler(request):
+        return _any(request) if state["ok"] else httpx.Response(500)
+
+    transport, _ = _edge(handler)
+    be = RemoteBackend(_live(remote_cache_s=0.0), TOKEN, transport=transport)
+    assert be.status(time.time())["connection"] == "connected"
+    state["ok"] = False
+    with pytest.raises(UpstreamUnavailable):
+        be.status(time.time())
+
+
 def test_upstream_has_an_overall_deadline_and_errors_never_strand_waiters():
     class Drip(httpx.SyncByteStream):
         def __iter__(self):

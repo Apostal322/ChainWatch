@@ -431,6 +431,16 @@ def test_mined_overrides_replaced(tmp_path):
     assert lc["state"] == "mined" and lc["replaced_by"] is None
 
 
+def test_memo_keeps_replaced_when_removed_follows():
+    """mempool.space reports a block conflict as replaced, then removed in the next delta;
+    the memo stored the in-flight transaction as removed and lost replaced_by, unlike
+    mark_lifecycle."""
+    memo = coll.LifecycleMemo(10)
+    memo.add("t", "replaced", 1.0, "by")
+    memo.add("t", "removed", 2.0)
+    assert memo.get("t") == ("replaced", 2.0, "by")
+
+
 def test_lifecycle_event_during_fetch_is_not_lost(tmp_path):
     c = _cfg(tmp_path)
     a = txid("inflight")

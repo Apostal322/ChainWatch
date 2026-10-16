@@ -8,7 +8,10 @@ and passes now. Full matrix: [docs/AUDIT.md](docs/AUDIT.md#v080-independent-hard
 - **Indicator data.**
   - Empty or mass-delisting snapshots are refused unless `--allow-mass-removal`.
   - Snapshots are diffed against active listings (reverted content re-lists).
-  - The official SDN file and its mirror are one authority; one match per authority.
+  - The official SDN file and its mirror are one ranked authority: an official snapshot
+    closes the mirror's extra listings; the fallback mirror never delists or re-lists
+    official listings. One match per authority. v0.7 alerts are re-keyed, keeping their
+    status.
   - Truncated XML falls back to the mirror; `--fallback` with `--file` is refused.
   - XML parser: UTF-8 only, bounded memory per record and per party, https on every
     redirect hop.

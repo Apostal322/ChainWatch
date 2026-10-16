@@ -110,6 +110,11 @@ class UpstreamUnavailable(Exception):
     """The remote edge API could not be reached or answered unexpectedly."""
 
 
+class BudgetExhausted(UpstreamUnavailable):
+    """Refused locally by the upstream request budget: never cached, so a flood of refused
+    keys cannot evict the dashboard's own polling answers from the LRU cache."""
+
+
 def is_public_mempool(url: str | None) -> bool:
     """True only if the collector's source is the public mempool.space service."""
     host = urlparse(url or "").hostname or ""
@@ -297,7 +302,12 @@ class RemoteBackend:
         return False, None
 
     def _get(
-        self, path: str, params: dict[str, Any] | None = None, *, priority: bool = False
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        priority: bool = False,
+        stale_ok: bool = True,
     ) -> Any:
         params = {k: v for k, v in (params or {}).items() if v is not None}
         key = path + "?" + "&".join(f"{k}={params[k]}" for k in sorted(params))
@@ -310,7 +320,7 @@ class RemoteBackend:
                         self._inflight[key] = threading.Event()
                         break
             if found:
-                return self._result(key, value)
+                return self._result(key, value, stale_ok)
             event.wait(self.live.remote_timeout_s + 1.0)
         value: Any = UpstreamUnavailable("internal error")
         try:
@@ -324,20 +334,21 @@ class RemoteBackend:
             with self._lock:
                 event = self._inflight.pop(key)
                 now = time.monotonic()
-                self._cache[key] = (now, value)
-                self._cache.move_to_end(key)
-                while len(self._cache) > CACHE_MAX_KEYS:
-                    self._cache.popitem(last=False)
+                if not isinstance(value, BudgetExhausted):
+                    self._cache[key] = (now, value)
+                    self._cache.move_to_end(key)
+                    while len(self._cache) > CACHE_MAX_KEYS:
+                        self._cache.popitem(last=False)
                 if not isinstance(value, Exception):
                     self._good[key] = (now, value)
                     self._good.move_to_end(key)
                     while len(self._good) > CACHE_MAX_KEYS:
                         self._good.popitem(last=False)
             event.set()
-        return self._result(key, value)
+        return self._result(key, value, stale_ok)
 
-    def _result(self, key: str, value: Any) -> Any:
-        if isinstance(value, UpstreamUnavailable):
+    def _result(self, key: str, value: Any, stale_ok: bool = True) -> Any:
+        if stale_ok and isinstance(value, UpstreamUnavailable):
             with self._lock:
                 good = self._good.get(key)
             if good is not None and time.monotonic() - good[0] < STALE_OK_S:
@@ -358,7 +369,7 @@ class RemoteBackend:
 
     def _fetch(self, path: str, params: dict[str, Any], priority: bool = False) -> Any:
         if not priority and not self._take_token():
-            raise UpstreamUnavailable("upstream request budget exhausted")
+            raise BudgetExhausted("upstream request budget exhausted")
         self.upstream_requests += 1
         t0 = time.monotonic()
         try:
@@ -394,7 +405,8 @@ class RemoteBackend:
         return body
 
     def status(self, now: float) -> dict[str, Any]:
-        body = dict(self._get("/v1/live/status", priority=True))
+        # never a stale answer: the status is what tells visitors the edge is unreachable
+        body = dict(self._get("/v1/live/status", priority=True, stale_ok=False))
         body["via"] = "remote collector (edge API)"
         body["server_time"] = now
         return body
@@ -423,8 +435,10 @@ class RemoteBackend:
         return self._get("/v1/live/outages", q, priority=polled)["outages"]
 
     def recent(self) -> list[dict[str, Any]]:
-        q = {"limit": RECENT_WINDOW, "sort": "id", "order": "desc", "outcome": "all"}
-        return self._get("/v1/live/transactions", q, priority=True)["rows"]
+        # the same query (cache key) as the dashboard's feed poll: two keys cached at
+        # different moments made the feed look older than the stream and reset it
+        q = {"limit": 200, "offset": 0, "sort": "id", "descending": True, "outcome": None}
+        return self.transactions(**q)["rows"]
 
     def max_id(self) -> int:
         rows = self.recent()
@@ -455,11 +469,13 @@ def _code(body: Any) -> str:
 def make_backend(live: LiveConfig) -> LocalBackend | RemoteBackend:
     if not live.remote_url:
         return LocalBackend(live)
+    from chainwatch.live.edge import valid_token  # the edge's own rule (import cycle)
+
     token = os.environ.get(live.api_token_env, "").strip()
-    if len(token) < 32 or any(c.isspace() for c in token):
+    if not valid_token(token):
         raise ValueError(
-            f"live.remote_url is set but ${live.api_token_env} is missing or shorter than "
-            "32 characters"
+            f"live.remote_url is set but ${live.api_token_env} is missing, shorter than 32 "
+            "characters or not URL-safe"
         )
     return RemoteBackend(live, token)
 
