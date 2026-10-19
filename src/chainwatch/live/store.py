@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import bisect
 import json
 import sqlite3
 import time
@@ -506,6 +507,8 @@ class LiveReader:
         vsizes = sorted(r["vsize"] for r in fetched)
         flag_counts: dict[str, int] = {}
         for r in fetched:
+            if r["flags"] == "[]":  # most rows: skip the parse (24 h at the cap: ~47k rows)
+                continue
             for fl in json.loads(r["flags"]):
                 flag_counts[fl] = flag_counts.get(fl, 0) + 1
         return {
@@ -536,9 +539,8 @@ FEE_BINS = (0, 1, 2, 3, 5, 8, 12, 20, 35, 60, 100, 200)  # sat/vB lower edges
 
 def _histogram(rates: list[float]) -> list[dict[str, Any]]:
     counts = [0] * len(FEE_BINS)
-    for r in rates:
-        i = max(j for j, edge in enumerate(FEE_BINS) if r >= edge) if r >= 0 else 0
-        counts[i] += 1
+    for r in rates:  # the last lower edge <= r (binary search); negatives in the first bin
+        counts[bisect.bisect_right(FEE_BINS, r) - 1 if r >= 0 else 0] += 1
     return [
         {"from": lo, "to": FEE_BINS[i + 1] if i + 1 < len(FEE_BINS) else None, "count": c}
         for i, (lo, c) in enumerate(zip(FEE_BINS, counts, strict=True))

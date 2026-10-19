@@ -419,3 +419,20 @@ def test_live_config_rejects_unsafe_values(bad):
         LiveConfig.from_dict(bad)
     with pytest.raises(ValueError):  # also when constructed directly or replaced
         dataclasses.replace(LiveConfig(), **bad)
+
+
+def test_fee_histogram_binary_search_matches_the_linear_definition():
+    """stats() at the cap spent most of its time in a per-row linear scan over the bins;
+    the binary search must give exactly the same bins, edges and negatives included."""
+    from chainwatch.live import store as st
+
+    def reference(rates):
+        counts = [0] * len(st.FEE_BINS)
+        for r in rates:
+            i = max(j for j, e in enumerate(st.FEE_BINS) if r >= e) if r >= 0 else 0
+            counts[i] += 1
+        return counts
+
+    rng = random.Random(7)
+    rates = [*st.FEE_BINS, -1.0, 0.0, 0.999, 1e9, *(rng.uniform(-5, 400) for _ in range(5000))]
+    assert [b["count"] for b in st._histogram(rates)] == reference(rates)
