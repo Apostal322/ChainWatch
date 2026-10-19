@@ -89,6 +89,10 @@ the live-computable XGBoost run exactly.
 | B5 | MEDIUM | release | The public image workflow ran on every push to `main` in parallel with CI: a commit failing CI was still published | `workflow_run` after CI **succeeded** for a push to `main`, same-repository only; builds and tags exactly the tested commit; first step re-checks the CI result through the API (manual dispatch too); `packages: write` and `actions: read` only in that job | `test_image_is_published_only_after_successful_ci` (fails on `69ec57d`), actionlint + shellcheck clean | `32f5c07` |
 | B6 | LOW | performance | `stats(1440)` at the cap: a per-row linear scan over the fee bins and a JSON parse of every row's flags | binary search into the bins; empty flag lists not parsed. Output identical (hash of stats for 60/240/1,440 min equals the previous code's) | p50 220 → 160 ms, p95 293 → 211 ms (50k-row DB, warm); `test_fee_histogram_binary_search_matches_the_linear_definition` | `9065d7d` |
 
+Final validation on `6bd4f52`: 90-minute fault-injection soak 18/18 (retries: 30 scheduled, 29
+succeeded, no transient failure stored; docs/LIVE_CLOUD.md §11), real-systemd container
+test 32/32 plus reboot, CI 8/8.
+
 Re-measured and **not changed**: flag + fee range + sort by fee with a deep offset is
 43–49 ms through the reader (the 210 ms of the earlier HTTP measurement did not reproduce
 there); `sort=vsize` with a deep offset (117–134 ms) needs a full sort, and an index would
