@@ -253,8 +253,10 @@ def test_fetch_outcomes_429_404_timeout_and_idempotency(tmp_path):
 
     async def go():
         store = LiveStore(tmp_path / "db.sqlite")
-        col = Collector(
-            _cfg(tmp_path), store, http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        col = Collector(  # one attempt: outcome classification only (retries: test_live_faults)
+            _cfg(tmp_path, fetch_max_attempts=1),
+            store,
+            http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
         col.bucket.pause = lambda s: setattr(col, "_paused", s)  # observe, don't wait
         now = col.clock()

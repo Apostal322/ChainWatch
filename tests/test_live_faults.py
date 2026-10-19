@@ -588,7 +588,8 @@ def test_rest_read_has_an_overall_deadline(tmp_path):
     async def go():
         srv = await asyncio.start_server(drip, "127.0.0.1", 0)
         port = srv.sockets[0].getsockname()[1]
-        c = _cfg(tmp_path, rest_base=f"http://127.0.0.1:{port}/api", request_timeout_s=0.5)
+        c = _cfg(tmp_path, rest_base=f"http://127.0.0.1:{port}/api", request_timeout_s=0.5,
+                 fetch_max_attempts=1)  # fmt: skip
         col = Collector(c, LiveStore(c.db_path), http=httpx.AsyncClient(timeout=0.5))
         try:
             await asyncio.wait_for(col.fetch_one(txid("drip"), time.time()), 3.0)
@@ -645,3 +646,103 @@ def test_concurrent_migrations_do_not_collide(tmp_path):
     assert errors == []
     cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(tx)")}
     assert {"lifecycle", "lifecycle_at", "replaced_by"} <= cols
+
+
+# ---- bounded retries of transient fetch failures --------------------------------------------
+def _retry_run(tmp_path, answers, **kw):
+    """Drive one txid through fetch_one and its retries; ``answers`` is consumed per request."""
+    calls, acquired, delays = [], [0], []
+    t = txid("retry")
+
+    def handler(tid):
+        calls.append(tid)
+        a = answers[min(len(calls), len(answers)) - 1]
+        return a(tid) if callable(a) else a
+
+    async def go():
+        c = _cfg(tmp_path, **{"fetch_retry_base_s": 0.02, **kw})
+        col = Collector(c, LiveStore(c.db_path), http=_mock(handler))
+        col.bucket.pause = lambda s: None
+        real_acquire = col.bucket.acquire
+
+        async def acquire():
+            acquired[0] += 1
+            await real_acquire()
+
+        col.bucket.acquire = acquire
+        loop = asyncio.get_running_loop()
+        real_later = loop.call_later
+
+        def later(delay, callback, *a, **kw):
+            if callback == col._requeue:  # not asyncio's own timers (wait_for on 3.11)
+                delays.append(delay)
+            return real_later(delay, callback, *a, **kw)
+
+        loop.call_later = later
+        try:
+            await col.fetch_one(t, col.clock())
+            while col._retry_timers or not col.queue.empty():
+                item = await asyncio.wait_for(col.queue.get(), 2.0)
+                await col.fetch_one(*item)
+        finally:
+            loop.call_later = real_later
+        return col
+
+    col = asyncio.run(go())
+    return col, LiveReader(col.cfg.db_path).get(t), calls, acquired[0], delays
+
+
+def test_transient_failures_are_retried_and_recovered(tmp_path):
+    ok = lambda tid: httpx.Response(200, json=esplora_tx(tid))  # noqa: E731
+    col, row, calls, acquired, delays = _retry_run(
+        tmp_path, [httpx.Response(503), httpx.Response(429), ok]
+    )
+    c = col.c
+    assert row["outcome"] == "fetched" and len(calls) == 3 == acquired  # budget per attempt
+    assert (c.retries_scheduled, c.retries_succeeded, c.failed, c.fetched) == (2, 1, 0, 1)
+    # exponential with jitter: [0.5, 1] x base x 2^(attempt-1)
+    assert 0.01 <= delays[0] <= 0.02 and 0.02 <= delays[1] <= 0.04
+
+
+def test_retries_are_bounded_by_the_attempt_cap(tmp_path):
+    col, row, calls, _, _ = _retry_run(tmp_path, [httpx.Response(503)], fetch_max_attempts=3)
+    c = col.c
+    assert len(calls) == 3 and row["outcome"] == "failed" and row["error"] == "http_503"
+    assert (c.retries_scheduled, c.retries_exhausted, c.failed) == (2, 1, 1)
+
+
+def test_permanent_failures_are_not_retried(tmp_path):
+    col, row, calls, _, _ = _retry_run(tmp_path, [httpx.Response(200, json={"txid": "x"})])
+    assert len(calls) == 1 and col.c.retries_scheduled == 0
+    assert row["error"].startswith("malformed_payload")
+    _, row, calls, _, _ = _retry_run(tmp_path / "b", [httpx.Response(400)])
+    assert len(calls) == 1 and row["error"] == "http_400"
+
+
+def test_not_found_gets_one_retry_for_indexing_lag(tmp_path):
+    col, row, calls, _, _ = _retry_run(tmp_path, [httpx.Response(404)], fetch_max_attempts=5)
+    assert len(calls) == 2 and row["error"] == "not_found" and col.c.retries_scheduled == 1
+
+
+def test_no_retry_outlives_the_queue_age_limit(tmp_path):
+    col, row, calls, _, _ = _retry_run(
+        tmp_path, [httpx.Response(503)], fetch_retry_base_s=60.0, max_queue_age_s=30.0
+    )
+    assert len(calls) == 1 and row["outcome"] == "failed" and col.c.retries_exhausted == 1
+
+
+def test_pending_retries_are_recorded_on_shutdown(tmp_path):
+    t = txid("pending")
+
+    async def go():
+        c = _cfg(tmp_path, fetch_retry_base_s=30.0)
+        col = Collector(c, LiveStore(c.db_path), http=_mock(lambda tid: httpx.Response(503)))
+        col.bucket.pause = lambda s: None
+        await col.fetch_one(t, col.clock())
+        assert col._retry_timers  # waiting 15-30 s
+        col._drain_retries()
+        return col
+
+    col = asyncio.run(go())
+    row = LiveReader(col.cfg.db_path).get(t)
+    assert row["outcome"] == "failed" and row["error"] == "http_503" and not col._retry_timers

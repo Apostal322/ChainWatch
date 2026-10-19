@@ -53,7 +53,8 @@ def live_db(env):
         return httpx.Response(200, json=esplora_tx(tid, **kw))
 
     async def fill():
-        cfg = LiveConfig(enabled=True, db_path=db, fetch_per_minute=6000, fetch_burst=100)
+        cfg = LiveConfig(enabled=True, db_path=db, fetch_per_minute=6000, fetch_burst=100,
+                         fetch_max_attempts=1)  # fmt: skip
         col = Collector(
             cfg, LiveStore(db), http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
         )

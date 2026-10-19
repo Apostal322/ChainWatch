@@ -69,6 +69,11 @@ class Counters:
     malformed_payloads: int = 0
     upstream_errors: int = 0  # HTTP 5xx (the fetch budget pauses briefly)
     internal_errors: int = 0  # unexpected exceptions while processing one item
+    # bounded retries of transient detail-fetch failures (each attempt uses the fetch budget)
+    retries_scheduled: int = 0
+    retries_succeeded: int = 0  # fetched on a later attempt
+    retries_exhausted: int = 0  # still failing after the last attempt, or out of time
+    retries_dropped: int = 0  # no room for another pending retry: recorded as failed
     db_errors: int = 0  # lifecycle/gap writes that failed (e.g. the database was locked)
     # mempool's backend repeats its sequence number while it re-syncs (after its restart):
     # those deltas re-announce the whole mempool and are not new arrivals, so they are skipped
@@ -262,6 +267,9 @@ class Collector:
         self.seen = SeenSet(cfg.dedupe_max)
         self.gone = LifecycleMemo(GONE_MAX)  # removed, mined or replaced: not worth fetching
         self.queue: asyncio.Queue[tuple[str, float]] = asyncio.Queue(maxsize=cfg.queue_max)
+        # txid -> (next attempt number, last error) while a retry is pending or queued
+        self._retry: dict[str, tuple[int, str]] = {}
+        self._retry_timers: dict[str, tuple[asyncio.TimerHandle, float]] = {}
         self.bucket = TokenBucket(cfg.fetch_per_minute, cfg.fetch_burst)
         self.recent_fee_rates: deque[float] = deque(maxlen=500)
         self.stop = asyncio.Event()
@@ -431,9 +439,10 @@ class Collector:
 
     # ---- REST side -----------------------------------------------------------------------
     async def fetch_one(self, txid: str, first_seen: float) -> None:
+        attempt, previous_error = self._retry.pop(txid, (1, ""))
         now = self.clock()
         if now - first_seen > self.cfg.max_queue_age_s:
-            self.c.expired += 1
+            self._expired(txid, first_seen, previous_error)
             return
         if txid in self.gone:  # replaced, evicted or mined while queued: a fetch would 404
             self.c.gone_before_fetch += 1
@@ -443,7 +452,7 @@ class Collector:
             return
         await self.bucket.acquire()
         if self.clock() - first_seen > self.cfg.max_queue_age_s:  # aged while paused
-            self.c.expired += 1
+            self._expired(txid, first_seen, previous_error)
             return
         if txid in self.gone:  # left the mempool while waiting for a token
             self.c.gone_before_fetch += 1
@@ -491,9 +500,74 @@ class Collector:
                     flags = feat.indicators(f, self.recent_fee_rates)
                     self.recent_fee_rates.append(f["fee_rate"])
                     self._store_and_assess(f, flags, payload)
-        if error is not None:
+                    self.c.retries_succeeded += attempt > 1
+        if error is not None and not self._schedule_retry(txid, first_seen, attempt, error):
             self.c.failed += 1
             self.store.add_failed(txid, first_seen, self.clock(), error)
+
+    # ---- bounded retries ---------------------------------------------------------------
+    @staticmethod
+    def transient(error: str, attempt: int) -> bool:
+        """Failures worth another attempt. A 404 right after the announcement can be the
+        explorer's indexing lag, so it gets one more try; malformed or oversized payloads
+        and other 4xx answers will not change."""
+        if error == "not_found":
+            return attempt == 1
+        return error in ("timeout", "rate_limited") or error.startswith(("network:", "http_5"))
+
+    def _schedule_retry(self, txid: str, first_seen: float, attempt: int, error: str) -> bool:
+        """Re-queue a transient failure after an exponential, jittered delay. Never beyond
+        ``fetch_max_attempts``, never past ``max_queue_age_s`` and never more pending
+        retries than half the queue. Returns False when the failure is final."""
+        cfg = self.cfg
+        if attempt >= cfg.fetch_max_attempts or not self.transient(error, attempt):
+            self.c.retries_exhausted += attempt > 1
+            return False
+        if self.stop.is_set() or len(self._retry_timers) >= max(1, cfg.queue_max // 2):
+            self.c.retries_dropped += 1
+            return False
+        delay = cfg.fetch_retry_base_s * 2 ** (attempt - 1) * (0.5 + 0.5 * self.rng.random())
+        if self.clock() + delay - first_seen > cfg.max_queue_age_s:
+            self.c.retries_exhausted += 1
+            return False
+        self._retry[txid] = (attempt + 1, error)
+        timer = asyncio.get_running_loop().call_later(delay, self._requeue, txid, first_seen)
+        self._retry_timers[txid] = (timer, first_seen)
+        self.c.retries_scheduled += 1
+        return True
+
+    def _requeue(self, txid: str, first_seen: float) -> None:
+        self._retry_timers.pop(txid, None)
+        try:
+            self.queue.put_nowait((txid, first_seen))
+        except asyncio.QueueFull:
+            self.c.retries_dropped += 1
+            _, error = self._retry.pop(txid, (0, "retry_dropped"))
+            self.c.failed += 1
+            self._record_failed(txid, first_seen, error)
+
+    def _expired(self, txid: str, first_seen: float, previous_error: str) -> None:
+        self.c.expired += 1
+        if previous_error:  # a retried fetch that ran out of time is a failure, not a skip
+            self.c.retries_exhausted += 1
+            self.c.failed += 1
+            self._record_failed(txid, first_seen, previous_error)
+
+    def _record_failed(self, txid: str, first_seen: float, error: str) -> None:
+        try:
+            self.store.add_failed(txid, first_seen, self.clock(), error)
+        except sqlite3.Error as e:
+            self.c.db_errors += 1
+            self.last_error = f"database: {type(e).__name__}: {e}"[:200]
+
+    def _drain_retries(self) -> None:
+        """On shutdown, pending retries are recorded with their last error (not lost)."""
+        for txid, (timer, first_seen) in list(self._retry_timers.items()):
+            timer.cancel()
+            _, error = self._retry.pop(txid, (0, "retry_pending"))
+            self.c.failed += 1
+            self._record_failed(txid, first_seen, error)
+        self._retry_timers.clear()
 
     async def _get(self, url: str) -> tuple[int, Any, bytes]:
         """GET with a size cap on the body (status, headers, body)."""
@@ -817,6 +891,7 @@ class Collector:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            self._drain_retries()
             self.state = "failed" if self.fatal else "stopped"
             self.last_error = self.fatal or self.last_error
             self.connected_since = None

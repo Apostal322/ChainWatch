@@ -31,8 +31,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - name: Install
-        run: python -m pip install -e ".[dev]"
+          cache-dependency-path: requirements/dev.lock.txt
+      - name: Install (hash-locked; nothing resolved or built from unpinned sources)
+        run: |
+          python -m pip install --require-hashes -r requirements/dev.lock.txt
+          python -m pip install --no-deps --no-build-isolation -e .
       - name: Lint
         run: |
           ruff check .
@@ -58,6 +61,29 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - name: Known vulnerabilities in the locked Python dependencies (CI, serving image, VM)
+        run: |
+          python -m pip install --require-hashes -r requirements/audit.lock.txt
+          for lock in dev serve live; do
+            pip-audit --disable-pip --require-hashes --progress-spinner off \
+              -r "requirements/$lock.lock.txt"
+          done
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - name: Known vulnerabilities in the dashboard's npm dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
   shell:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -69,7 +95,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [python, frontend]
+    needs: [python, frontend, audit]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build images (hash-locked dependencies, digest-pinned bases)

@@ -379,3 +379,26 @@ def test_status_never_shows_credentials_from_a_source_url():
     raw = {"ws_url": "wss://user:secret@node.example/ws", "err": ["https://u:p@h.example/tx"]}
     clean = {"ws_url": "wss://node.example/ws", "err": ["https://h.example/tx"]}
     assert live_api._redact(raw) == clean
+
+
+def test_edge_internal_errors_are_json_with_security_headers(tmp_path):
+    """The edge had no 500 handler: a plain-text answer without the security headers."""
+    from chainwatch.live.edge import create_edge_app
+    from chainwatch.live.store import LiveStore
+    from chainwatch.serving.security import SECURITY_HEADERS
+
+    db = tmp_path / "l.sqlite"
+    LiveStore(db)
+    app = create_edge_app(LiveConfig(enabled=True, db_path=str(db)), TOKEN)
+
+    @app.get("/v1/live/boom")
+    def boom():
+        raise RuntimeError("internal detail")
+
+    with TestClient(app, raise_server_exceptions=False) as c:
+        r = c.get("/v1/live/boom", headers={"authorization": f"Bearer {TOKEN}"})
+    assert r.status_code == 500 and r.json()["error"]["code"] == "internal_error"
+    assert "internal detail" not in r.text
+    for k, v in SECURITY_HEADERS.items():
+        assert r.headers[k] == v
+    assert r.headers["cache-control"] == "no-store" and r.headers["x-request-id"]

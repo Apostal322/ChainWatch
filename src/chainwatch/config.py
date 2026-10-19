@@ -222,6 +222,10 @@ class LiveConfig:
     request_timeout_s: float = 10.0
     queue_max: int = 200  # pending detail fetches; newer txids are dropped when full
     max_queue_age_s: float = 300.0  # skip queued txids older than this (no stale backfill)
+    # transient detail-fetch failures (timeout, network, 429, 5xx, a first 404) are retried
+    # with exponential backoff and jitter; every attempt draws from the same fetch budget
+    fetch_max_attempts: int = 3  # 1 = never retry
+    fetch_retry_base_s: float = 5.0  # first retry after 2.5-5 s, then 5-10 s, ...
     dedupe_max: int = 200_000  # txids remembered for deduplication (bounded LRU)
     retention_rows: int = 20_000  # stored transactions kept in SQLite
     retention_days: float = 7.0  # and none older than this
@@ -263,12 +267,15 @@ class LiveConfig:
         prune delete all stored rows; ``heartbeat_s: 0`` made the heartbeat loop spin)."""
         if not 0.0 < self.sample_rate <= 1.0:
             raise ValueError("live.sample_rate must be in (0, 1]")
+        if self.fetch_max_attempts > 10:
+            raise ValueError("live.fetch_max_attempts must be at most 10")
         at_least_one = ("fetch_per_minute", "fetch_burst", "fetch_concurrency", "queue_max",
-                        "dedupe_max", "retention_rows", "sse_max_per_client",
+                        "fetch_max_attempts", "dedupe_max", "retention_rows", "sse_max_per_client",
                         "edge_rate_limit_per_minute")  # fmt: skip
         positive = ("request_timeout_s", "max_queue_age_s", "retention_days", "reconnect_base_s",
                     "reconnect_max_s", "stale_after_s", "heartbeat_s", "sse_max_seconds",
-                    "indicator_max_age_days", "remote_timeout_s")  # fmt: skip
+                    "indicator_max_age_days", "remote_timeout_s",
+                    "fetch_retry_base_s")  # fmt: skip
         for name in at_least_one:
             if getattr(self, name) < 1:
                 raise ValueError(f"live.{name} must be at least 1")

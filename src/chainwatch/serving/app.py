@@ -48,6 +48,7 @@ from chainwatch.serving.security import (
     SECURITY_HEADERS,
     BodySizeLimitMiddleware,
     RateLimitMiddleware,
+    internal_error_headers,
     request_id,
 )
 from chainwatch.serving.store import FeatureStore, UnknownTransactionError, data_fingerprint
@@ -177,7 +178,9 @@ def _install_error_handlers(app: FastAPI) -> None:
             "unhandled error",
             extra={"extra_fields": {"request_id": getattr(request.state, "request_id", None)}},
         )
-        return _error(500, "internal_error", "internal server error", request)
+        response = _error(500, "internal_error", "internal server error", request)
+        response.headers.update(internal_error_headers(getattr(request.state, "request_id", None)))
+        return response
 
 
 # --------------------------------------------------------------------------- app

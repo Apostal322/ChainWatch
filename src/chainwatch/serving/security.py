@@ -35,6 +35,15 @@ SECURITY_HEADERS = {
 }
 
 
+def internal_error_headers(request_id: str | None) -> dict[str, str]:
+    """Headers for a 500 answer. Starlette sends it from ``ServerErrorMiddleware``, outside
+    every user middleware, so the usual header hook never sees it."""
+    out = {**SECURITY_HEADERS, "cache-control": "no-store"}
+    if request_id:
+        out["x-request-id"] = request_id
+    return out
+
+
 def client_key(scope: Scope, trusted_proxy_hops: int = 0) -> str:
     """Client identity for rate limits and per-client caps.
 

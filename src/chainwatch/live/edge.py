@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import dataclasses
 import hmac
+import json
+import logging
 import os
 import re
 import sys
@@ -32,8 +34,11 @@ from chainwatch.serving.security import (
     SECURITY_HEADERS,
     BodySizeLimitMiddleware,
     RateLimitMiddleware,
+    internal_error_headers,
     request_id,
 )
+
+log = logging.getLogger("chainwatch.edge")
 
 MIN_TOKEN_CHARS = 32
 
@@ -98,6 +103,15 @@ def create_edge_app(live: LiveConfig, token: str | tuple[str, ...]) -> FastAPI:
         return _error(
             exc.status_code, code.get(exc.status_code, "http_error"), str(exc.detail), request
         )
+
+    @app.exception_handler(Exception)
+    async def _internal(request: Request, exc: Exception):
+        rid = getattr(request.state, "request_id", None)
+        log.error(json.dumps({"msg": "unhandled error", "request_id": rid,
+                              "error": type(exc).__name__}))  # fmt: skip
+        response = _error(500, "internal_error", "internal server error", request)
+        response.headers.update(internal_error_headers(rid))
+        return response
 
     @app.middleware("http")
     async def headers(request: Request, call_next):
