@@ -66,9 +66,14 @@ GitHub's runners the whole training takes about 4 minutes). Render now **pulls a
 image**, so nothing is trained on Render, neither at build time nor at start-up.
 
 **Pipeline.**
-1. [`publish-demo-image.yml`](../.github/workflows/publish-demo-image.yml) runs on every
-   push to `main` (and on manual dispatch). It builds the same `demo` target as CI for
-   `linux/amd64`.
+1. [`publish-demo-image.yml`](../.github/workflows/publish-demo-image.yml) runs only after
+   the **CI** workflow has **succeeded for a push to `main`** (`workflow_run`), and builds
+   exactly the commit CI tested; a failed, cancelled or still-running CI publishes nothing.
+   Its first step re-checks through the API that CI succeeded for that commit (also for a
+   manual dispatch on `main`). CI covers the Python tests on Linux and Windows, the
+   dashboard, the dependency audit (pip-audit and npm audit), shellcheck and the Docker
+   smoke test. It builds the same `demo` target as CI for `linux/amd64`
+   (`tests/test_release_gate.py` keeps these conditions from regressing).
 2. [`scripts/check_demo_image.sh`](../scripts/check_demo_image.sh) gates the image:
    - the image holds synthetic data and synthetic-trained models only (marker file, raw-file
      hashes that do not match the published Elliptic++ files, `data_mode: synthetic`);

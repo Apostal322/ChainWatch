@@ -78,17 +78,32 @@ the live-computable XGBoost run exactly.
 | M3 | P3 | Below-chance late ranking (LR ROC-AUC 0.31 / 0.34 on steps 43–49) not reported; "pre-registered" overstated what the commit order proves | reported; amendments section |
 | M4 | P3 | A third-party count presented as local data; missingness means not labelled as per-step vs pooled | corrected |
 
-### Accepted or open (not changed in v0.8)
+### Release blockers closed before approval (final v0.8.0 pass, baseline `69ec57d`)
 
-* **Open, MEDIUM:** 500 responses from the edge do not carry the security headers.
-* **Open, MEDIUM (supply chain):** no Dependabot; CI installs `.[dev]` without a lock; the
-  publish workflow does not wait for CI. Recommendations only; no workflow that publishes
-  was changed.
-* **Open, MEDIUM:** a fetch that failed transiently is never retried (the row stays
-  `failed`); `restore` is refused while the collector runs but not while systemd is about
-  to restart it (stop both units first, as the runbook says).
-* **Open, LOW (performance):** three read paths exceed 100 ms at the cap (flag + fee range +
-  deep offset 210 ms; 24 h stats 254 ms; `sort=vsize` with offset 100,000 145 ms).
+| # | Sev | Component | Problem (root cause) | Fix | Test / evidence | Commit |
+|---|---|---|---|---|---|---|
+| B1 | MEDIUM | dashboard, edge | 500 answers had no security headers: Starlette sends them from `ServerErrorMiddleware`, outside every user middleware; the edge had no 500 handler (plain text). 413 and 429 answers already had them (checked) | both 500 handlers set the headers, `cache-control: no-store` and the request id, with a JSON body without internal details | `test_internal_errors_carry_the_security_headers`, `test_edge_internal_errors_are_json_with_security_headers` (fail on `69ec57d`) | `32f5c07` |
+| B2 | MEDIUM | collector | A transient detail-fetch failure was final: one 503, timeout or 429 lost the transaction | bounded retries: transient = timeout, network, 429, 5xx, a first 404 (indexing lag); permanent = malformed/oversized payload, other 4xx. At most `fetch_max_attempts` (3; capped at 10), exponential backoff with jitter (2.5–5 s, 5–10 s), never past `max_queue_age_s`, at most `queue_max/2` pending, every attempt through the same token bucket; pending retries recorded on shutdown | 6 tests in `tests/test_live_faults.py` (recovery, cap, permanent, 404 once, age limit, shutdown; fail on `69ec57d`: settings absent); soak check "retries bounded" | `32f5c07`, `6bd4f52` |
+| B3 | MEDIUM | CI | `pip install -e ".[dev]"` resolved unpinned versions on every run | `requirements/dev.lock.txt`: hash-locked, universal (3.11–3.13; Linux, macOS, Windows), build backend included; CI installs it with `--require-hashes` and the package with `--no-deps --no-build-isolation` | `test_ci_installs_only_hash_locked_dependencies`; CI green on Linux and Windows | `32f5c07` |
+| B4 | MEDIUM | supply chain | No dependency update automation, no vulnerability audit | Dependabot (pip, npm, GitHub Actions, Docker base images; PRs only); CI `dependency audit` job: pip-audit on the dev, serve and live locks (from its own hash lock), `npm audit --audit-level=high`; the Docker job needs it | first run: no known vulnerabilities in any lock, 0 npm vulnerabilities | `32f5c07` |
+| B5 | MEDIUM | release | The public image workflow ran on every push to `main` in parallel with CI: a commit failing CI was still published | `workflow_run` after CI **succeeded** for a push to `main`, same-repository only; builds and tags exactly the tested commit; first step re-checks the CI result through the API (manual dispatch too); `packages: write` and `actions: read` only in that job | `test_image_is_published_only_after_successful_ci` (fails on `69ec57d`), actionlint + shellcheck clean | `32f5c07` |
+| B6 | LOW | performance | `stats(1440)` at the cap: a per-row linear scan over the fee bins and a JSON parse of every row's flags | binary search into the bins; empty flag lists not parsed. Output identical (hash of stats for 60/240/1,440 min equals the previous code's) | p50 220 → 160 ms, p95 293 → 211 ms (50k-row DB, warm); `test_fee_histogram_binary_search_matches_the_linear_definition` | `9065d7d` |
+
+Re-measured and **not changed**: flag + fee range + sort by fee with a deep offset is
+43–49 ms through the reader (the 210 ms of the earlier HTTP measurement did not reproduce
+there); `sort=vsize` with a deep offset (117–134 ms) needs a full sort, and an index would
+add a write-path cost for a rarely used sort, so it stays. Already in place and verified:
+every action pinned to a commit (`test_every_action_is_pinned_to_a_commit`), workflow-level
+`permissions: contents: read`, the image build content-reproducible (two builds, one
+without cache: identical package set, application files and native libraries; image
+digests differ by timestamps only).
+
+### Accepted or open (after v0.8.0)
+
+* **Open, LOW:** `restore` is refused while the collector runs but not while systemd is
+  about to restart it (stop both units first, as the runbook says).
+* **Open, LOW (performance):** `sort=vsize` with a deep offset (~120 ms) and the 24 h stats
+  (~160 ms) at the cap; both are cached by the dashboard proxy.
 * **Accepted:** uvicorn `limit_concurrency=32` (mitigated by Caddy timeouts); a single
   150 MB XML attribute still peaks near 470 MB (expat limitation; the source is a trusted
   HTTPS host and the refresh unit has a memory cap).

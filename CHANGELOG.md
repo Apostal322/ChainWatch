@@ -38,6 +38,15 @@ and passes now. Full matrix: [docs/AUDIT.md](docs/AUDIT.md#v080-independent-hard
   firewall fixes; CI job timeouts, one run per PR, shellcheck.
 - **Dashboard.** No silent feed freeze; explicit unavailable states; server-provided
   anomaly baseline; superseded sources labelled; accessibility fixes.
+- **Release blockers (final pass).**
+  - Bounded retries of transient detail-fetch failures (exponential backoff with jitter,
+    request-budget accounting, transient vs permanent classification, never past the queue
+    age limit; `fetch_max_attempts`, `fetch_retry_base_s`).
+  - Security headers on 500 answers (dashboard and edge).
+  - CI installs a hash lock (`requirements/dev.lock.txt`) and audits every lock (pip-audit,
+    npm audit); Dependabot for pip, npm, Actions and Docker.
+  - The public demo image is published only after CI succeeded for that exact commit.
+  - `stats` for 24 h at the cap: 220 → 160 ms (identical output).
 - **Research documents.** Feature-subset gain shares recomputed over the trees prediction
   uses; tie-aware P@20; below-chance late ranking reported; amendments section. No
   published AP, interval or split changed.
