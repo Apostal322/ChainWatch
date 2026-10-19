@@ -206,9 +206,11 @@ happens and you accept the card risk.
 **C. Install** (SSH into the VM):
 ```bash
 IP=$(curl -s https://ifconfig.me); HOST="${IP//./-}.sslip.io"     # e.g. 203-0-113-7.sslip.io
-curl -fsSLO https://raw.githubusercontent.com/Apostal322/ChainWatch/main/deploy/oracle/install.sh
+REF=main                     # a branch or tag (git clone --branch); after the v0.8.0 merge
+SHA=<full commit SHA of $REF> # from GitHub; install.sh aborts if the checkout differs
+curl -fsSLO "https://raw.githubusercontent.com/Apostal322/ChainWatch/$SHA/deploy/oracle/install.sh"
 less install.sh                                  # read it before running it as root
-sudo CHAINWATCH_HOST="$HOST" REF=<release tag> EXPECTED_SHA=<its commit> bash install.sh
+sudo CHAINWATCH_HOST="$HOST" REF="$REF" EXPECTED_SHA="$SHA" bash install.sh
 sudo cat /etc/chainwatch/live.env                # copy the token once; keep it secret
 ```
 
@@ -321,7 +323,9 @@ Monthly estimates (derived, not measured on the network):
    * every gap explained;
    * last observation < 10 min old at every check;
    * no OOM kills or restarts apart from the deliberate ones (`journalctl -u chainwatch-collector | grep -c Started`);
-   * database < 100 MB, journal < 200 MB;
+   * database < 150 MB after 24 h (at most 17,280 fetches a day at 12 per minute, about
+     5.7 KB per row with its risk record; about 285 MB at the 50,000-row cap), journal
+     < 200 MB;
    * no unexpected Oracle charges.
 6. Publish the report (numbers and gaps) in this file. Only then describe the system as
    having run continuously for 24 hours, and say "sampled", never "complete".
