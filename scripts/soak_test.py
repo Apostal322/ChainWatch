@@ -494,6 +494,11 @@ def main() -> int:
         "no risk assessment errors (last collector)": (
             (report["final_counters"] or {}).get("risk_errors", 0) == 0
         ),
+        # bounded retries (default 3 attempts): at most 2 retries per queued txid
+        "retries bounded (<= 2 per queued txid, last collector)": (
+            (report["final_counters"] or {}).get("retries_scheduled", 0)
+            <= 2 * (report["final_counters"] or {}).get("queued", 0)
+        ),
     }
     report["checks"] = checks
     report["passed"] = all(checks.values())
