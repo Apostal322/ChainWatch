@@ -18,10 +18,11 @@ fix has a test that fails on v0.8.0. Matrix: [docs/AUDIT.md](docs/AUDIT.md#v081-
   (exit 78).
 - **Assessment states.** A failed assessment leaves an "Assessment failed" record and keeps
   its addresses for later re-screening; feed rows carry `risk_state`; the dashboard shows
-  "?" (insufficient evidence) and "err" (failed) instead of "no finding".
+  "?" (insufficient evidence), "err" (failed) and "screening unavailable" (no list was
+  loaded) instead of "no finding".
 - **Collector.** Retries are never lost on shutdown; a locked database in the failure path
   is not fatal; mempool re-sync stretches are recorded as coverage gaps; the stale watchdog
-  needs mempool updates; stricter input validation.
+  needs mempool updates; stricter input validation; availability subtracts re-sync time.
 - **Anomaly detector `robust-tail/3`.** "Strong" needs flags in two evidence groups (size,
   fee, value, output shape): vsize and the counts that determine it are one fact.
 - **Alerts.** Alerts a person acted on are kept with their notes (only untouched `new`
