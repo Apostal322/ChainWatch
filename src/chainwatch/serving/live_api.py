@@ -59,6 +59,7 @@ CACHE_MAX_KEYS = 256  # RemoteBackend LRU size
 UPSTREAM_PER_S = 3.0  # RemoteBackend cache misses per second (edge allows 240/min per client)
 UPSTREAM_BURST = 20
 RISK_SUMMARY_TTL_S = 15.0
+MAX_ROW_ID = 2**63 - 1  # SQLite INTEGER: larger ids raised OverflowError (HTTP 500)
 STALE_OK_S = 60.0  # RemoteBackend serves a key's last good answer this long on failure
 HOURS_STEPS = (1, 6, 24, 168, 720)  # remote queries are snapped to these (bounded key space)
 WINDOW_STEPS = (60, 240, 1440)
@@ -549,7 +550,7 @@ def install_live_routes(
         max_fee_rate: float | None = Query(None, ge=0),
         flag: str | None = Query(None),
         outcome: str = Query("fetched", pattern="^(fetched|failed|all)$"),
-        after_id: int | None = Query(None, ge=0),
+        after_id: int | None = Query(None, ge=0, le=MAX_ROW_ID),
     ) -> dict[str, Any]:
         if sort not in SORTABLE:
             raise HTTPException(400, f"sort must be one of {sorted(SORTABLE)}")
@@ -590,7 +591,7 @@ def install_live_routes(
     def live_findings(
         max_priority: int = Query(4, ge=1, le=4),
         limit: int = Query(50, ge=1, le=200),
-        before_id: int | None = Query(None, ge=0),
+        before_id: int | None = Query(None, ge=0, le=MAX_ROW_ID),
     ) -> dict[str, Any]:
         """Assessed transactions with a finding, newest first (priority 1 = source match)."""
         return {"mode": "live", "findings": be.findings(max_priority, limit, before_id)}

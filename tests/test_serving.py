@@ -500,3 +500,7 @@ def test_internal_errors_carry_the_security_headers(env):
     for k, v in SECURITY_HEADERS.items():
         assert r.headers[k] == v
     assert r.headers["x-request-id"] == "trace-500"
+
+
+def test_api_answers_are_not_cached(client):
+    assert client.get("/v1/info").headers["cache-control"] == "no-store"

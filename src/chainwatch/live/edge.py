@@ -23,6 +23,7 @@ import time
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -103,6 +104,11 @@ def create_edge_app(live: LiveConfig, token: str | tuple[str, ...]) -> FastAPI:
         return _error(
             exc.status_code, code.get(exc.status_code, "http_error"), str(exc.detail), request
         )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation(request: Request, exc: RequestValidationError):
+        # the error envelope, without echoing the input back
+        return _error(422, "validation_error", "request validation failed", request)
 
     @app.exception_handler(Exception)
     async def _internal(request: Request, exc: Exception):

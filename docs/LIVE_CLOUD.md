@@ -154,7 +154,7 @@ happens and you accept the card risk.
     from a shared egress IP (Render's) cannot lock the dashboard out. 64 KB bodies,
     `limit ≤ 200`, GET only, no docs or OpenAPI schema; uvicorn `limit_concurrency=32`.
   * Caddy: header and body read timeouts of 10 s and a 60 s idle timeout (slow-client
-    connections cannot hold the 32 uvicorn slots), and only `GET`/`HEAD` reach the edge
+    connections cannot hold the 32 uvicorn slots), and only `GET` reaches the edge
     routes.
   * dashboard: its existing 120/min public limit; the remote backend fetches each query at
     most once per 2 s (single flight for concurrent misses), caches failures for the same

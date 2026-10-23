@@ -402,3 +402,23 @@ def test_edge_internal_errors_are_json_with_security_headers(tmp_path):
     for k, v in SECURITY_HEADERS.items():
         assert r.headers[k] == v
     assert r.headers["cache-control"] == "no-store" and r.headers["x-request-id"]
+
+
+def test_edge_validation_errors_use_the_envelope_and_huge_ids_are_422(tmp_path):
+    """An id above SQLite's INTEGER range reached SQLite (OverflowError: HTTP 500 and a
+    traceback in the journal); the edge's 422 echoed the raw input."""
+    from chainwatch.live.edge import create_edge_app
+    from chainwatch.live.store import LiveStore
+
+    db = tmp_path / "l.sqlite"
+    LiveStore(db).close()
+    auth = {"authorization": f"Bearer {TOKEN}"}
+    with TestClient(create_edge_app(LiveConfig(enabled=True, db_path=str(db)), TOKEN)) as c:
+        for url in ("/v1/live/transactions?after_id=9223372036854775808",
+                    "/v1/live/findings?before_id=9223372036854775808",
+                    "/v1/live/transactions?limit=<script>"):  # fmt: skip
+            r = c.get(url, headers=auth)
+            assert r.status_code == 422, url
+            assert r.json()["error"]["code"] == "validation_error" and "<script>" not in r.text
+        assert c.get("/v1/live/transactions?after_id=9223372036854775807",
+                     headers=auth).status_code == 200  # fmt: skip

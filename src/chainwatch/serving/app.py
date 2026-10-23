@@ -237,6 +237,8 @@ def create_app(
         path = request.url.path
         if not path.startswith(("/docs", "/redoc", "/v1", "/health", "/openapi")):
             response.headers.setdefault("content-security-policy", DASHBOARD_CSP)
+        elif path.startswith("/v1"):  # API answers (live data among them) are not cached
+            response.headers.setdefault("cache-control", "no-store")
         if request.url.path.startswith(("/v1", "/health")):
             log.info(
                 "request",

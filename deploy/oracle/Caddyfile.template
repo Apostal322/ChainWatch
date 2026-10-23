@@ -16,7 +16,7 @@ __CHAINWATCH_HOST__ {
 	encode zstd gzip
 	@edge {
 		path /v1/live/* /health/live /health/ready
-		method GET HEAD
+		method GET
 	}
 	handle @edge {
 		reverse_proxy 127.0.0.1:8100
