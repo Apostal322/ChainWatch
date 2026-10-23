@@ -8,10 +8,15 @@ measurement's direction, and a robust z-score ``(x - median) / (1.4826 * MAD)``.
 
 * A measurement is *flagged* when ``p <= alpha`` and ``|robust z| >= min_z`` (the z-score
   guard avoids flagging ties of discrete counts).
-* ``ANOMALY`` level ``strong``: two or more flagged measurements. Otherwise ``notable``.
-  (Before robust-tail/2, one value outside the reference range also counted as strong; with
-  a small window every flag is outside the range, so "strong" measured the window size,
-  not the evidence: on pure noise all flags were strong at n = 500.)
+* ``ANOMALY`` level ``strong``: flagged measurements in two or more *evidence groups*
+  (size: vsize, inputs, outputs; fee; value; output shape: dust, equal values, script mix).
+  Otherwise ``notable``. vsize is close to a linear function of the input and output
+  counts, so a fan-out flags vsize too: robust-tail/2 counted that one fact twice and, on
+  realistic correlated noise, raised about 1.2 priority-3 alert groups per hour at 12
+  fetches/min (robust-tail/3 counts groups). Before robust-tail/2, one value outside the
+  reference range also counted as strong (with a small window every flag is outside it).
+* ``alpha`` is per measurement: with eight measurements, about 3-4 x alpha of the
+  transactions get at least one flag under the null (at most 8 x alpha).
 * ``INSUFFICIENT_BASELINE``: fewer than ``min_reference`` reference transactions.
 
 The score is a tail probability under the sampled recent traffic, **not** a probability of
@@ -28,7 +33,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-DETECTOR_VERSION = "robust-tail/2"
+DETECTOR_VERSION = "robust-tail/3"
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,7 @@ class Measurement:
     label: str  # investigative label shown to users
     direction: str  # "high" | "low" | "both"
     unit: str
+    group: str  # evidence group: measurements that largely encode the same fact
 
     def value(self, f: dict[str, Any]) -> float | None:
         if self.name == "fee_rate":
@@ -61,18 +67,30 @@ class Measurement:
 
 
 MEASUREMENTS: tuple[Measurement, ...] = (
-    Measurement("fee_rate", "Unusual fee pattern", "both", "sat/vB"),
-    Measurement("vsize", "Unusual transaction size", "high", "vB"),
-    Measurement("n_inputs", "Unusual fan-in", "high", "inputs"),
-    Measurement("n_outputs", "Unusual fan-out", "high", "outputs"),
+    Measurement("fee_rate", "Unusual fee pattern", "both", "sat/vB", "fee"),
+    Measurement("vsize", "Unusual transaction size", "high", "vB", "size"),
+    Measurement("n_inputs", "Unusual fan-in", "high", "inputs", "size"),
+    Measurement("n_outputs", "Unusual fan-out", "high", "outputs", "size"),
     Measurement(
-        "output_value_total", "Unusual value moved (sum of outputs incl. change)", "high", "sat"
+        "output_value_total",
+        "Unusual value moved (sum of outputs incl. change)",
+        "high",
+        "sat",
+        "value",
     ),
-    Measurement("n_dust_outputs", "Unusual output distribution (dust)", "high", "outputs"),
     Measurement(
-        "max_equal_value_outputs", "Unusual output distribution (equal values)", "high", "outputs"
+        "n_dust_outputs", "Unusual output distribution (dust)", "high", "outputs", "output_shape"
     ),
-    Measurement("n_output_types", "Unusual output script mix", "high", "script types"),
+    Measurement(
+        "max_equal_value_outputs",
+        "Unusual output distribution (equal values)",
+        "high",
+        "outputs",
+        "output_shape",
+    ),
+    Measurement(
+        "n_output_types", "Unusual output script mix", "high", "script types", "output_shape"
+    ),
 )
 
 
@@ -160,6 +178,7 @@ class RobustTailDetector:
                 flagged.append(
                     {
                         "measurement": m.name,
+                        "group": m.group,
                         "label": m.label,
                         "unit": m.unit,
                         "value": x,
@@ -168,7 +187,7 @@ class RobustTailDetector:
                         "tail_probability": round(p, 6),
                         "robust_z": None if math.isinf(z) else round(z, 2),
                         "outside_reference_range": x > srt[-1] or x < srt[0],
-                        "explanation": _explain(m, x, med, p, n, side),
+                        "explanation": _explain(m, x, med, srt, side),
                     }
                 )
         if measured == 0:
@@ -177,7 +196,7 @@ class RobustTailDetector:
         if not flagged:
             return {"status": "NO_ANOMALY", "level": None, "score": None, "indicators": [],
                     "detector": detector}  # fmt: skip
-        strong = len(flagged) >= 2
+        strong = len({i["group"] for i in flagged}) >= 2  # independent pieces of evidence
         flagged.sort(key=lambda i: i["tail_probability"])
         return {
             "status": "ANOMALY",
@@ -189,8 +208,12 @@ class RobustTailDetector:
         }
 
 
-def _explain(m: Measurement, x: float, med: float, p: float, n: int, side: str) -> str:
-    share = (1 - p) * 100
+def _explain(m: Measurement, x: float, med: float, srt: list[float], side: str) -> str:
+    # the share of reference values strictly beyond x, from the counts (the two-sided p is
+    # doubled and would understate it)
+    n = len(srt)
+    below = bisect_left(srt, x) if side == "high" else n - bisect_right(srt, x)
+    share = below / n * 100
     word = "higher" if side == "high" else "lower"
     fmt = (lambda v: f"{v:,.0f}") if m.unit not in ("sat/vB",) else (lambda v: f"{v:,.2f}")
     return (

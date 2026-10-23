@@ -275,8 +275,49 @@ def test_strong_means_several_measurements_not_a_small_window():
     one = det.score(_f(n_out=400))  # one unusual measurement: notable, no alert
     assert one["status"] == "ANOMALY" and one["level"] == "notable"
     assert one["indicators"][0]["outside_reference_range"]
-    many = det.score(_f(n_out=400, vsize=9000))
+    same_fact = det.score(_f(n_out=400, vsize=9000))  # fan-out makes the tx large too
+    assert {i["group"] for i in same_fact["indicators"]} == {"size"}
+    assert same_fact["level"] == "notable"  # robust-tail/3: one evidence group
+    many = det.score(_f(n_out=400, vsize=9000, fee_rate=5000.0))  # and an unusual fee
     assert many["level"] == "strong"
+
+
+def test_correlated_size_measurements_do_not_make_noise_strong():
+    """vsize is close to a linear function of the input and output counts. Counting each
+    flagged measurement made one unusual count "strong" (priority 3, an alert): about 1.2
+    alert groups per hour of pure, realistic noise at 12 fetches/min (v0.8.1 ML audit)."""
+    rng = random.Random(7)
+
+    def tx():
+        n_in = int(rng.paretovariate(1.6))
+        n_out = 1 + int(rng.paretovariate(1.4))
+        vsize = 11 + 68 * n_in + 31 * n_out  # what the counts imply
+        fee = rng.lognormvariate(1.5, 0.8)
+        return _f(fee_rate=fee, n_in=n_in, n_out=n_out, vsize=vsize,
+                  value=int(rng.lognormvariate(13, 2)))  # fmt: skip
+
+    det = RobustTailDetector(DetectorConfig(window=2000, min_reference=1000))
+    for _ in range(2000):
+        det.update(tx())
+    strong = notable = 0
+    for _ in range(6000):
+        f = tx()
+        r = det.score(f)
+        det.update(f)
+        if r["status"] == "ANOMALY":
+            strong += r["level"] == "strong"
+            notable += r["level"] == "notable"
+    assert notable > 0  # the tails are still reported
+    assert strong / 6000 < 0.0005  # was ~0.002 (all {vsize + a count})
+
+
+def test_two_sided_explanation_states_the_actual_share():
+    """The doubled two-sided p made a fee above every reference value read "higher than
+    about 99.90%" instead of 100%."""
+    det = _trained(1200)
+    r = det.score(_f(fee_rate=10_000.0))
+    (ind,) = [i for i in r["indicators"] if i["measurement"] == "fee_rate"]
+    assert "higher than about 100.00% of the 1200" in ind["explanation"]
 
 
 def test_anomaly_reference_window_excludes_the_scored_and_later_transactions():
