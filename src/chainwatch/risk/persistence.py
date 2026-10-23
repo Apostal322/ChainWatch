@@ -151,6 +151,14 @@ def migrate(db: sqlite3.Connection) -> None:
         # source must not re-list it from the same stale content
         if "closed_by" not in {r[1] for r in db.execute("PRAGMA table_info(indicators)")}:
             db.execute("ALTER TABLE indicators ADD COLUMN closed_by INTEGER")
+            # closures are written with removed_at = the closing snapshot's retrieved_at, so
+            # rows closed before v0.8.1 get their closing version back (else a stale mirror
+            # could re-list what the official file superseded under v0.8.0)
+            db.execute(
+                "UPDATE indicators SET closed_by = (SELECT v.id FROM indicator_versions v "
+                "WHERE v.retrieved_at = indicators.removed_at ORDER BY v.id LIMIT 1) "
+                "WHERE removed_at IS NOT NULL AND closed_by IS NULL"
+            )
         if "n_errors" not in {r[1] for r in db.execute("PRAGMA table_info(risk)")}:
             db.execute("ALTER TABLE risk ADD COLUMN n_errors INTEGER NOT NULL DEFAULT 0")
             db.execute("UPDATE risk SET n_errors = 1 WHERE record LIKE '%\"errors\":[{%'")

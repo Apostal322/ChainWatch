@@ -107,6 +107,7 @@ describe("priorities", () => {
     expect(priorityMarker(null, true, "insufficient_evidence").aria).toMatch(/not a statement of legitimacy/);
     expect(priorityMarker(null, true, "failed")).toEqual({ short: "err", aria: expect.stringMatching(/^Assessment failed/) });
     expect(priorityMarker(null, true, "no_finding").short).toBe("—");
+    expect(priorityMarker(null, true, "screening_unavailable").aria).toMatch(/^Not screened/);
     expect(priorityMarker(1, true, "finding").short).toBe("P1");
   });
 

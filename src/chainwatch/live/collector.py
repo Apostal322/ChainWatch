@@ -813,8 +813,8 @@ class Collector:
                 if not db.in_transaction:
                     raise
             return None
-        # the window holds only stored transactions, in order (a rolled-back record must not
-        # shape later scores; after a restart the warm start rebuilds the same window)
+        # the window holds only committed transactions, in order (a rolled-back record must
+        # not shape later scores); a restart's warm start reads the stored rows instead
         self._pending_update = f
         return record
 

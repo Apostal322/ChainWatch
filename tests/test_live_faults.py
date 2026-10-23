@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import sqlite3
 import sys
@@ -816,10 +817,13 @@ def test_backup_rotation_counts_only_verified_copies(tmp_path, monkeypatch):
     manual.write_bytes(b"x")
     stale = dest / "live-20260101T000000Z.sqlite.partial"
     stale.write_bytes(b"x")
+    os.utime(stale, (time.time() - 7200, time.time() - 7200))
+    running = dest / "live-20260101T000001Z.sqlite.partial"  # a concurrent backup's copy
+    running.write_bytes(b"x")
     for i in range(4):
         live_cli.backup(db, dest, keep=2, now=1_800_000_000 + i)
     ours = sorted(p.name for p in dest.glob("live-2*.sqlite"))
-    assert len(ours) == 2 and manual.exists() and not stale.exists()
+    assert len(ours) == 2 and manual.exists() and not stale.exists() and running.exists()
     for name in ours:
         digest, fname = (dest / f"{name}.sha256").read_text().split()
         assert fname == name and len(digest) == 64
@@ -869,3 +873,14 @@ def test_collector_start_during_a_restore_is_a_temporary_failure(tmp_path, capsy
     finally:
         lock.close()
     assert "being restored" in capsys.readouterr().err
+
+
+def test_collector_refuses_a_database_with_a_damaged_schema_page(tmp_path, capsys):
+    """quick_check ran after LiveStore had opened the file: a damaged first page raised
+    DatabaseError there instead (exit 1, a systemd restart loop). Second review, v0.8.1."""
+    db, _ = _db_with_backup(tmp_path)
+    with open(db, "r+b") as fh:
+        fh.seek(16)  # page size and header fields of page 1
+        fh.write(b"\xff" * 84)
+    assert live_cli.main(_collect_argv(tmp_path, db)) == 78
+    assert "integrity" in capsys.readouterr().err

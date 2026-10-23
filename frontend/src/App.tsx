@@ -27,7 +27,11 @@ export default function App() {
     if (window.location.hash !== `#${slug(t)}`) window.history.pushState(null, "", `#${slug(t)}`);
   }, []);
   useEffect(() => {
-    const onHash = () => setTabState(tabFromHash());
+    // only a tab's own hash switches tabs: skip links (#main, #findings-h) must not
+    const onHash = () => {
+      const t = TABS.find((x) => `#${slug(x)}` === window.location.hash);
+      if (t) setTabState(t);
+    };
     window.addEventListener("hashchange", onHash);
     window.addEventListener("popstate", onHash);
     return () => {

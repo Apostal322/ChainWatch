@@ -78,10 +78,12 @@ elif [ -d "$APP/.git" ]; then
   run git -C "$APP" checkout -q --force FETCH_HEAD
 else
   staging=$(mktemp -d "$PREFIX/.app-new.XXXXXX")
+  trap 'rm -rf "$staging"' EXIT  # an unverified tree is never left behind
   run git clone -q --depth 1 --branch "$REF" "$REPO_URL" "$staging"
   verify "$(git -C "$staging" rev-parse HEAD)"
   run chmod 0755 "$staging"
   run mv "$staging" "$APP"
+  trap - EXIT
 fi
 new_installer="$APP/deploy/oracle/install.sh"
 if [ "$DRY_RUN" != "1" ] && [ -z "${CHAINWATCH_INSTALL_REEXEC:-}" ] && [ -f "$new_installer" ] \

@@ -56,6 +56,20 @@ def _live(args) -> LiveConfig:
     return live
 
 
+def _quick_check(db: Path) -> str:
+    """'ok', or what is wrong with an existing database file (a missing file is fine)."""
+    if not Path(db).is_file() or Path(db).stat().st_size == 0:
+        return "ok"
+    try:
+        con = sqlite3.connect(f"file:{Path(db).as_posix()}?mode=ro", uri=True)
+        try:
+            return str(con.execute("PRAGMA quick_check").fetchone()[0])
+        finally:
+            con.close()
+    except sqlite3.DatabaseError as e:
+        return f"{type(e).__name__}: {e}"
+
+
 def cmd_collect(args) -> int:
     from chainwatch.live.collector import Collector
     from chainwatch.live.store import LiveStore
@@ -68,14 +82,14 @@ def cmd_collect(args) -> int:
             "live monitoring is disabled in this config; use configs/live.yaml or "
             "configs/live-cloud.yaml (or pass --force for a one-off bounded run)"
         )
-    store = LiveStore(live.db_path)
-    # a corrupted file would otherwise be written to until the nightly backup fails
-    check = store.db.execute("PRAGMA quick_check").fetchone()[0]
+    # a corrupted file would otherwise be written to until the nightly backup fails; checked
+    # read-only before anything opens (or migrates) it, a damaged schema page included
+    check = _quick_check(live.db_path)
     if check != "ok":
-        store.close()
         print(f"chainwatch-live: {live.db_path} failed its integrity check ({check}); restore "
               "a backup (docs/LIVE_CLOUD.md section 9)", file=sys.stderr)  # fmt: skip
         return 78  # EX_CONFIG-like: systemd does not restart-loop on a corrupted database
+    store = LiveStore(live.db_path)
     collector = Collector(live, store)
     try:
         c = asyncio.run(collector.run(args.duration, args.max_fetches))
@@ -123,8 +137,9 @@ def backup(db: Path, dest_dir: Path, keep: int, now: float | None = None) -> Pat
         raise FileNotFoundError(f"live database {db} does not exist")
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
     dest_dir = Path(dest_dir)
-    for stale in dest_dir.glob("live-*.sqlite.partial"):  # an interrupted earlier run
-        stale.unlink()
+    for stale in dest_dir.glob("live-*.sqlite.partial"):  # an interrupted earlier run (an
+        if time.time() - stale.stat().st_mtime > 3600:  # hour old: not a concurrent backup)
+            stale.unlink(missing_ok=True)
     store = LiveStore(db)
     try:
         out = store.backup(dest_dir / f"live-{stamp}.sqlite")  # integrity-checked

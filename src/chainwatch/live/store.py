@@ -109,8 +109,9 @@ _NO_EVIDENCE_ANOMALY = ("INSUFFICIENT_BASELINE", "INSUFFICIENT_INFORMATION", "ER
 def risk_state(found: tuple | None) -> str:
     """One word for a feed row, so "nothing found" is never shown for a transaction whose
     screening could not run: ``finding`` (a priority), ``no_finding``, ``insufficient_evidence``
-    (no screening data and no anomaly baseline), ``failed`` (the assessment itself failed),
-    or ``not_assessed`` (risk off, or before risk existed)."""
+    (no screening data and no anomaly baseline), ``screening_unavailable`` (the anomaly layer
+    ran but no address was screened), ``failed`` (the assessment itself failed), or
+    ``not_assessed`` (risk off, or before risk existed)."""
     if found is None:
         return "not_assessed"
     priority, screening, anomaly = found
@@ -120,6 +121,8 @@ def risk_state(found: tuple | None) -> str:
         return "failed"
     if screening in _NO_EVIDENCE_SCREENING and anomaly in _NO_EVIDENCE_ANOMALY:
         return "insufficient_evidence"
+    if screening in _NO_EVIDENCE_SCREENING:  # anomaly ran, but nothing was screened
+        return "screening_unavailable"
     return "no_finding"
 
 
@@ -520,7 +523,9 @@ class LiveReader:
         """Share of the window in which the collector was receiving (outages subtracted).
 
         The window starts no earlier than the collector's first start, so a fresh install
-        is not penalised for time before it existed. Sequence gaps are counted separately.
+        is not penalised for time before it existed. Sequence gaps are counted separately;
+        a re-sync stretch (a sequence_gap with a duration: new arrivals were skipped) also
+        counts as unobserved time.
         """
         now = time.time() if now is None else now
         st = self.status()
@@ -537,7 +542,7 @@ class LiveReader:
         intervals = sorted(
             (max(r["started_at"], begin), min(r["e"], now))
             for r in rows
-            if r["kind"] != "sequence_gap" and r["e"] > begin
+            if r["e"] > begin and (r["kind"] != "sequence_gap" or r["e"] > r["started_at"])
         )
         down, cur_s, cur_e = 0.0, None, None
         for s0, e0 in intervals:  # merge overlapping intervals

@@ -287,6 +287,9 @@ export function priorityMarker(
 ): { short: string; aria: string } {
   if (isPriority(level)) return { short: PRIORITY_INFO[level].short, aria: PRIORITY_INFO[level].aria };
   if (state === "failed") return { short: "err", aria: "Assessment failed: this transaction was not evaluated" };
+  if (state === "screening_unavailable") {
+    return { short: "?", aria: "Not screened: no indicator data or no address could be screened (not a statement of legitimacy)" };
+  }
   if (state === "insufficient_evidence") {
     return { short: "?", aria: "Insufficient evidence: no screening data and no anomaly baseline (not a statement of legitimacy)" };
   }

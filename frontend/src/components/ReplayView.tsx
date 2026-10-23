@@ -30,6 +30,7 @@ export default function ReplayView({ info }: { info: Info }) {
     requestAnimationFrame(() => revealIfStacked(detailRef.current));
   };
 
+  const rankingKey = useRef("");
   useEffect(() => {
     api.steps().then((s) => {
       setSteps(s);
@@ -51,7 +52,11 @@ export default function ReplayView({ info }: { info: Info }) {
     if (step === null || !available.includes(policy)) return;
     let ignore = false;
     setError(null);
-    setRanking(null); // never show the previous step's rows under the new step's caption
+    // never show the previous step's rows under the new step's caption (paging within one
+    // step keeps them while loading, so keyboard focus on the pager survives)
+    const key = `${step}|${policy}|${labels}`;
+    if (rankingKey.current !== key) setRanking(null);
+    rankingKey.current = key;
     api.ranking(step, policy, labels, offset, PAGE)
       .then((r) => { if (!ignore) setRanking(r); })
       .catch((e) => { if (!ignore) { setRanking(null); setError(e.message); } });

@@ -77,7 +77,7 @@ export function PriorityMarker({ level, decorative = false, assessed, state }: {
   const m = priorityMarker(level, assessed, state);
   const cls = isPriority(level)
     ? `prio p${level}`
-    : assessed === false || state === "failed" || state === "insufficient_evidence"
+    : assessed === false || state === "failed" || state === "insufficient_evidence" || state === "screening_unavailable"
       ? "prio na"
       : "prio none";
   if (decorative) return <span className={cls} aria-hidden="true">{m.short}</span>;
@@ -96,7 +96,7 @@ export function PriorityLegend() {
         <li key={k}><PriorityMarker level={k} decorative /> <span><span className="sr-only">{PRIORITY_INFO[k].short}: </span>{PRIORITY_INFO[k].name}</span></li>
       ))}
       <li><span className="prio none" aria-hidden="true">—</span> <span>assessed, no finding (not a statement of legitimacy)</span></li>
-      <li><span className="prio na" aria-hidden="true">?</span> <span>insufficient evidence (no screening data and no anomaly baseline)</span></li>
+      <li><span className="prio na" aria-hidden="true">?</span> <span>not screened (no indicator data or no screenable address), or insufficient evidence</span></li>
       <li><span className="prio na" aria-hidden="true">err</span> <span>assessment failed (not evaluated)</span></li>
       <li><span className="prio na" aria-hidden="true">n/a</span> <span>not assessed (no risk record: failed fetch, risk assessment off or unavailable)</span></li>
     </ul>

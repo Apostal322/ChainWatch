@@ -1187,3 +1187,38 @@ def test_a_refused_official_snapshot_fails_the_refresh_even_if_the_mirror_works(
     assert live_cli.main(argv) == 3  # fallback used, refusal surfaced
     out = json.loads(capsys.readouterr().out)
     assert out["source_id"] == "ofac-sdn-mirror" and out["failures"][0]["refused"] is True
+
+
+def test_closures_from_before_the_upgrade_still_block_a_stale_mirror(tmp_path):
+    """closed_by was added without a backfill: mirror rows the official file closed under
+    v0.8.0 kept NULL and the next stale mirror ingest re-listed them (second review)."""
+    store = _store(tmp_path)
+    base = [p2wpkh_address(f"u{i}") for i in range(10)]
+    y = p2wpkh_address("closed-before-upgrade")
+    _ingest(store, base, at=1.0, source_id="ofac-sdn")
+    _ingest(store, [*base, y], at=2.0, source_id="ofac-sdn-mirror")
+    _ingest(store, base, at=3.0, source_id="ofac-sdn")  # closes the mirror's y
+    db = store.db
+    db.execute("ALTER TABLE indicators DROP COLUMN closed_by")  # what v0.8.0 left
+    rp.migrate(db)
+    again = _ingest(store, [*base, y], at=4.0, source_id="ofac-sdn-mirror")
+    assert again["status"] == "unchanged"
+    assert _screener(store).screen(_addrs(outputs=[y]), 5.0)["status"] == (
+        "NO_KNOWN_SCREENING_MATCH"
+    )
+
+
+def test_rows_screened_by_nothing_are_never_no_finding_after_the_baseline():
+    """Once the anomaly baseline existed, a row whose screening could not run read 'no
+    finding' (second review)."""
+    from chainwatch.live.store import risk_state
+
+    assert risk_state((None, "SCREENING_DATA_UNAVAILABLE", "NO_ANOMALY")) == (
+        "screening_unavailable"
+    )
+    assert risk_state((None, "ERROR", "NO_ANOMALY")) == "screening_unavailable"
+    assert risk_state((None, "NO_KNOWN_SCREENING_MATCH", "NO_ANOMALY")) == "no_finding"
+    assert risk_state((None, "SCREENING_DATA_UNAVAILABLE", "INSUFFICIENT_BASELINE")) == (
+        "insufficient_evidence"
+    )
+    assert risk_state((3, "SCREENING_DATA_UNAVAILABLE", "ANOMALY")) == "finding"

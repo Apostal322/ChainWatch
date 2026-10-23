@@ -187,3 +187,19 @@ def test_an_expired_retry_is_one_outcome(tmp_path):
 
     (sampled, fetched, failed, dropped), *_ = asyncio.run(go())
     assert (sampled, fetched, failed, dropped) == (1, 0, 1, 0)
+
+
+def test_resync_stretches_count_as_unobserved_time(tmp_path):
+    c = _cfg(tmp_path)
+    store = LiveStore(c.db_path)
+    now = [1000.0]
+    col = Collector(c, store, http=_mock(lambda t: httpx.Response(503)), clock=lambda: now[0])
+    col.store.heartbeat(state="connected", updated_at=now[0], started_at=now[0])
+    col.handle_frame(_frame(7, [txid("x0")]))
+    now[0] += 10
+    col.handle_frame(_frame(7, [txid("x1")]))  # re-sync begins
+    now[0] += 60
+    col.handle_frame(_frame(8, [txid("x2")]))  # in sync again: a 60 s stretch
+    store.record_gap("sequence_gap", now[0], now[0], "point gap")  # zero duration
+    av = LiveReader(c.db_path).availability(window_s=100, now=now[0] + 30)
+    assert av["down_s"] == pytest.approx(60, abs=1)
