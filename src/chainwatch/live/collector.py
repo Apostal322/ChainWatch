@@ -277,11 +277,17 @@ class Collector:
         self.started_at = clock()
         self.connected_since: float | None = None
         self.last_message_at: float | None = None
+        # the last frame that carried a mempool delta: pongs or junk keep the socket busy but
+        # are no evidence that transactions are being observed (the stale watchdog uses this)
+        self._last_delta_at: float | None = None
         self.last_sequence: int | None = None
         self.last_error: str | None = None
         self._flushed = Counters()
         self._outage_id: int | None = None
         self._conn_sequence: int | None = None
+        # a re-sync stretch (repeated sequence): its new arrivals cannot be told apart from
+        # re-announcements and are skipped, so the stretch is recorded as a coverage gap
+        self._resync: tuple[float, int] | None = None  # (started_at, txids skipped)
         self.first_started_at = self.started_at
         self._max_fetches: int | None = None
         self.fatal: str | None = None  # set when a pipeline task died; the CLI exits non-zero
@@ -301,6 +307,7 @@ class Collector:
         d = res.delta
         if d is None:
             return
+        self._last_delta_at = self.last_message_at
         gap: str | None = None
         resync = False
         if d.sequence is not None:
@@ -329,16 +336,23 @@ class Collector:
             self.gone.add(txid, "mined", at)
         # new arrivals first, so a database problem below cannot lose them
         now = self.clock()
+        resync_gap: tuple[float, int] | None = None
         if resync:
             self.c.resync_deltas += 1
             self.c.resync_txids_skipped += len(d.added)
+            started, skipped = self._resync or (at, 0)
+            self._resync = (started, skipped + len(d.added))
         else:
+            if self._resync is not None and d.sequence is not None:  # in sync again
+                resync_gap, self._resync = self._resync, None
             for txid in d.added:
                 self.c.received += 1
                 if not self.seen.add(txid):
                     self.c.duplicates += 1
                 elif not sampled(txid, self.cfg.sample_rate):
                     self.c.not_sampled += 1
+                elif txid in self._retry:  # announced again while its retry is pending
+                    self.c.duplicates += 1
                 else:
                     try:
                         self.queue.put_nowait((txid, now))
@@ -350,6 +364,8 @@ class Collector:
         try:
             if gap is not None:
                 self.store.record_gap("sequence_gap", at, at, gap)
+            if resync_gap is not None:
+                self._record_resync_gap(resync_gap, at)
             if d.removed or d.mined or d.replaced:
                 # post-observation state only; features and past assessments never change
                 from chainwatch.risk.persistence import mark_lifecycle
@@ -363,6 +379,25 @@ class Collector:
             self.c.db_errors += 1
             self.last_error = f"database: {type(e).__name__}: {e}"[:200]
             log.warning(json.dumps({"msg": "lifecycle/gap write failed", "error": self.last_error}))
+
+    def _record_resync_gap(self, gap: tuple[float, int], ended_at: float) -> None:
+        started, skipped = gap
+        self.store.record_gap(
+            "sequence_gap", started, ended_at,
+            f"mempool backend re-syncing: {skipped} announced txid(s) skipped (new arrivals "
+            "cannot be told apart from re-announcements)",
+        )  # fmt: skip
+
+    def _end_resync(self, ended_at: float) -> None:
+        """A connection or the process ends during a re-sync stretch: record it now."""
+        if self._resync is None or self.store is None:
+            return
+        gap, self._resync = self._resync, None
+        try:
+            self._record_resync_gap(gap, ended_at)
+        except sqlite3.Error as e:
+            self.c.db_errors += 1
+            self.last_error = f"database: {type(e).__name__}: {e}"[:200]
 
     async def _ws_loop(self) -> None:
         attempt = 0
@@ -383,6 +418,7 @@ class Collector:
                     self.state, self.connected_since = "connected", self.clock()
                     self.last_error = None
                     self._conn_sequence = None  # a new connection restarts sequence tracking
+                    self._last_delta_at = None
                     if self._outage_id is not None:
                         self.store.close_outage(self._outage_id, self.connected_since)
                         self._outage_id = None
@@ -408,13 +444,22 @@ class Collector:
                                 self.last_error = "no message within stale_after_s"
                             break
                         self.handle_frame(recv.result())
-                        if self.clock() - self.connected_since >= HEALTHY_AFTER_S:
+                        since_delta = self.clock() - (self._last_delta_at or self.connected_since)
+                        if since_delta > self.cfg.stale_after_s:  # frames, but no deltas
+                            self.c.stale_reconnects += 1
+                            self.last_error = "no mempool update within stale_after_s"
+                            break
+                        if (
+                            self._last_delta_at is not None
+                            and self.clock() - self.connected_since >= HEALTHY_AFTER_S
+                        ):
                             attempt = 0  # only a stream that keeps working resets the backoff
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # network errors, handshake failures, closed connections
                 self.last_error = f"{type(e).__name__}: {e}"[:200]
                 log.warning(json.dumps({"msg": "websocket error", "error": self.last_error}))
+            self._end_resync(self.last_message_at or self.clock())
             conn_started, self.connected_since = self.connected_since, None
             if self.stop.is_set():
                 break
@@ -440,6 +485,19 @@ class Collector:
     # ---- REST side -----------------------------------------------------------------------
     async def fetch_one(self, txid: str, first_seen: float) -> None:
         attempt, previous_error = self._retry.pop(txid, (1, ""))
+        try:
+            await self._attempt(txid, first_seen, attempt, previous_error)
+        except asyncio.CancelledError:
+            # shutdown while a retry waits for a token or its GET: its last failure is the
+            # outcome (a first attempt was never tried and leaves no row, as before)
+            if attempt > 1:
+                self.c.failed += 1
+                self._record_failed(txid, first_seen, previous_error)
+            raise
+
+    async def _attempt(
+        self, txid: str, first_seen: float, attempt: int, previous_error: str
+    ) -> None:
         now = self.clock()
         if now - first_seen > self.cfg.max_queue_age_s:
             self._expired(txid, first_seen, previous_error)
@@ -503,7 +561,7 @@ class Collector:
                     self.c.retries_succeeded += attempt > 1
         if error is not None and not self._schedule_retry(txid, first_seen, attempt, error):
             self.c.failed += 1
-            self.store.add_failed(txid, first_seen, self.clock(), error)
+            self._record_failed(txid, first_seen, error)  # a locked database is not fatal
 
     # ---- bounded retries ---------------------------------------------------------------
     @staticmethod
@@ -523,6 +581,8 @@ class Collector:
         if attempt >= cfg.fetch_max_attempts or not self.transient(error, attempt):
             self.c.retries_exhausted += attempt > 1
             return False
+        if txid in self._retry_timers:  # already pending (announced twice): one retry only
+            return True
         if self.stop.is_set() or len(self._retry_timers) >= max(1, cfg.queue_max // 2):
             self.c.retries_dropped += 1
             return False
@@ -547,8 +607,9 @@ class Collector:
             self._record_failed(txid, first_seen, error)
 
     def _expired(self, txid: str, first_seen: float, previous_error: str) -> None:
-        self.c.expired += 1
-        if previous_error:  # a retried fetch that ran out of time is a failure, not a skip
+        if not previous_error:
+            self.c.expired += 1
+        else:  # a retried fetch that ran out of time is a failure (counted once), not a skip
             self.c.retries_exhausted += 1
             self.c.failed += 1
             self._record_failed(txid, first_seen, previous_error)
@@ -561,13 +622,20 @@ class Collector:
             self.last_error = f"database: {type(e).__name__}: {e}"[:200]
 
     def _drain_retries(self) -> None:
-        """On shutdown, pending retries are recorded with their last error (not lost)."""
+        """On shutdown, pending retries are recorded with their last error (not lost):
+        those still waiting for their timer and those already back in the queue."""
         for txid, (timer, first_seen) in list(self._retry_timers.items()):
             timer.cancel()
             _, error = self._retry.pop(txid, (0, "retry_pending"))
             self.c.failed += 1
             self._record_failed(txid, first_seen, error)
         self._retry_timers.clear()
+        while not self.queue.empty():
+            txid, first_seen = self.queue.get_nowait()
+            if txid in self._retry:
+                _, error = self._retry.pop(txid)
+                self.c.failed += 1
+                self._record_failed(txid, first_seen, error)
 
     async def _get(self, url: str) -> tuple[int, Any, bytes]:
         """GET with a size cap on the body (status, headers, body)."""
@@ -743,10 +811,9 @@ class Collector:
                 self.c.internal_errors += 1
                 self.last_error = f"internal: {type(e).__name__}: {e}"[:200]
                 log.exception(json.dumps({"msg": "item failed", "txid": txid}))
-                # if even this write fails (database unusable) the task dies -> fatal exit
-                self.store.add_failed(
-                    txid, first_seen, self.clock(), f"internal:{type(e).__name__}"
-                )
+                # a failing write here (e.g. locked) is counted; a database that is really
+                # unusable stops the heartbeat, which is fatal (exit 1, systemd restarts)
+                self._record_failed(txid, first_seen, f"internal:{type(e).__name__}")
             finally:
                 self.queue.task_done()
             if (
@@ -891,6 +958,7 @@ class Collector:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            self._end_resync(self.clock())
             self._drain_retries()
             self.state = "failed" if self.fatal else "stopped"
             self.last_error = self.fatal or self.last_error

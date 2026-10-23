@@ -133,6 +133,10 @@ def extract(tx: Any, *, txid: str, first_seen: float, fetched_at: float) -> dict
             coinbase = True
             continue
         seq = i.get("sequence")
+        if seq is not None and (
+            isinstance(seq, bool) or not isinstance(seq, int) or not 0 <= seq <= SEQUENCE_FINAL
+        ):  # a bool or negative value used to switch on rbf_signal / locktime_enforced
+            raise FeatureError("input sequence is not a 32-bit unsigned integer")
         if isinstance(seq, int) and seq <= BIP125_MAX_SEQUENCE:
             rbf = True
         if isinstance(seq, int) and seq < SEQUENCE_FINAL:
@@ -154,6 +158,11 @@ def extract(tx: Any, *, txid: str, first_seen: float, fetched_at: float) -> dict
     _amount(sum(out_values), "sum of outputs")  # each output in range is not enough
     if len(in_values) == n_in and sum(in_values) - sum(out_values) != fee:
         raise FeatureError("fee does not equal inputs minus outputs")
+    # with prevouts missing the identity cannot be checked, but inputs = fee + outputs must
+    # still be a valid amount and cover the inputs that are known
+    _amount(fee + sum(out_values), "fee plus outputs")
+    if sum(in_values) > fee + sum(out_values):
+        raise FeatureError("known inputs exceed fee plus outputs")
     value_counts: dict[int, int] = {}
     for v in out_values:
         if v >= DUST_LIMIT_SAT:
