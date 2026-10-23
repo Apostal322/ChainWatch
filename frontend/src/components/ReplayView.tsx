@@ -51,18 +51,20 @@ export default function ReplayView({ info }: { info: Info }) {
     if (step === null || !available.includes(policy)) return;
     let ignore = false;
     setError(null);
+    setRanking(null); // never show the previous step's rows under the new step's caption
     api.ranking(step, policy, labels, offset, PAGE)
       .then((r) => { if (!ignore) setRanking(r); })
-      .catch((e) => { if (!ignore) setError(e.message); });
+      .catch((e) => { if (!ignore) { setRanking(null); setError(e.message); } });
     return () => { ignore = true; };
   }, [step, policy, labels, offset, available]);
 
   useEffect(() => {
     if (step === null || !available.includes(policy)) return;
     let ignore = false;
+    setMetrics(null);
     api.metrics(step, policy)
       .then((m) => { if (!ignore) setMetrics(m); })
-      .catch((e) => { if (!ignore) setError(e.message); });
+      .catch((e) => { if (!ignore) { setMetrics(null); setError(e.message); } });
     return () => { ignore = true; };
   }, [step, policy, available]);
 
@@ -112,7 +114,7 @@ export default function ReplayView({ info }: { info: Info }) {
         </div>
       )}
 
-      {error && <p className="err">{error}</p>}
+      {error && <p className="err" role="alert">{error}</p>}
       <div className="split">
         <div className="card">
           <h2>Risk-ranked transactions</h2>
@@ -134,16 +136,15 @@ export default function ReplayView({ info }: { info: Info }) {
               <tbody>
                 {ranking?.rows.map((r) => (
                   <tr key={r.tx_id} className={selected === r.tx_id ? "clickable selected" : "clickable"}
-                      aria-current={selected === r.tx_id ? "true" : undefined}
-                      tabIndex={0} onClick={() => selectRow(r.tx_id)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          selectRow(r.tx_id);
-                        }
-                      }}>
+                      onClick={() => selectRow(r.tx_id)}>
                     <td className="num">{r.rank}</td>
-                    <td>{r.tx_id}</td>
+                    <td>
+                      <button type="button" className="rowbtn" aria-pressed={selected === r.tx_id}
+                              aria-label={`Show details for transaction ${r.tx_id}`}
+                              onClick={(e) => { e.stopPropagation(); selectRow(r.tx_id); }}>
+                        {r.tx_id}
+                      </button>
+                    </td>
                     <td>
                       <span className="scorebar" style={{ width: `${Math.max(2, r.risk_score * 80)}px` }} />
                       {fmtScore(r.risk_score)}
@@ -155,7 +156,10 @@ export default function ReplayView({ info }: { info: Info }) {
               </tbody>
             </table>
           </div>
-          {ranking && (
+          {ranking && ranking.total === 0 && (
+            <p className="muted">No transactions match this filter in step {step}.</p>
+          )}
+          {ranking && ranking.total > 0 && (
             <div className="pager">
               <span>{offset + 1}–{Math.min(offset + PAGE, ranking.total)} of {fmtInt(ranking.total)}</span>
               <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Previous</button>

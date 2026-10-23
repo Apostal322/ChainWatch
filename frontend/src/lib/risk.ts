@@ -328,13 +328,20 @@ export interface StatusText {
   tone: Tone;
 }
 
-export function screeningStatusText(status: string | null | undefined, sources: string[] = []): StatusText {
+export function screeningStatusText(
+  status: string | null | undefined,
+  sources: string[] = [],
+  staleAtEvaluation = false,
+): StatusText {
   const by = sources.length ? sources.join(", ") : "an enabled source";
   switch (status) {
     case "SCREENING_MATCH":
       return { text: `Listed by ${by} (${LISTING_CAVEAT})`, tone: "info" };
     case "NO_KNOWN_SCREENING_MATCH":
-      return { text: LAYER_TEXT.screeningNoMatch, tone: "ok" };
+      // a stale list may lack recent designations: not the reassuring tone
+      return staleAtEvaluation
+        ? { text: `${LAYER_TEXT.screeningNoMatch}; the source was stale at evaluation (listings may be out of date)`, tone: "warn" }
+        : { text: LAYER_TEXT.screeningNoMatch, tone: "ok" };
     case "SCREENING_DATA_UNAVAILABLE":
       return { text: "Screening data unavailable: no indicator source was loaded, nothing was screened", tone: "warn" };
     case "INSUFFICIENT_INFORMATION":
@@ -346,14 +353,17 @@ export function screeningStatusText(status: string | null | undefined, sources: 
   }
 }
 
-export function graphStatusText(status: string | null | undefined): StatusText {
+export function graphStatusText(status: string | null | undefined, parents?: number | null): StatusText {
   switch (status) {
     case "RELATION_FOUND":
       return { text: LAYER_TEXT.graph, tone: "info" };
     case "NO_KNOWN_RELATION":
       return { text: "No known relation within observed data (unobserved parents are not checked)", tone: "ok" };
     case "NOT_EVALUATED":
-      return { text: "Not evaluated (no parent transactions to check)", tone: "off" };
+      // the engine also skips the graph when screening was unavailable or failed
+      return parents
+        ? { text: "Not evaluated (screening data unavailable, so parents could not be checked)", tone: "warn" }
+        : { text: "Not evaluated (no parent transactions to check)", tone: "off" };
     case "ERROR":
       return { text: "Relation check failed for this transaction (layer error)", tone: "warn" };
     default:

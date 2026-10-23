@@ -126,6 +126,12 @@ describe("status text", () => {
     expect(screeningStatusText("SCREENING_MATCH", ["ofac-sdn"]).text).toBe(`Listed by ofac-sdn (${LISTING_CAVEAT})`);
     expect(screeningStatusText("NO_KNOWN_SCREENING_MATCH").text).toBe(LAYER_TEXT.screeningNoMatch);
     expect(screeningStatusText("NO_KNOWN_SCREENING_MATCH").text).toMatch(/not proof of legitimacy/);
+    // v0.8.1: a stale source is not the reassuring tone, and an unrun graph is not "no parents"
+    const stale = screeningStatusText("NO_KNOWN_SCREENING_MATCH", [], true);
+    expect(stale.tone).toBe("warn");
+    expect(stale.text).toMatch(/stale at evaluation/);
+    expect(graphStatusText("NOT_EVALUATED", 2).text).toMatch(/screening data unavailable/);
+    expect(graphStatusText("NOT_EVALUATED", 0).text).toMatch(/no parent transactions/);
     expect(screeningStatusText("SCREENING_DATA_UNAVAILABLE").text).toMatch(/^Screening data unavailable/);
     expect(screeningStatusText("SCREENING_DATA_UNAVAILABLE").tone).toBe("warn");
     expect(screeningStatusText("INSUFFICIENT_INFORMATION").tone).toBe("warn");

@@ -183,6 +183,10 @@ describe("connection badge", () => {
     expect(stale.tone).toBe("warn");
     expect(stale.detail).toContain("12m");
     expect(view(status({ last_observation_at: null }), 1000, 1000).detail).toBe("no transaction fetched yet");
+    // v0.8.1: connected for longer than OBSERVATION_STALE_S without one observation is not "fresh"
+    const never = status({ last_observation_at: null });
+    never.collector!.connected_since = 1000 - OBSERVATION_STALE_S - 60;
+    expect(view(never, 1000, 1000)).toMatchObject({ tone: "warn", label: "Connected, no data yet" });
   });
 
   it("says no live data yet (not unreachable) and refreshing after the tab was hidden", () => {

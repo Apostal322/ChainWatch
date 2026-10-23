@@ -68,7 +68,7 @@ export default function PerformanceView({ info }: { info: Info }) {
 
   return (
     <section>
-      {error && <p className="err">{error}</p>}
+      {error && <p className="err" role="status">{error}</p>}
       <div className="card" style={{ marginBottom: 16 }}>
         <h2>Replay: average precision per step (labelled transactions only)</h2>
         <p className="muted" style={{ marginTop: 0, fontSize: 12 }}>

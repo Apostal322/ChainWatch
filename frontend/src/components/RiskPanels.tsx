@@ -202,7 +202,7 @@ export const RiskOverview = memo(function RiskOverview(props: {
         ordinal, not a score or probability; there is no single “risk score”.
       </p>
       <MockNotice kind={kind} />
-      {error && <p className="err">{data ? "Could not refresh risk summary (showing the last loaded data)" : "Could not load the risk summary"}: {error}</p>}
+      {error && <p className="err" role="status">{data ? "Could not refresh risk summary (showing the last loaded data)" : "Could not load the risk summary"}: {error}</p>}
       {!data && !error && <p className="muted">Loading…</p>}
       {riskUnavailable && (
         <p className="err small" role="note">
@@ -433,7 +433,7 @@ export const InvestigationQueue = memo(function InvestigationQueue(props: {
           </select>
         </label>
       </div>
-      {error && <p className="err">{alerts ? "Could not refresh alerts (showing the last loaded list)" : "Could not load alerts"}: {error}</p>}
+      {error && <p className="err" role="status">{alerts ? "Could not refresh alerts (showing the last loaded list)" : "Could not load alerts"}: {error}</p>}
       {alerts === null && !error && <p className="muted">Loading…</p>}
       {alerts !== null && alerts.length === 0 && <p className="muted">{emptyRiskText("alerts", riskState, filterText)}</p>}
       {alerts !== null && alerts.length > 0 && riskState === "no-screening" && <p className="muted small">{NO_SCREENING_TEXT}.</p>}
@@ -474,7 +474,7 @@ export const RecentFindings = memo(function RecentFindings(props: {
       <h2 id="findings-h" tabIndex={-1}>Recent findings</h2>
       <p className="muted small">Assessed transactions with a finding (P1–P4), newest first. Select one to see its full assessment.</p>
       <MockNotice kind={kind} />
-      {error && <p className="err">{findings ? "Could not refresh findings (showing the last loaded list)" : "Could not load findings"}: {error}</p>}
+      {error && <p className="err" role="status">{findings ? "Could not refresh findings (showing the last loaded list)" : "Could not load findings"}: {error}</p>}
       {findings === null && !error && <p className="muted">Loading…</p>}
       {findings !== null && findings.length === 0 && <p className="muted">{emptyRiskText("findings", riskState)}</p>}
       {findings !== null && findings.length > 0 && riskState === "no-screening" && <p className="muted small">{NO_SCREENING_TEXT}.</p>}
@@ -580,7 +580,8 @@ export function RiskAssessment(props: {
       </dl>
 
       <h4>Screening (source match)</h4>
-      <StatusLine s={screeningStatusText(sc.status, matchSources)} />
+      <StatusLine s={screeningStatusText(sc.status, matchSources,
+        (sc.sources ?? []).some((s) => s.stale && !s.superseded_by))} />
       {matches.map((m, i) => <MatchEvidence key={`${m.indicator_id}-${m.role}-${m.index}-${i}`} m={m} />)}
       {cov && (
         <p className="small">
@@ -606,7 +607,7 @@ export function RiskAssessment(props: {
       )}
 
       <h4>Observed-graph relation</h4>
-      <StatusLine s={graphStatusText(gr.status)} />
+      <StatusLine s={graphStatusText(gr.status, gr.coverage?.parents)} />
       {(gr.relations ?? []).map((r, i) => <RelationEvidence key={i} r={r} onSelect={onSelect} />)}
       {gr.coverage && (
         <p className="small">

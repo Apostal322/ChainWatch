@@ -504,3 +504,15 @@ def test_internal_errors_carry_the_security_headers(env):
 
 def test_api_answers_are_not_cached(client):
     assert client.get("/v1/info").headers["cache-control"] == "no-store"
+
+
+def test_the_synthetic_demo_does_not_claim_the_research_dataset():
+    """The synthetic demo's Limitations tab showed "Historical replay on the Elliptic++
+    research dataset", contradicting its SYNTHETIC banner (v0.8.1 frontend audit)."""
+    from types import SimpleNamespace
+
+    from chainwatch.serving.app import DISCLAIMER, disclaimer_for
+
+    synthetic = disclaimer_for(SimpleNamespace(registry_meta={"data_mode": "synthetic"}))
+    assert "Synthetic demonstration" in synthetic and "Elliptic++ research dataset" not in synthetic
+    assert disclaimer_for(SimpleNamespace(registry_meta={"data_mode": "elliptic++"})) == DISCLAIMER

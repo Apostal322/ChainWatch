@@ -37,7 +37,7 @@ export default function TransactionDetail(props: {
     return () => { ignore = true; };
   }, [props.txId, props.policy, hops]);
 
-  if (error) return <p className="err">{error}</p>;
+  if (error) return <p className="err" role="status">{error}</p>;
   if (!d) return <p className="muted">Loading…</p>;
   return (
     <div>
@@ -70,7 +70,7 @@ export default function TransactionDetail(props: {
           ))}
         </span>
       </h3>
-      {nbError ? <p className="err">{nbError}</p>
+      {nbError ? <p className="err" role="status">{nbError}</p>
         : nb ? <NeighbourhoodGraph data={nb} onSelect={props.onSelect} /> : <p className="muted">Loading…</p>}
 
       <h3>Augmented (non-anonymised) features</h3>

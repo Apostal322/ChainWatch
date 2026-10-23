@@ -374,6 +374,11 @@ export function connectionView(
     // Server clock "now", so collector timestamps are compared without client clock skew.
     const serverNow = (Number.isFinite(status.server_time) ? status.server_time : statusAt) + age;
     if (status.last_observation_at === null) {
+      // connected without a single observation is not "fresh" once that lasts
+      const since = status.collector?.connected_since;
+      if (typeof since === "number" && serverNow - since > OBSERVATION_STALE_S) {
+        return { tone: "warn", label: "Connected, no data yet", detail: `nothing fetched in ${formatDuration(serverNow - since)} since connecting` };
+      }
       return { tone: "ok", label: "Connected", detail: "no transaction fetched yet" };
     }
     const quiet = serverNow - status.last_observation_at;

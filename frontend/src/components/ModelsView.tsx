@@ -20,7 +20,7 @@ export default function ModelsView() {
 
   return (
     <section>
-      {error && <p className="err">{error}</p>}
+      {error && <p className="err" role="status">{error}</p>}
       <div className="card" style={{ marginBottom: 16 }}>
         <h2>Model registry (loaded by this service)</h2>
         <p className="muted" style={{ marginTop: 0, fontSize: 12 }}>

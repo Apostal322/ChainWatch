@@ -50,7 +50,9 @@ export function StepLineChart(props: {
                  label={{ value: props.yLabel, angle: -90, position: "insideLeft", fill: "var(--ink-2)", fontSize: 11 }} />
           <Tooltip cursor={{ stroke: "var(--axis)" }}
                    content={(p) => <Tip {...(p as unknown as TipProps)} series={props.series} fmt={fmt} />} />
-          <Legend wrapperStyle={{ fontSize: 12 }} iconType="plainline" />
+          {/* legend text in the body ink: the series colours alone fail contrast (1.5-2.7:1) */}
+          <Legend wrapperStyle={{ fontSize: 12 }} iconType="plainline"
+                  formatter={(value) => <span style={{ color: "var(--ink-2)" }}>{value}</span>} />
           {props.series.map((s) => (
             <Line key={s.key} type="linear" dataKey={s.key} name={s.label} stroke={s.color}
                   strokeWidth={2} strokeDasharray={s.dashed ? "5 4" : undefined}

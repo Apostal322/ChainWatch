@@ -10,12 +10,34 @@ import LiveView from "./components/LiveView";
 const TABS = ["Replay", "Performance", "Models & experiments", "Limitations", "Live monitor"] as const;
 type Tab = (typeof TABS)[number];
 const slug = (t: Tab) => t.toLowerCase().replace(/[^a-z]+/g, "-");
+// the tab lives in the URL hash, so reload and back/forward keep it
+const tabFromHash = (): Tab => TABS.find((t) => `#${slug(t)}` === window.location.hash) ?? "Replay";
 
 export default function App() {
   const [info, setInfo] = useState<Info | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("Replay");
+  const [tab, setTabState] = useState<Tab>(tabFromHash);
+  // Live monitor stays mounted after its first visit (hidden when another tab is active):
+  // remounting it on every switch fired 7 requests and a new event stream each time, which
+  // ordinary tab switching turned into 429s against the per-client limit
+  const [liveVisited, setLiveVisited] = useState(tab === "Live monitor");
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const setTab = useCallback((t: Tab) => {
+    setTabState(t);
+    if (window.location.hash !== `#${slug(t)}`) window.history.pushState(null, "", `#${slug(t)}`);
+  }, []);
+  useEffect(() => {
+    const onHash = () => setTabState(tabFromHash());
+    window.addEventListener("hashchange", onHash);
+    window.addEventListener("popstate", onHash);
+    return () => {
+      window.removeEventListener("hashchange", onHash);
+      window.removeEventListener("popstate", onHash);
+    };
+  }, []);
+  useEffect(() => {
+    if (tab === "Live monitor") setLiveVisited(true);
+  }, [tab]);
 
   const loadInfo = useCallback(() => {
     setError(null);
@@ -105,7 +127,7 @@ export default function App() {
           {tab === t && info && t === "Performance" && <PerformanceView info={info} />}
           {tab === t && info && t === "Models & experiments" && <ModelsView />}
           {tab === t && info && t === "Limitations" && <AboutView info={info} />}
-          {tab === t && info && t === "Live monitor" && <LiveView info={info} />}
+          {info && t === "Live monitor" && (tab === t || liveVisited) && <LiveView info={info} />}
         </div>
       ))}
       </main>

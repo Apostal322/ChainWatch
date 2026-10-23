@@ -701,7 +701,7 @@ export default function LiveView({ info }: { info: Info }) {
       <div className="split" style={{ marginTop: 16 }}>
         <div className="card">
           <h2>Announced transactions per minute</h2>
-          {statsError && <p className="err">{st ? "Could not refresh statistics (showing the last loaded data)" : "Could not load statistics"}: {statsError}</p>}
+          {statsError && <p className="err" role="status">{st ? "Could not refresh statistics (showing the last loaded data)" : "Could not load statistics"}: {statsError}</p>}
           {!st && !statsError ? <p className="muted">Loading…</p>
             : throughput.points.length === 0 ? <p className="muted">No complete minute collected in the last 60 minutes.</p>
             : <ThroughputChart points={throughput.points} />}
@@ -712,7 +712,7 @@ export default function LiveView({ info }: { info: Info }) {
         </div>
         <div className="card">
           <h2>Fee rate of fetched transactions (sat/vB, 60 min)</h2>
-          {statsError && <p className="err">{st ? "Could not refresh statistics (showing the last loaded data)" : "Could not load statistics"}: {statsError}</p>}
+          {statsError && <p className="err" role="status">{st ? "Could not refresh statistics (showing the last loaded data)" : "Could not load statistics"}: {statsError}</p>}
           {!st && !statsError ? <p className="muted">Loading…</p>
             : !st || st.n_fetched === 0 ? <p className="muted">No transaction fetched in the last 60 minutes.</p>
             : <FeeHistogram bins={hist} />}
@@ -726,7 +726,7 @@ export default function LiveView({ info }: { info: Info }) {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h2>Collection gaps and outages (24 h)</h2>
-        {outagesError ? <p className="err">Could not load the outage log, so gaps cannot be shown: {outagesError}</p>
+        {outagesError ? <p className="err" role="status">Could not load the outage log, so gaps cannot be shown: {outagesError}</p>
           : outages === null ? <p className="muted">Loading…</p>
           : outages.length === 0 ? <p className="muted">No gaps recorded in the last 24 hours (or the collector has not run that long).</p>
           : <OutagesTable outages={outages} />}
@@ -782,7 +782,7 @@ export default function LiveView({ info }: { info: Info }) {
           <h2 ref={detailHeadingRef} tabIndex={-1}>Transaction detail</h2>
           {!selected && <p className="muted">Select a transaction.</p>}
           {selected && detailLoading && !shownDetail && <p className="muted">Loading…</p>}
-          {selected && detailError && <p className="err">Could not load details: {detailError}</p>}
+          {selected && detailError && <p className="err" role="status">Could not load details: {detailError}</p>}
           {shownDetail && <Detail detail={shownDetail} onSelect={onSelectFar} kind={kind} />}
         </div>
       </div>
