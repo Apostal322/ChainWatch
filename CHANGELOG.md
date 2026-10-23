@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.8.1: second independent audit (2026-10-23, not deployed)
+
+Seven parallel adversarial reviews of v0.8.0 and a second review of the fixes; every code
+fix has a test that fails on v0.8.0. Matrix: [docs/AUDIT.md](docs/AUDIT.md#v081-independent-audit).
+
+- **Security updates.** certifi 2026.10.19 (a trusted root with compromised intermediates),
+  pillow 13.0.0 (serving image), vitest 4.1.12.
+- **Screening.** Retrospective screening uses only listings in force (no "now listed"
+  alerts for closed ones); the mass-removal guard measures a source's own rows; a stale
+  mirror cannot re-list what the official file superseded (`indicators.closed_by`);
+  older-dated snapshots are refused (`--allow-older`); a refused official snapshot exits 3.
+- **Restore and backups.** Writers hold a shared lock, restore an exclusive one and copies
+  through SQLite's backup API (no file renames: a restore can no longer be overwritten by
+  a process starting meanwhile); the pre-restore copy includes WAL data; backups are
+  verified before rotation and carry a `.sha256`; a corrupted database stops the collector
+  (exit 78).
+- **Assessment states.** A failed assessment leaves an "Assessment failed" record and keeps
+  its addresses for later re-screening; feed rows carry `risk_state`; the dashboard shows
+  "?" (insufficient evidence) and "err" (failed) instead of "no finding".
+- **Collector.** Retries are never lost on shutdown; a locked database in the failure path
+  is not fatal; mempool re-sync stretches are recorded as coverage gaps; the stale watchdog
+  needs mempool updates; stricter input validation.
+- **Anomaly detector `robust-tail/3`.** "Strong" needs flags in two evidence groups (size,
+  fee, value, output shape): vsize and the counts that determine it are one fact.
+- **Alerts.** Alerts a person acted on are kept with their notes (only untouched `new`
+  alerts expire after 90 days).
+- **API.** Out-of-range ids are 422 (not 500); edge validation errors use the envelope;
+  `/v1` answers are `no-store`; Caddy passes GET only; the synthetic demo states a synthetic
+  disclaimer.
+- **Deploy kit and CI.** `install.sh` verifies `EXPECTED_SHA` before changing anything and
+  re-executes the new installer on upgrades; CI runs the suite on the deployed locks
+  (Python 3.12); publish never overwrites a version tag on an inspect failure; Dependabot
+  leaves the ML stack alone.
+- **Dashboard.** Replay never shows stale rows after an error; stale-source and
+  never-observed states are flagged; tab switching no longer triggers 429s; the tab is in the
+  URL; accessibility and contrast fixes.
+- **Docs.** Restore-based rollback (reinstalling an older version on a migrated database is
+  unsafe); Render proxy hop-count verification procedure; real-network checklist; measured
+  database size per table.
+
 ## v0.8.0: independent hardening audit (2026-10, not deployed)
 
 Every defect below was reproduced first; each regression test fails on v0.7.0 (`f9f8765`)

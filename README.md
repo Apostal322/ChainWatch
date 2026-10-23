@@ -3,7 +3,7 @@
 [![CI](https://github.com/Apostal322/ChainWatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Apostal322/ChainWatch/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Python 3.11–3.13](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)
-![Tests](https://img.shields.io/badge/tests-473%20Python%20%2B%2051%20frontend-brightgreen)
+![Tests](https://img.shields.io/badge/tests-503%20Python%20%2B%2051%20frontend-brightgreen)
 
 **How well does an illicit-transaction ranking model hold up when behaviour changes over
 time, and does retraining on newly arriving labels help?**
@@ -156,7 +156,7 @@ Nothing has been deployed, and no 24/7 reliability is claimed. See
 [docs/LIVE_CLOUD.md](docs/LIVE_CLOUD.md) for provider limits, Oracle's idle-reclamation
 risk, the manual activation steps and the 24-hour test plan.
 
-### Risk intelligence (v0.7.0, hardened in v0.8.0; live monitor)
+### Risk intelligence (v0.7.0, hardened in v0.8.0 and v0.8.1; live monitor)
 
 Every fetched transaction is assessed by separate layers that are never blended into one
 score ([contracts](docs/RISK_ENGINE.md)):
@@ -165,7 +165,7 @@ score ([contracts](docs/RISK_ENGINE.md)):
 |---|---|---|---|
 | A. Screening | `SCREENING_MATCH` + provenance, or `NO_KNOWN_SCREENING_MATCH`, `SCREENING_DATA_UNAVAILABLE`, `INSUFFICIENT_INFORMATION` | an enabled source (OFAC SDN, refreshed daily, versioned) lists an input or output address | fraud, or who controls the funds |
 | A'. Observed graph | `RELATION_FOUND` (distance 2, observed data only) | the tx spends an output of an observed tx that spent from a listed address | ownership or culpability |
-| B. Behavioural anomaly | `ANOMALY` with per-measurement explanations | tail of recent sampled traffic (empirical p ≤ 0.002 and robust z ≥ 3; "strong" needs two such measurements; baseline of 1,000 fetched transactions) | wrongdoing (batch payouts and CoinJoins are unusual) |
+| B. Behavioural anomaly | `ANOMALY` with per-measurement explanations | tail of recent sampled traffic (empirical p ≤ 0.002 and robust z ≥ 3; "strong" needs two independent evidence groups; baseline of 1,000 fetched transactions) | wrongdoing (batch payouts and CoinJoins are unusual) |
 | C. Supervised | `NO_VALIDATED_MODEL`, always | no labelled data maps to live features ([feasibility](docs/RISK_DATA_FEASIBILITY.md)) | |
 
 * Screening is point in time: a listing counts only from when this deployment fetched it,
@@ -205,7 +205,7 @@ score ([contracts](docs/RISK_ENGINE.md)):
 src/chainwatch/   data, features, training, evaluation, backtest, analysis, serving (API), live
 frontend/         React + TypeScript dashboard
 configs/          default.yaml (real data), demo.yaml, public-demo.yaml (hosted demo), live.yaml
-tests/            473 tests: leakage canaries, metrics, backtest causality, API contract, risk
+tests/            503 tests: leakage canaries, metrics, backtest causality, API contract, risk
 reports/          committed aggregate results and figures (no row-level data)
 docs/             case study, protocols, results, inference contract, deployment, audit
 deploy/oracle/     always-on collector: systemd units, Caddy, install and smoke scripts

@@ -1,9 +1,68 @@
 # Engineering audits
 
+* [v0.8.1 independent audit](#v081-independent-audit) (2026-10-23): seven parallel adversarial reviews (collector, persistence, screening, HTTP surface, dashboard in a browser, anomaly/ML, supply chain and deploy kit) of v0.8.0 (`d8fcb94`), then a second review of the fixes.
 * [v0.8.0 independent hardening audit](#v080-independent-hardening-audit) (2026-10): all components, re-audited by independent reviewers; adversarial cases reproduced before fixing.
 * [v0.7.0 risk intelligence audit](#v070-risk-intelligence-audit) (2026-10): screening, indicator parsing, anomaly detector, engine, alerts, dashboard.
 * [v0.6.0 audit](#v060-engineering-audit-live-monitor-cloud-kit-research-claims) (2026-10): live collector, edge API and remote proxy, deployment kit, dashboard, research claims.
 * [Phase 4 audit](#phase-4-engineering-audit-release-readiness): serving layer and release.
+
+## v0.8.1 independent audit
+
+Baseline `d8fcb94` (v0.8.0): 473 Python and 51 frontend tests passed, CI 8/8. Seven
+independent reviewers worked on read-only copies with deterministic repros. Severity as
+above (P1 = misleading risk or data state, data loss, or anonymous low-effort DoS in plausible
+operation). Every code fix has a regression test that **fails on `d8fcb94`** and passes now.
+
+| # | Sev | Component | Problem (root cause) | Fix | Test | Commit |
+|---|---|---|---|---|---|---|
+| W1 | P1 | supply chain | After v0.8.0 was validated, new advisories turned the audit gate red: certifi < 2026.10.18 trusts a CA with compromised intermediates (all locks; the collector's and proxy's HTTPS), pillow 12.3.0 (~40 advisories, serving image), vitest (dev) | certifi 2026.10.19, pillow 13.0.0, vitest 4.1.12; only these packages changed | pip-audit and npm audit: 0 | `1b12c2f` |
+| W2 | P1 | retro screening | Re-run at every collector start for each source's latest version, it matched listings closed since (e.g. a mirror row the official file superseded): a P1 "now listed" alert for a correctly unmatched transaction | only listings in force | `test_retro_screening_ignores_listings_closed_since` | `bf8b7f8` |
+| W3 | P1 | restore (was accepted as LOW) | Restore renamed the live files while other processes could open the database: a collector restarted by systemd (state still `stopped`) or a timer-run indicator refresh wrote to the renamed files or paired its fresh WAL with the restored file; a restore that reported OK lost its data | shared flock held by every writer; restore needs it exclusively and copies through the backup API (no renames); a writer starting meanwhile exits 75 | `test_restore_is_refused_while_any_writer_has_the_database_open`, `test_no_writer_can_open_the_database_during_a_restore`; systemd §6 | `bd7b900` |
+| W4 | P1 | dashboard | The synthetic demo stated the research-dataset disclaimer, contradicting its SYNTHETIC banner | synthetic disclaimer from the API | `test_the_synthetic_demo_does_not_claim_the_research_dataset` | `b6acd8f` |
+| W5 | P1 | dashboard | Replay kept the previous step's rows (and a mixed "Model used" tile) under the new step's caption after a failed request | cleared on change and error; announced | browser repro | `b6acd8f` |
+| W6 | P2 | ingest | Superseding the mirror's extra rows counted towards the official file's mass-removal limit: one such mirror blocked every later official refresh | own rows only (first official snapshot against the copy) | `test_official_refresh_is_not_blocked_by_a_mirrors_extra_rows` | `bf8b7f8` |
+| W7 | P2 | ingest | A mirror row closed by the official file left no trace; the same stale mirror content re-listed it | `indicators.closed_by`; veto | `test_a_stale_mirror_cannot_relist_what_the_official_file_superseded` | `bf8b7f8` |
+| W8 | P2 | ingest | Older official content (stale CDN, old file) was a new version: re-listed delisted, delisted new | refused unless `--allow-older` | `test_older_official_content_is_refused` | `bf8b7f8` |
+| W9 | P2 | collector | A retry waiting in the queue or for a token (the 30 s pause after a 5xx exceeds the retry delay) was lost on shutdown without a row | interrupted and queued retries recorded | `test_a_retry_waiting_in_the_queue_is_recorded_on_shutdown` | `b4e9236` |
+| W10 | P2 | collector | `add_failed` in the failure path: a writer lock longer than the busy timeout killed the worker | contained (`db_errors`) | `test_a_locked_database_in_the_failure_path_is_not_fatal` | `b4e9236` |
+| W11 | P2 | collector | mempool repeats its sequence during a whole out-of-sync stretch; skipped arrivals left no trace and availability looked complete | stretch recorded as a `sequence_gap` with duration | `test_resync_stretches_are_recorded_as_coverage_gaps` | `b4e9236` |
+| W12 | P2 | persistence | The pre-restore copy lacked un-checkpointed WAL data | backup-API copy | `test_restore_keeps_uncheckpointed_data_in_the_pre_restore_copy` | `bd7b900` |
+| W13 | P2 | persistence | A failed assessment looked like "risk off" and its addresses were rolled back (never re-screened) | addresses in their own savepoint; all-ERROR "Assessment failed" record; `risk_state` | `test_failed_risk_write_keeps_the_observation_and_leaves_a_failed_record` | `bd7b900` |
+| W14 | P2 | persistence | Dismissed alerts with notes were deleted after 90 days; the next occurrence re-notified | only untouched `new` alerts expire | `test_alerts_a_person_acted_on_are_not_pruned` | `bd7b900` |
+| W15 | P2 | anomaly | "strong" counted vsize and the count that determines it: ~1.2 priority-3 alert groups per hour of realistic noise | robust-tail/3 evidence groups | `test_correlated_size_measurements_do_not_make_noise_strong` | `42fbe1b` |
+| W16 | P2 | deploy | `install.sh` checked out before verifying `EXPECTED_SHA`; upgrades ran the old installer (bash executes the old text) | verify first, staging clone, re-exec the new installer | systemd §8 | `4d8a5e5` |
+| W17 | P2 | CI | The suite never ran on the deployed versions (dev lock resolves newer web stack) | `deployed locks / py3.12` job | CI | `4d8a5e5` |
+| W18 | P2 | dashboard | Feed showed "no finding" for rows whose screening never ran; graph "no parents" when skipped; green "no match" from a stale source; green "Connected" with nothing ever fetched; tab switches into 429s | `risk_state` markers, wording and tones, live view kept mounted | vitest | `bd7b900`, `b6acd8f` |
+| W19 | P2 | docs | The rollback runbook claimed an older collector can open a v0.8 database (false: duplicate alerts, lost dismissals); install examples named tags that do not exist; a too-low proxy hop count was called "safe" (it is an anonymous DoS) | corrected; restore-based rollback; hop verification procedure | — | this release |
+| W20 | P3 | collector | Pongs satisfied the stale watchdog; duplicate announcement of a txid with a pending retry; expired retry counted twice; vin sequence not validated (bool/negative switched on rbf_signal); fee unbounded with missing prevouts | fixed | `tests/test_live_collector_audit.py` | `b4e9236` |
+| W21 | P3 | persistence | Backups: a failed check left the final file (counted by rotation), `.partial` never cleaned, rotation deleted operator files, no checksum; corrupted database opened silently; orphans when every row aged out; anomaly window updated before commit | fixed; exit 78 on a failed `quick_check` | `test_backup_rotation_counts_only_verified_copies`, `test_collector_refuses_a_corrupted_database_without_a_restart_loop`, `test_orphans_are_removed_when_every_transaction_aged_out` | `bd7b900` |
+| W22 | P3 | API | ids above SQLite's INTEGER range: 500 + traceback; edge 422 echoed input; no `no-store` on `/v1`; Caddy forwarded HEAD (405) | fixed | `test_edge_validation_errors_use_the_envelope_and_huge_ids_are_422`, `test_api_answers_are_not_cached` | `4038332` |
+| W23 | P3 | CLI / release | A refused official snapshot with a working fallback exited 0; version tag pushed on any inspect failure; template expression in `run:`; entrypoint not shellchecked; Dependabot could bump the ML stack | exit 3; explicit "manifest unknown"; env; shellcheck; ignores | `test_a_refused_official_snapshot_fails_the_refresh_even_if_the_mirror_works` | `bf8b7f8`, `4d8a5e5` |
+| W24 | P3 | anomaly / dashboard | Two-sided explanation used the doubled p; replay rows not buttons; tab not in the URL; empty replay page; legend contrast; panel errors not announced | fixed | `test_two_sided_explanation_states_the_actual_share`, vitest | `42fbe1b`, `b6acd8f` |
+
+Verified correct by the reviewers (not changed): every research number spot-checked
+reproduces exactly (feature-subset report re-run: identical 120 values; dataset hashes
+match); no fit on validation or test data; the supervised gate abstains for every malformed
+card; the publish gate rejects fork PRs, fork branches named `main`, tag pushes and
+non-`main` dispatches; the token is compared in constant time and never logged; security
+headers on every status of both apps; ARM64 wheels exist for every VM package; no secrets
+or datasets in Git history.
+
+### Accepted or open after v0.8.1
+
+* **External:** Render's real `X-Forwarded-For` hop count (procedure in DEPLOYMENT.md;
+  a wrong value is P1 on the public demo), real mempool.space traffic (the egress proxy
+  here refuses it: HTTP 403, 0 txids), the Oracle VM, a 24-hour run.
+* **Open, P2 (dashboard):** the alert queue and findings list show at most 200 / 50 items
+  with no layer or retrospective filter: with many P1 alerts, lower ones are unreachable in
+  the UI (the CLI `alerts list` reaches all).
+* **Open, P3:** a copy-txid control; the tab bar at 360 px scrolls without a cue; one
+  649 kB JS bundle; uvicorn `limit_concurrency` counts idle keep-alives (safe behind Caddy,
+  never expose uvicorn directly); the first frame of a connection cannot be recognised as
+  a re-sync; a percentage mass-removal guard can be worn down over several days; graph
+  worst case ~0.2-0.4 s for a transaction with 200 parents × 500 inputs (estimated).
+* **Accepted:** an address re-designated while the official fetch keeps failing is missed
+  until the official file lists it (the official source shows as stale meanwhile).
 
 ## v0.8.0 independent hardening audit
 

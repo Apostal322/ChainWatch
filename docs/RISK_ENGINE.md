@@ -59,15 +59,25 @@ version listed (v0.7 treated a previously seen hash as "unchanged"). Nothing to 
 same content as the source's latest version only refreshes `checked_at` (freshness).
 
 * **Refusals.** A snapshot with no valid address, or one that would delist more than 25% of
-  the active listings (beyond 5), is refused (`SnapshotRejected`): an error page, a truncated
-  download or a schema change must not silently empty the list. The CLI then tries the
-  fallback; `--allow-mass-removal` accepts a genuine mass delisting after checking it.
+  this source's own active listings (beyond 5), is refused (`SnapshotRejected`): an error
+  page, a truncated download or a schema change must not silently empty the list.
+  Superseding a lower-ranked copy's extra rows does not count (v0.8.0 counted it, so a
+  mirror with extra rows blocked every later official refresh), except for a first
+  official snapshot, which is measured against the copy it replaces. A snapshot dated
+  (`published_at`) before the source's stored version, such as a stale CDN edge or an old
+  file, is refused too. The CLI then tries the fallback; `--allow-mass-removal` and
+  `--allow-older` accept a checked exception. A refused primary followed by a successful
+  fallback exits **3**, so the refresh unit shows as failed and someone looks. A percentage
+  guard can still be worn down by repeated 25% removals on consecutive days.
 * **One list, two channels, ranked.** `ofac-sdn` (rank 0) and `ofac-sdn-mirror` (rank 1)
   share the authority `ofac-sdn`. An official snapshot also closes the mirror listings it
   does not have, so the fallback copy cannot keep a delisted address alive. The mirror,
   which may be days behind, **never** closes an official listing and never re-lists an
-  address the official file delisted (reported as `skipped_delisted`); it can only add
-  addresses the official list has not dealt with yet. Screening reports one match per
+  address the official file delisted or superseded (each closure records the closing
+  version in `closed_by`; reported as `skipped_delisted`); it can only add addresses the
+  official list has not dealt with yet. The price: an address re-designated while the
+  official fetch keeps failing is missed until the official file lists it (the official
+  source then shows as stale). Screening reports one match per
   authority and address (the official file preferred, for its party metadata). A mirror
   older than the official file is reported `superseded_by`, not stale; the official file is
   never superseded by its mirror, so a failing official refresh shows its real age.
@@ -130,21 +140,28 @@ sees only a few percent of parents. No clustering, no multi-hop search, no addre
 inference. A relation that only appears after the child was assessed is not raised
 retrospectively.
 
-## 6. Behavioural anomalies (`robust-tail/2`)
+## 6. Behavioural anomalies (`robust-tail/3`)
 
 Eight measurements: fee rate (both tails), vsize, inputs, outputs, sum of outputs, dust
 outputs, largest equal-value output group, output script-type count. For each, the empirical
 tail probability `p = (#reference >= x + 1)/(n + 1)` against the previous `window` = 2,000
 fetched transactions, plus a robust z-score. A measurement is flagged when `p <= 0.002` and
-`|z| >= 3`; `strong` = two or more flagged measurements (robust-tail/1 also counted one value
-outside the reference range, which with a small window is true of every flag: on pure noise
-all flags were "strong"). Fewer than 1,000 reference transactions gives
+`|z| >= 3`; `strong` = flagged measurements in **two or more evidence groups**: size (vsize,
+inputs, outputs), fee, value, output shape (dust, equal values, script mix). vsize is close to
+a linear function of the input and output counts, so robust-tail/2 counted one unusual
+count twice: on realistic correlated noise that was about 1.2 priority-3 alert groups per
+hour at 12 fetches per minute (v0.8.1 audit). robust-tail/1 also counted one value outside
+the reference range, which with a small window is true of every flag. `alpha` is per
+measurement: with eight measurements about 3–4 × alpha of transactions get at least one flag
+under the null (at most 8 × alpha). After a few similar extreme transactions enter the
+window, later ones are no longer flagged until they leave it (masking). Fewer than 1,000 reference transactions gives
 `INSUFFICIENT_BASELINE`: the two-sided fee test needs `2/(n+1) <= alpha`, and the
 configuration is validated (alpha in (0, 1), finite `min_z`, `min_reference <= window`). On the
 VM (12 fetches per minute) a fresh install needs about 83 minutes to build the baseline; a
 restart rebuilds it from stored rows of the current feature schema. The score is `-log10(p)`: rarity in recent traffic,
-not a probability of anything illicit. Cost: about 2 ms per assessment with a full window
-(screening against 531 indicators included).
+not a probability of anything illicit. Cost: about 2–4 ms per assessment with a full window
+(p50 2.5 ms, p95 4.1 ms measured for the detector alone on the audit machine; hardware
+dependent). The reference window is updated only after the record is committed.
 
 `scripts/anomaly_study.py` replays a collected database and compares this detector with
 IsolationForest and fixed rules (alert volume, hourly stability, sensitivity, drift,
@@ -176,6 +193,10 @@ Alerts are raised for priorities 1–3 and grouped: `screening:<authority>:<role
 `relation:<authority>:<address>`, `anomaly:<measurement>:<hour>`, and for retrospective
 matches `retro:<authority>:<role>:<address>`. A repeat of the same transaction is ignored
 (`alert_txids` remembers every transaction an alert counted; the API shows the latest 50).
+Alerts still `new` expire 90 days after their last occurrence (this bounds the hourly anomaly
+groups); alerts a person acted on (dismissed, under review, resolved, insufficient
+evidence) are kept with their notes. An alert can outlive the transactions it names
+(retention keeps about 3 days at the cap): its latest evidence stays in the alert.
 The upgrade from v0.7 re-keys existing alerts (`screening:<source>:<address>` and the like)
 to these keys, using the role in their latest evidence, so dismissed and resolved states
 carry over.
@@ -184,8 +205,11 @@ Retrospective screening runs when a snapshot is stored (CLI), again when the col
 loads it, and for each source's latest snapshot when the collector starts (a snapshot
 stored while it was down). A database error in the collector's pass is counted
 (`db_errors`) and retried on the next heartbeat; it never stops the collector. Matches an
-earlier pass already alerted on are not counted again. In each pass, every stored transaction that involves a newly available address and whose own
-record has no match for it under the same authority gets a retrospective alert. That covers
+earlier pass already alerted on are not counted again. Only listings still in force are
+used: a listing closed since (delisted, or superseded by the official file) is not "now
+listed" (v0.8.0 re-ran closed ones at every collector start). In each pass, every stored
+transaction that involves a newly available address and whose own record has no match for
+it under the same authority gets a retrospective alert. That covers
 transactions observed before the listing and those assessed in the seconds between the
 snapshot being stored and the collector loading it. Only retained rows (the retention window)
 can be screened retrospectively. A repeat of a
@@ -201,14 +225,20 @@ alert reopens it. Statuses: `new`, `under_review`, `dismissed`, `resolved`,
 
 * Each layer runs in its own guard: an exception becomes `status: ERROR` plus an entry in
   `errors`, and the other layers still report. A failure to assess or store a record is
-  counted (`risk_errors`) and the observation is kept.
+  counted (`risk_errors`), the observation is kept, and an all-`ERROR` record labelled
+  "Assessment failed (not evaluated)" is stored in its place (v0.8.0 left no record, so the
+  row looked exactly like risk being off). The transaction's addresses are saved in their
+  own savepoint first, so a later retrospective pass can still find it.
 * An observation and its risk record (addresses, record, alerts) are committed in one SQLite
   transaction; the risk writes sit in a savepoint, so a failed write rolls back only them.
   Readers and the event stream therefore never see a fetched row whose assessment is
-  pending. List rows carry `risk_assessed` so that "assessed, no finding" (`risk_priority`
-  null) is distinguishable from "not assessed".
+  pending. List rows carry `risk_assessed` and (v0.8.1) `risk_state`: `finding`,
+  `no_finding`, `insufficient_evidence` (no screening data and no anomaly baseline: shown
+  as "?"), `failed` ("err") or `not_assessed` ("n/a"), so "nothing found" is never shown
+  for a transaction whose screening could not run.
 * Indicators are refreshed daily by `chainwatch-indicators.timer` (official XML, falling back
-  to the mirror). A failed or refused refresh keeps the previous version and exits 1. The
+  to the mirror). A failed refresh keeps the previous version and exits 1; a refused
+  official snapshot exits 3 even when the mirror succeeded. The
   collector reloads its screening index when a new version appears (checked every heartbeat)
   and screens the transactions it assessed meanwhile retrospectively.
 * If the risk engine cannot be built at start, the collector still collects and reports

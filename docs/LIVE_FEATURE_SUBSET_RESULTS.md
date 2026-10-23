@@ -108,8 +108,15 @@ The live monitor's supervised layer keeps returning `NO_VALIDATED_MODEL`. What w
 this decision:
 
 * labels attributable to live transactions with their availability time;
+* the live prevalence and label latency of those labels;
 * a holdout recorded after the model is frozen;
-* a pre-registered evaluation on that holdout.
+* a pre-registered evaluation on that holdout, including calibration;
+* a shadow-mode period (scores logged, never shown) whose results are reviewed;
+* an external review of the label source.
+
+The gate (`risk/supervised.py`) only checks what a model card claims; the real safeguard is
+that no loader for a live model exists (a card that passes the gate still abstains; v0.8.1
+fuzzing of malformed cards: all abstain).
 
 ## Amendments after the runs (v0.8 independent re-audit)
 

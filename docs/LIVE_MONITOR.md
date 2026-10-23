@@ -143,6 +143,39 @@ chainwatch --config configs/live.yaml serve                 # terminal 2: http:/
 | End-to-end with real processes and a **local mock** source | collector CLI → SQLite → `serve` → dashboard (§8) |
 | **Real mempool.space ingestion** | **not verified.** From the build environment, every WebSocket attempt was refused by the egress proxy (`InvalidProxyStatus: proxy rejected connection: HTTP 403`); 0 real txids were received and 0 details fetched. The collector then backed off and stopped cleanly. Run the bounded live check above on a normal internet connection to verify |
 
+### Real-network verification checklist (still to be run; v0.8.1)
+
+The build environment's egress proxy refuses mempool.space (HTTP 403 on 2026-10-23 as well),
+so the current risk pipeline has only run against the local mock. On a normal connection
+(Windows machine or the VM), run a bounded, polite check with the shipped limits:
+
+```bash
+DB=data/live/real-check.sqlite
+chainwatch-live --config configs/live.yaml indicators update --source ofac-sdn --fallback ofac-sdn-mirror --db $DB
+chainwatch-live --config configs/live.yaml collect --force --duration 3600 --db $DB
+chainwatch-live --config configs/live.yaml report --hours 1 --db $DB > real-check-report.json
+chainwatch-live --config configs/live.yaml alerts list --db $DB > real-check-alerts.json
+```
+
+Record, from the final `collect` output (counters) and the report:
+
+| What | Counter / field |
+|---|---|
+| Received txids / sampled / queued | `received`, `not_sampled`, `queued` |
+| Enrichment attempts, successes, failures | `fetched`, `failed`, `not_found`, `rate_limited`, `timeouts`, `upstream_errors`, `malformed_payloads` |
+| Retries | `retries_scheduled`, `retries_succeeded`, `retries_exhausted`, `retries_dropped` |
+| Assessed records | `risk_assessed`, `risk_errors`, `layer_errors` |
+| Source matches / relations / anomalies | `screening_matches`, `graph_relations`, `anomalies_strong`, `anomalies_notable` |
+| Unavailable assessments | feed rows with `risk_state` `insufficient_evidence` or `failed` |
+| Coverage | `availability` and `outages` in the report (`sequence_gap` includes re-sync stretches) |
+
+Pass criteria: real txids received, at least one detail fetched and assessed, every fetched
+row with a risk record, no traceback, a clean stop. The anomaly layer needs 1,000 fetched
+transactions before it reports anything (`INSUFFICIENT_BASELINE` until then: about 83
+minutes at 12 fetches per minute; at the local config's rate, less). A successful run shows
+that the pipeline works on real observations; it says nothing about fraud-detection
+accuracy, and a source match is a listing, not proof of wrongdoing.
+
 ## 8. Measurements (local mock, not mempool.space)
 
 `scripts/live_load_test.py`, 180 s, mock announcing **20 tx/s** (above typical mainnet

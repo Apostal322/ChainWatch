@@ -92,8 +92,8 @@ happens and you accept the card risk.
 |---|---|---|
 | CPU | < 2 % of one core on average | E2.1.Micro (1/8 OCPU) or 1 A1 OCPU |
 | Memory | about 40–95 MB collector (more with risk screening; grows with stored indicator rows, about 2 KB each) + 60 MB edge API + Caddy (≈ 40 MB) + OS | 1 GB (E2.1.Micro) is enough; 6 GB on A1 is plenty |
-| Disk | ≈ 285 MB database at the 50,000-row cap with risk records, 7 uncompressed daily backups ≈ 2 GB, 68 MB virtualenv | 47 GB default boot volume |
-| Network | 1 outbound WebSocket and ≤ 12 HTTPS requests per minute to mempool.space; inbound 443 only | 10 TB per month outbound |
+| Disk | ≈ 285–305 MB database at the 50,000-row cap with risk records (5.5 KB per row after VACUUM; a retention-churn simulation settled at 303 MB including a 10–12 MB freelist), 7 uncompressed daily backups ≈ 2 GB, 68 MB virtualenv | 47 GB default boot volume |
+| Network | 1 outbound WebSocket and ≤ 12 HTTPS requests per minute to mempool.space (retries included); inbound 80 (Let's Encrypt HTTP-01 and the redirect) and 443 | 10 TB per month outbound |
 | OS | Ubuntu 24.04 (Python 3.12, systemd 255, `caddy` in universe) | standard platform image |
 
 ## 4. Components in this repository
@@ -175,7 +175,7 @@ happens and you accept the card risk.
   collector **1.3**, API **1.1**, backup 2.3 (all "OK"; previously 3.0 / 3.0 / 2.3).
 * **Supply chain:** hash-locked pip install (`--require-hashes`); code is cloned from the
   public repository at a chosen ref (validated); `EXPECTED_SHA` pins the exact commit.
-  Recommended: install a release tag, e.g. `REF=v0.8.0 EXPECTED_SHA=<commit>`. CI installs
+  Install `REF=main` with `EXPECTED_SHA=<the merge commit>` (no v0.8 release tag exists yet; creating one is a release step for the owner). CI installs
   from its own hash lock (`requirements/dev.lock.txt`) and audits all three locks
   (pip-audit) and the dashboard's npm tree on every run; Dependabot proposes updates as
   pull requests; the public demo image is published only after a successful CI run for
@@ -243,7 +243,7 @@ the edge API every 2 s:
 | Collector memory (peak RSS) | **39.4 MB** (VmHWM) |
 | Edge API memory (peak RSS) | **56.6 MB** (VmHWM) |
 | Container test (fresh Ubuntu 24.04, install.sh) | collector 37 MB, edge API 57 MB RSS; < 1 % CPU |
-| Database at the retention cap | **283.4 MB** for 50,000 transaction rows with 47,525 risk records, 699,894 address rows and the v0.8 covering indexes (277.8 MB before them; the risk table alone is 67 MB). The v0.5 figure of 62.7 MB had no risk tables |
+| Database at the retention cap | **283.4 MB** for 50,000 transaction rows with 47,525 risk records, 699,894 address rows and the v0.8 covering indexes (277.8 MB before them). On disk (dbstat): `risk` 97.6 MB, `tx` 72.4 MB, `tx_address` 41.6 MB plus its indexes 43.9 MB, `risk_summary_cov` 4.3 MB (the 67 MB stated earlier was the JSON payload, not disk use); 276.6 MB after VACUUM; a retention-churn simulation settles at about 303 MB. The v0.5 figure of 62.7 MB had no risk tables |
 | Virtualenv on the VM | 68 MB |
 
 Edge API latency at the 50,000-row cap (synthetic rows, one persistent client like the
@@ -301,10 +301,10 @@ Monthly estimates (derived, not measured on the network):
 | Collector state `failed` / dashboard "Collector failed" | the process hit a fatal internal error (e.g. database unwritable) and exited 1; systemd restarts it. `journalctl -u chainwatch-collector \| grep "pipeline task died"` names the cause; check `df -h /var/lib/chainwatch` |
 | Dashboard "Connected, no new data" | the WebSocket is up but nothing was fetched for 2 min: check the report's `failures` (429 → lower `fetch_per_minute`; `http_5xx` → mempool.space trouble) |
 | Dashboard "Status unknown" | Render cannot reach the edge API: `curl https://$HOST/health/live`, then `systemctl status caddy chainwatch-live-api`, then the Render logs (`live_upstream_unavailable`) |
-| Restore a backup | `sudo systemctl stop chainwatch-collector chainwatch-live-api`; `sudo -u chainwatch /opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml restore /var/backups/chainwatch/live-<stamp>.sqlite` (integrity-checked; refuses while the collector runs; keeps the replaced files as `*.pre-restore-<stamp>`); start both units |
+| Restore a backup | `sudo systemctl stop chainwatch-collector chainwatch-live-api chainwatch-indicators.timer chainwatch-backup.timer`; `sudo -u chainwatch /opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml restore /var/backups/chainwatch/live-<stamp>.sqlite` (the backup is integrity-checked; check it against its `.sha256` first with `sha256sum -c`). Restore refuses while any writer has the database open (every writer holds a shared lock on `live.sqlite.lock`: the collector, a timer-run indicator refresh or backup) or a collector heartbeat is fresh; it copies the backup into the live file through SQLite's backup API (no file is renamed) and keeps the replaced contents, including un-checkpointed WAL data, as one `live.sqlite.pre-restore-<stamp>` file. A collector that systemd starts during a restore exits 75 and is retried 10 s later. Then start the units and both timers again |
 | Rotate the token (no downtime) | 1. add `CHAINWATCH_LIVE_TOKEN_NEXT=<new>` (generate with `openssl rand -hex 32`) to `/etc/chainwatch/live.env` (mode 0600) and `sudo systemctl restart chainwatch-live-api`: the edge now accepts both tokens; 2. update the Render secret to the new token and redeploy; 3. make the new token `CHAINWATCH_LIVE_TOKEN`, delete the `_NEXT` line and restart the edge again. Tokens must match `[A-Za-z0-9._~+/=-]{32,}`; a malformed or whitespace-padded token makes the edge exit 78 (systemd does not restart-loop) |
-| Upgrade | `sudo REF=<new tag> EXPECTED_SHA=<commit> CHAINWATCH_HOST=$HOST bash /opt/chainwatch/app/deploy/oracle/install.sh` (idempotent; keeps the token and data; schema migrations run at start-up) |
-| Roll back | the same command with the previous tag. Schema changes so far only add columns and indexes, so an older collector still opens a newer database; take a backup first anyway |
+| Upgrade | Take a backup (`sudo systemctl start chainwatch-backup.service`). Then fetch the **new** installer at the pinned commit and run it: `curl -fsSLO "https://raw.githubusercontent.com/Apostal322/ChainWatch/$SHA/deploy/oracle/install.sh"` and `sudo REF=main EXPECTED_SHA=$SHA CHAINWATCH_HOST=$HOST bash install.sh` (idempotent; keeps the token and data; migrations run at start-up). The fetched commit is verified **before** anything on disk changes, and an installer that differs from the one running re-executes the new one (bash keeps running the old text when a file is replaced, so installs older than v0.8.1 ran the old installer) |
+| Roll back | **Not by reinstalling an older version on the migrated database.** v0.8 rebuilt `indicator_versions`, re-keyed alerts and added tables and columns; v0.7 code then opens duplicate alerts under the old keys and loses dismissals (verified). Instead: stop the units and timers, `restore` the backup taken before the upgrade, then install the older ref with its `EXPECTED_SHA` |
 | Uninstall | `systemctl disable --now chainwatch-*`; remove `/opt/chainwatch`, `/var/lib/chainwatch`, `/etc/chainwatch`; then terminate the VM in the Console |
 
 ## 10. 24-hour reliability test plan (before any 24/7 claim)
