@@ -70,11 +70,13 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Build synthetic demo image (linux/amd64; hash-locked deps, digest-pinned bases)
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           docker build --platform linux/amd64 --target demo \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.revision="${SHA}" \
-            --label org.opencontainers.image.version="${{ steps.meta.outputs.version }}" \
+            --label org.opencontainers.image.version="$VERSION" \
             --label org.opencontainers.image.licenses=MIT \
             --label org.opencontainers.image.description="ChainWatch public demo: synthetic data and synthetic-trained models only" \
             -t chainwatch-demo:candidate .
@@ -91,12 +93,17 @@ jobs:
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker tag chainwatch-demo:candidate "$IMAGE:sha-$SHA"
           docker push "$IMAGE:sha-$SHA"
-          # version tags are never overwritten: bump the version in pyproject.toml to publish a new one
-          if docker manifest inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+          # version tags are never overwritten: bump the version in pyproject.toml to publish a
+          # new one. Only an explicit "manifest unknown" means the tag is free; any other
+          # failure (network, rate limit, auth) stops the job rather than overwrite a release.
+          if out=$(docker manifest inspect "$IMAGE:$VERSION" 2>&1); then
             echo "::notice::$IMAGE:$VERSION already exists; not overwritten (published sha-$SHA only)"
-          else
+          elif grep -qiE "manifest unknown|no such manifest|not found" <<<"$out"; then
             docker tag chainwatch-demo:candidate "$IMAGE:$VERSION"
             docker push "$IMAGE:$VERSION"
+          else
+            echo "::error::could not check whether $IMAGE:$VERSION exists: $out"
+            exit 1
           fi
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:sha-$SHA")
           docker logout ghcr.io

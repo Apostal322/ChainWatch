@@ -48,7 +48,11 @@ def test_ci_installs_only_hash_locked_dependencies():
     )
     assert "--require-hashes -r requirements/dev.lock.txt" in install["run"]
     assert "--no-deps --no-build-isolation -e ." in install["run"]
-    assert "audit" in ci["jobs"]["docker"]["needs"]
+    assert {"audit", "deployed-locks"} <= set(ci["jobs"]["docker"]["needs"])
+    deployed = " ".join(s.get("run", "") for s in ci["jobs"]["deployed-locks"]["steps"])
+    assert (
+        "--require-hashes -r requirements/serve.lock.txt -r requirements/test.lock.txt" in deployed
+    )
     lock = (REPO_ROOT / "requirements" / "dev.lock.txt").read_text()
     pins = re.findall(r"^([A-Za-z0-9_.-]+)==\S+", lock, re.M)
     assert {"pytest", "ruff", "setuptools", "fastapi"} <= {p.lower() for p in pins}

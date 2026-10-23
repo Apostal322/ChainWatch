@@ -7,9 +7,10 @@
 #
 # Environment:
 #   CHAINWATCH_HOST   public hostname for HTTPS (required unless SKIP_CADDY=1)
-#   REPO_URL, REF     source to install (default: the public repository, branch main);
-#                     prefer a release tag, e.g. REF=v0.6.0
-#   EXPECTED_SHA      optional: abort unless the checked-out commit is exactly this SHA
+#   REPO_URL, REF     source to install (default: the public repository, branch main); a
+#                     branch or a tag (git clone --branch), e.g. REF=main after a merge
+#   EXPECTED_SHA      abort, before anything changes, unless the fetched commit is exactly
+#                     this full SHA (strongly recommended)
 #   DRY_RUN=1         print the commands instead of running them
 #   SKIP_SYSTEMD=1    do not install/enable systemd units (container tests)
 #   SKIP_CADDY=1      do not install/configure Caddy (container tests)
@@ -32,6 +33,18 @@ ETC=/etc/chainwatch
 
 run() { echo "+ $*"; if [ "$DRY_RUN" != "1" ]; then "$@"; fi; }
 note() { echo "== $*"; }
+# the commit must be verified before it replaces anything on disk
+verify() {
+  if [ -n "${EXPECTED_SHA:-}" ] && [ "$1" != "$EXPECTED_SHA" ]; then
+    echo "fetched $1, expected $EXPECTED_SHA; aborting (nothing was changed)" >&2
+    exit 1
+  fi
+  [ -z "${EXPECTED_SHA:-}" ] || echo "   verified commit $1"
+}
+# what this process is executing: bash keeps running the old text when an upgrade replaces
+# the file, so after the checkout the new installer is re-executed (see "source" below)
+SELF_SHA=""
+if [ -f "$0" ]; then SELF_SHA=$(sha256sum "$0" | cut -d' ' -f1); fi
 
 [ "$(id -u)" = "0" ] || { echo "run as root (sudo)" >&2; exit 1; }
 if [ "$SKIP_CADDY" != "1" ]; then
@@ -57,16 +70,24 @@ run install -d -m 0750 -o chainwatch -g chainwatch "$DATA" "$BACKUPS"
 run install -d -m 0750 -o root -g chainwatch "$ETC"
 
 note "source ($REPO_URL @ $REF), owned by root and read-only to the service"
-if [ -d "$APP/.git" ]; then
+if [ "$DRY_RUN" = "1" ]; then
+  run git clone -q --depth 1 --branch "$REF" "$REPO_URL" "$APP"
+elif [ -d "$APP/.git" ]; then
   run git -C "$APP" fetch --depth 1 origin "$REF"
+  verify "$(git -C "$APP" rev-parse 'FETCH_HEAD^{commit}')"
   run git -C "$APP" checkout -q --force FETCH_HEAD
 else
-  run git clone -q --depth 1 --branch "$REF" "$REPO_URL" "$APP"
+  staging=$(mktemp -d "$PREFIX/.app-new.XXXXXX")
+  run git clone -q --depth 1 --branch "$REF" "$REPO_URL" "$staging"
+  verify "$(git -C "$staging" rev-parse HEAD)"
+  run chmod 0755 "$staging"
+  run mv "$staging" "$APP"
 fi
-if [ -n "${EXPECTED_SHA:-}" ] && [ "$DRY_RUN" != "1" ]; then
-  actual=$(git -C "$APP" rev-parse HEAD)
-  [ "$actual" = "$EXPECTED_SHA" ] || { echo "checked out $actual, expected $EXPECTED_SHA; aborting" >&2; exit 1; }
-  echo "   verified commit $actual"
+new_installer="$APP/deploy/oracle/install.sh"
+if [ "$DRY_RUN" != "1" ] && [ -z "${CHAINWATCH_INSTALL_REEXEC:-}" ] && [ -f "$new_installer" ] \
+   && [ "$(sha256sum "$new_installer" | cut -d' ' -f1)" != "$SELF_SHA" ]; then
+  note "re-running the installer of the new version"
+  CHAINWATCH_INSTALL_REEXEC=1 exec bash "$new_installer"
 fi
 
 note "virtualenv from the hash-locked live dependency set (no ML stack)"

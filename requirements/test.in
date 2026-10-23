@@ -1,0 +1,6 @@
+# Inputs for requirements/test.lock.txt: pytest for the "deployed locks" CI job, which runs
+# the suite on the exact versions of the serving image and the VM (serve.lock.txt, a
+# superset of live.lock.txt). Packages the serving lock already pins are left out:
+#   uv pip compile requirements/test.in -c requirements/serve.lock.txt --python-version 3.12 \
+#     --generate-hashes --no-emit-package packaging -o requirements/test.lock.txt
+pytest

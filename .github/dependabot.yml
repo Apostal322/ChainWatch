@@ -9,6 +9,16 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # the serving image's ML stack must stay equal to the model registry's training
+    # environment (requirements/serve.in): bumped deliberately, with a retrain
+    ignore:
+      - dependency-name: numpy
+      - dependency-name: pandas
+      - dependency-name: pyarrow
+      - dependency-name: scikit-learn
+      - dependency-name: xgboost
+      - dependency-name: xgboost-cpu
+      - dependency-name: joblib
     groups:
       python-minor-and-patch:
         update-types: [minor, patch]
