@@ -66,14 +66,20 @@ function Ago({ ts, skew = 0 }: { ts: number; skew?: number }) {
 
 /** P1..P4 marker; the accessible text is the full meaning. `decorative` when the meaning is
  * already written next to it. */
-export function PriorityMarker({ level, decorative = false, assessed }: {
+export function PriorityMarker({ level, decorative = false, assessed, state }: {
   level: number | null | undefined;
   decorative?: boolean;
   /** Feed rows: false shows "n/a" (not assessed), true "—" (assessed, no finding). */
   assessed?: boolean | null;
+  /** Feed rows (v0.8.1): "insufficient_evidence" shows "?", "failed" shows "err". */
+  state?: string | null;
 }) {
-  const m = priorityMarker(level, assessed);
-  const cls = isPriority(level) ? `prio p${level}` : assessed === false ? "prio na" : "prio none";
+  const m = priorityMarker(level, assessed, state);
+  const cls = isPriority(level)
+    ? `prio p${level}`
+    : assessed === false || state === "failed" || state === "insufficient_evidence"
+      ? "prio na"
+      : "prio none";
   if (decorative) return <span className={cls} aria-hidden="true">{m.short}</span>;
   return (
     <span className={cls}>
@@ -90,6 +96,8 @@ export function PriorityLegend() {
         <li key={k}><PriorityMarker level={k} decorative /> <span><span className="sr-only">{PRIORITY_INFO[k].short}: </span>{PRIORITY_INFO[k].name}</span></li>
       ))}
       <li><span className="prio none" aria-hidden="true">—</span> <span>assessed, no finding (not a statement of legitimacy)</span></li>
+      <li><span className="prio na" aria-hidden="true">?</span> <span>insufficient evidence (no screening data and no anomaly baseline)</span></li>
+      <li><span className="prio na" aria-hidden="true">err</span> <span>assessment failed (not evaluated)</span></li>
       <li><span className="prio na" aria-hidden="true">n/a</span> <span>not assessed (no risk record: failed fetch, risk assessment off or unavailable)</span></li>
     </ul>
   );

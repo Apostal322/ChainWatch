@@ -438,29 +438,78 @@ def test_collector_screens_relates_and_tracks_lifecycle(tmp_path):
     assert all(r["risk_assessed"] for r in rows)  # committed with the observation
 
 
-def test_failed_risk_write_keeps_the_observation_and_leaves_no_partial_record(
-    tmp_path, monkeypatch
-):
+def test_failed_risk_write_keeps_the_observation_and_leaves_a_failed_record(tmp_path, monkeypatch):
+    """A failed assessment looked exactly like risk being off ("n/a"), and its address rows
+    were rolled back with it, so a later retrospective pass could never find it (v0.8.1)."""
     cfg = _cfg(tmp_path)
     store = LiveStore(cfg.db_path)
-    _ingest(store, [LISTED], at=1.0)
+    _ingest(store, [LISTED_2], at=1.0)
     col = Collector(cfg, store, http=httpx.AsyncClient(), rng=random.Random(0))
     col._build_engine()
     f, tx = _features("boom", out_addresses=[LISTED])
+    real = rp.save_risk
+    calls = []
 
-    def fail(*a, **k):
-        raise RuntimeError("disk full")
+    def fail_once(db, tx_id, record):
+        calls.append(record["priority"]["label"])
+        if len(calls) == 1:
+            raise RuntimeError("disk full")
+        real(db, tx_id, record)
 
-    monkeypatch.setattr(rp, "save_risk", fail)
+    monkeypatch.setattr(rp, "save_risk", fail_once)
     col._store_and_assess(f, [], tx)
+    monkeypatch.setattr(rp, "save_risk", real)
     reader = LiveReader(cfg.db_path)
     row = reader.get(f["txid"])
-    assert row is not None and row["risk"] is None  # observation kept, no record
-    assert store.db.execute("SELECT COUNT(*) FROM tx_address").fetchone()[0] == 0  # rolled back
-    assert reader.alerts(None, 10) == []
-    assert col.c.fetched == 1 and col.c.risk_errors == 1 and col.c.risk_assessed == 0
+    assert row is not None and row["risk"]["priority"]["level"] is None
+    assert row["risk"]["priority"]["label"].startswith("Assessment failed")
+    assert {row["risk"][k]["status"] for k in ("screening", "graph", "anomaly")} == {"ERROR"}
+    assert store.db.execute("SELECT COUNT(*) FROM tx_address").fetchone()[0] > 0  # kept
+    assert reader.alerts(None, 10) == [] and col.c.risk_errors == 1 and col.c.risk_assessed == 0
     listed = reader.list(limit=5, sort="id", descending=True, outcome=None)[1][0]
-    assert listed["risk_assessed"] is False and listed["risk_priority"] is None
+    assert listed["risk_state"] == "failed" and listed["risk_priority"] is None
+    # the address rows survived, so a later snapshot listing LISTED finds the transaction
+    report = _ingest(store, [LISTED, LISTED_2], at=time.time())
+    with rp.transaction(store.db):
+        assert rp.retro_screen(store.db, report["version_id"], time.time()) == 1
+
+
+def test_feed_rows_tell_insufficient_evidence_from_no_finding(tmp_path):
+    """Rows without screening data and anomaly baseline were shown as "no finding"."""
+    cfg = _cfg(tmp_path)
+    store = LiveStore(cfg.db_path)  # no indicator source loaded: screening unavailable
+    col = Collector(cfg, store, http=httpx.AsyncClient(), rng=random.Random(0))
+    col._build_engine()
+    f, tx = _features("blind", out_addresses=[LISTED])
+    col._store_and_assess(f, [], tx)
+    (row,) = LiveReader(cfg.db_path).list(limit=5, sort="id", descending=True, outcome=None)[1]
+    assert row["risk_assessed"] is True and row["risk_state"] == "insufficient_evidence"
+
+
+def test_orphans_are_removed_when_every_transaction_aged_out(tmp_path):
+    store = _store(tmp_path)
+    f, tx = _features("old", out_addresses=[LISTED])
+    tx_id = store.add_fetched_id(f, [])
+    rp.save_addresses(store.db, tx_id, feat.extract_addresses(tx))
+    store.db.execute("DELETE FROM tx")  # retention removed every row
+    rp.prune_orphans(store.db, now=time.time())
+    assert store.db.execute("SELECT COUNT(*) FROM tx_address").fetchone()[0] == 0
+    assert rp.count_observed(store.db, [f["txid"]]) == 0
+
+
+def test_alerts_a_person_acted_on_are_not_pruned(tmp_path):
+    """After 90 days without a recurrence a dismissed alert, its note and its history were
+    deleted: the next occurrence came back as a fresh "new" alert."""
+    store = _store(tmp_path)
+    spec = dict(layer="screening", kind="source_match", priority=1, title="t", evidence={})
+    dismissed = rp.upsert_alert(store.db, group_key="kept", txid="a" * 64, at=0.0, **spec)
+    rp.set_alert_status(store.db, dismissed, "dismissed", 1.0, note="known exchange")
+    rp.upsert_alert(store.db, group_key="unreviewed", txid="b" * 64, at=0.0, **spec)
+    rp.prune_orphans(store.db, now=100 * 86400.0)
+    assert [a["group_key"] for a in rp.alerts(store.db)] == ["kept"]
+    rp.upsert_alert(store.db, group_key="kept", txid="c" * 64, at=100 * 86400.0, **spec)
+    (a,) = rp.alerts(store.db)
+    assert a["status"] == "dismissed" and a["suppressed"] == 1
 
 
 def test_alert_titles_name_the_source_without_repeating_a_mirror_label():

@@ -283,8 +283,13 @@ export function isPriority(v: unknown): v is PriorityLevel {
 export function priorityMarker(
   level: number | null | undefined,
   assessed?: boolean | null,
+  state?: string | null,
 ): { short: string; aria: string } {
   if (isPriority(level)) return { short: PRIORITY_INFO[level].short, aria: PRIORITY_INFO[level].aria };
+  if (state === "failed") return { short: "err", aria: "Assessment failed: this transaction was not evaluated" };
+  if (state === "insufficient_evidence") {
+    return { short: "?", aria: "Insufficient evidence: no screening data and no anomaly baseline (not a statement of legitimacy)" };
+  }
   if (assessed === false) return { short: "n/a", aria: "Not assessed: no risk assessment for this transaction" };
   if (assessed === true) return { short: "—", aria: "No review priority: assessed, no finding" };
   return { short: "—", aria: "No review priority: no finding, or not assessed yet" };

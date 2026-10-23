@@ -133,6 +133,32 @@ class RiskEngine:
         return record
 
 
+def failed_record(features: dict[str, Any], error: str, at: float) -> dict[str, Any]:
+    """What is stored when an assessment could not be completed or saved: every layer
+    ERROR, no priority, labelled as a failure (not "No finding"), so it is never mistaken
+    for a clean assessment or for risk being off."""
+    return {
+        "txid": features["txid"],
+        "engine_version": ENGINE_VERSION,
+        "feature_schema": features.get("schema_version", FEATURE_SCHEMA_VERSION),
+        "observed_at": features["first_seen"],
+        "fetched_at": features["fetched_at"],
+        "evaluated_at": at,
+        "screening": {"status": "ERROR"},
+        "graph": {"status": "ERROR"},
+        "anomaly": {"status": "ERROR"},
+        "supervised": {"status": "ERROR"},
+        "priority": {
+            "level": None,
+            "label": "Assessment failed (not evaluated)",
+            "semantics": "ordinal review priority, not a probability of wrongdoing",
+        },
+        "insufficient_evidence": True,
+        "errors": [{"layer": "assessment", "error": error[:200]}],
+        "latency_ms": 0.0,
+    }
+
+
 def alert_specs(record: dict[str, Any]) -> list[dict[str, Any]]:
     """Grouped alerts for a record (priorities 1-3)."""
     out = []

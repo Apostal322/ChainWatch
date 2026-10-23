@@ -102,6 +102,12 @@ describe("priorities", () => {
     expect(priorityMarker(null, false)).toEqual({ short: "n/a", aria: expect.stringMatching(/^Not assessed/) });
     expect(priorityMarker(null, true)).toEqual({ short: "—", aria: "No review priority: assessed, no finding" });
     expect(priorityMarker(2, false).short).toBe("P2");
+    // v0.8.1: a row whose screening could not run is never shown as "no finding"
+    expect(priorityMarker(null, true, "insufficient_evidence").short).toBe("?");
+    expect(priorityMarker(null, true, "insufficient_evidence").aria).toMatch(/not a statement of legitimacy/);
+    expect(priorityMarker(null, true, "failed")).toEqual({ short: "err", aria: expect.stringMatching(/^Assessment failed/) });
+    expect(priorityMarker(null, true, "no_finding").short).toBe("—");
+    expect(priorityMarker(1, true, "finding").short).toBe("P1");
   });
 
   it("fills feed priorities from findings, newest first wins", () => {

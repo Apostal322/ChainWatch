@@ -15,6 +15,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 import sqlite3
 import sys
 import tempfile
@@ -68,6 +69,13 @@ def cmd_collect(args) -> int:
             "configs/live-cloud.yaml (or pass --force for a one-off bounded run)"
         )
     store = LiveStore(live.db_path)
+    # a corrupted file would otherwise be written to until the nightly backup fails
+    check = store.db.execute("PRAGMA quick_check").fetchone()[0]
+    if check != "ok":
+        store.close()
+        print(f"chainwatch-live: {live.db_path} failed its integrity check ({check}); restore "
+              "a backup (docs/LIVE_CLOUD.md section 9)", file=sys.stderr)  # fmt: skip
+        return 78  # EX_CONFIG-like: systemd does not restart-loop on a corrupted database
     collector = Collector(live, store)
     try:
         c = asyncio.run(collector.run(args.duration, args.max_fetches))
@@ -102,6 +110,9 @@ def cmd_serve_edge(args) -> int:
     return 0
 
 
+BACKUP_NAME = re.compile(r"live-\d{8}T\d{6}Z\.sqlite")
+
+
 def backup(db: Path, dest_dir: Path, keep: int, now: float | None = None) -> Path:
     """Online backup with integrity check; keeps the newest ``keep`` copies."""
     from chainwatch.live.store import LiveStore
@@ -111,26 +122,34 @@ def backup(db: Path, dest_dir: Path, keep: int, now: float | None = None) -> Pat
     if not Path(db).is_file():  # never back up (or create) an empty database at a typo'd path
         raise FileNotFoundError(f"live database {db} does not exist")
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    dest_dir = Path(dest_dir)
+    for stale in dest_dir.glob("live-*.sqlite.partial"):  # an interrupted earlier run
+        stale.unlink()
     store = LiveStore(db)
     try:
-        out = store.backup(Path(dest_dir) / f"live-{stamp}.sqlite")
+        out = store.backup(dest_dir / f"live-{stamp}.sqlite")  # integrity-checked
     finally:
         store.close()
-    check = sqlite3.connect(out)
-    try:
-        if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise RuntimeError(f"backup {out} failed its integrity check")
-    finally:
-        check.close()
-    for old in sorted(Path(dest_dir).glob("live-*.sqlite"))[:-keep]:
+    # rotate only this command's own, verified copies (an operator's live-manual.sqlite
+    # next to them is neither counted nor deleted)
+    ours = sorted(p for p in dest_dir.glob("live-*.sqlite") if BACKUP_NAME.fullmatch(p.name))
+    for old in ours[:-keep]:
         old.unlink()
+        old.with_name(old.name + ".sha256").unlink(missing_ok=True)
     return out
 
 
 def restore(src: Path, db: Path, *, heartbeat_s: float, now: float | None = None) -> Path:
-    """Replace the live database with a verified backup. Refuses while a collector is
-    running (fresh heartbeat). The replaced files are kept as ``*.pre-restore-<stamp>``."""
-    from chainwatch.live.store import LiveReader
+    """Replace the live database's contents with a verified backup.
+
+    Refuses while any writer has the database open (the shared lock every writer holds:
+    the collector, a timer-run indicator refresh or backup) and while a collector heartbeat
+    is fresh. The copy goes through SQLite's backup API into the live file itself: no file
+    is renamed, so a process starting meanwhile can neither create a fresh database nor
+    pair its WAL with the restored file. The replaced contents, including WAL frames not
+    yet checkpointed, are kept as one self-contained ``<db>.pre-restore-<stamp>`` file.
+    """
+    from chainwatch.live.store import DatabaseBusy, LiveReader, acquire_lock
 
     now = time.time() if now is None else now
     src, db = Path(src), Path(db)
@@ -154,19 +173,38 @@ def restore(src: Path, db: Path, *, heartbeat_s: float, now: float | None = None
                 "the collector is running (fresh heartbeat); stop chainwatch-collector and "
                 "chainwatch-live-api first"
             )
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
-    tmp = db.with_name(db.name + ".restoring")
-    source, target = sqlite3.connect(src), sqlite3.connect(tmp)
     try:
-        source.backup(target)
+        lock = acquire_lock(db, exclusive=True)
+    except DatabaseBusy:
+        raise RuntimeError(
+            "the database is in use (collector, indicator refresh or backup); stop "
+            "chainwatch-collector, chainwatch-indicators.timer and chainwatch-backup.timer "
+            "first"
+        ) from None
+    try:
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+        live = sqlite3.connect(db)
+        try:
+            if db.stat().st_size:
+                keep = sqlite3.connect(db.with_name(f"{db.name}.pre-restore-{stamp}"))
+                try:
+                    live.backup(keep)  # pages and committed WAL frames, one file
+                finally:
+                    keep.close()
+            source = sqlite3.connect(f"file:{src.as_posix()}?mode=ro", uri=True)
+            try:
+                source.backup(live)
+            finally:
+                source.close()
+            live.execute("PRAGMA journal_mode=WAL")
+            live.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if live.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RuntimeError(f"{db} failed its integrity check after the restore")
+        finally:
+            live.close()
     finally:
-        source.close()
-        target.close()
-    for suffix in ("", "-wal", "-shm"):
-        old = db.with_name(db.name + suffix)
-        if old.exists():
-            old.replace(db.with_name(f"{db.name}{suffix}.pre-restore-{stamp}"))
-    tmp.replace(db)
+        if lock is not None:
+            lock.close()
     return db
 
 
@@ -367,9 +405,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from chainwatch.live.store import DatabaseBusy
+
     _logging()
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except DatabaseBusy as e:  # a restore holds the database: try again later
+        print(f"chainwatch-live: {e}", file=sys.stderr)
+        return 75  # EX_TEMPFAIL: systemd restarts the collector after RestartSec
 
 
 if __name__ == "__main__":

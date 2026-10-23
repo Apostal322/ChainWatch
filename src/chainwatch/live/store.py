@@ -102,12 +102,79 @@ def _summary(row: sqlite3.Row) -> dict[str, Any]:
     return d
 
 
+_NO_EVIDENCE_SCREENING = ("SCREENING_DATA_UNAVAILABLE", "INSUFFICIENT_INFORMATION", "ERROR")
+_NO_EVIDENCE_ANOMALY = ("INSUFFICIENT_BASELINE", "INSUFFICIENT_INFORMATION", "ERROR")
+
+
+def risk_state(found: tuple | None) -> str:
+    """One word for a feed row, so "nothing found" is never shown for a transaction whose
+    screening could not run: ``finding`` (a priority), ``no_finding``, ``insufficient_evidence``
+    (no screening data and no anomaly baseline), ``failed`` (the assessment itself failed),
+    or ``not_assessed`` (risk off, or before risk existed)."""
+    if found is None:
+        return "not_assessed"
+    priority, screening, anomaly = found
+    if priority is not None:
+        return "finding"
+    if screening == "ERROR" and anomaly == "ERROR":
+        return "failed"
+    if screening in _NO_EVIDENCE_SCREENING and anomaly in _NO_EVIDENCE_ANOMALY:
+        return "insufficient_evidence"
+    return "no_finding"
+
+
+class DatabaseBusy(RuntimeError):
+    """Another process holds the database lock this operation needs (e.g. a restore)."""
+
+
+def lock_path(db: Path) -> Path:
+    return Path(db).with_name(Path(db).name + ".lock")
+
+
+def acquire_lock(db: Path, *, exclusive: bool):
+    """Advisory lock on ``<db>.lock`` (flock), held until the returned file is closed.
+
+    Every writer (collector, indicator refresh, alerts CLI, backup) holds it shared;
+    ``restore`` needs it exclusively, so it can never run while one of them has the
+    database open, and none of them can open the database during a restore. Non-blocking:
+    raises :class:`DatabaseBusy`. Without ``fcntl`` (Windows: development only) it is a
+    no-op and ``restore`` relies on the heartbeat check alone.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - not on the deployment platform
+        return None
+    path = lock_path(db)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a+b")  # noqa: SIM115 - held for the lock's lifetime
+    try:
+        fcntl.flock(fh, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        raise DatabaseBusy(
+            f"{db} is in use by another process"
+            if exclusive
+            else f"{db} is being restored; try again when the restore has finished"
+        ) from None
+    return fh
+
+
 class LiveStore:
-    """Writer side, used only by the collector process."""
+    """Writer side: the collector and the CLI commands that write (indicators, alerts,
+    backup). Holds the shared database lock while open (see :func:`acquire_lock`)."""
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = acquire_lock(self.path, exclusive=False)
+        try:
+            self._open()
+        except BaseException:
+            if self._lock is not None:
+                self._lock.close()
+            raise
+
+    def _open(self) -> None:
         self.db = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
@@ -125,6 +192,9 @@ class LiveStore:
 
     def close(self) -> None:
         self.db.close()
+        if self._lock is not None:
+            self._lock.close()
+            self._lock = None
 
     def has(self, txid: str) -> bool:
         return self.db.execute("SELECT 1 FROM tx WHERE txid = ?", (txid,)).fetchone() is not None
@@ -253,16 +323,29 @@ class LiveStore:
         self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def backup(self, dest: Path) -> Path:
-        """Consistent online copy (SQLite backup API); safe while the collector writes."""
+        """Consistent online copy (SQLite backup API); safe while the collector writes. The
+        copy is integrity-checked before it gets its final name, and a ``.sha256`` file is
+        written next to it, so a failed or interrupted backup never counts as a backup."""
+        import hashlib
+
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(dest.suffix + ".partial")
         target = sqlite3.connect(tmp)
         try:
             self.db.backup(target)
+            ok = target.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         finally:
             target.close()
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"backup {dest} failed its integrity check")
+        digest = hashlib.sha256()
+        with open(tmp, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
         tmp.replace(dest)
+        dest.with_name(dest.name + ".sha256").write_text(f"{digest.hexdigest()}  {dest.name}\n")
         return dest
 
 
@@ -350,17 +433,21 @@ class LiveReader:
             if out:  # review priority of each row (risk intelligence), when assessed
                 marks = ",".join("?" * len(out))
                 try:
-                    prio = dict(
-                        c.execute(
-                            f"SELECT tx_id, priority FROM risk WHERE tx_id IN ({marks})",
+                    risk = {
+                        row[0]: row[1:]
+                        for row in c.execute(
+                            "SELECT tx_id, priority, screening, anomaly FROM risk "
+                            f"WHERE tx_id IN ({marks})",
                             [r["id"] for r in out],
-                        ).fetchall()
-                    )
+                        )
+                    }
                 except sqlite3.OperationalError:  # database from before v0.7.0
-                    prio = {}
+                    risk = {}
                 for r in out:  # null priority + assessed: assessed, nothing to review
-                    r["risk_priority"] = prio.get(r["id"])
-                    r["risk_assessed"] = r["id"] in prio
+                    found = risk.get(r["id"])
+                    r["risk_priority"] = found[0] if found else None
+                    r["risk_assessed"] = found is not None
+                    r["risk_state"] = risk_state(found)
         return total, out
 
     def get(self, txid: str) -> dict[str, Any] | None:

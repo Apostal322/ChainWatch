@@ -9,6 +9,7 @@ import asyncio
 import json
 import random
 import sqlite3
+import sys
 import time
 
 import httpx
@@ -746,3 +747,125 @@ def test_pending_retries_are_recorded_on_shutdown(tmp_path):
     col = asyncio.run(go())
     row = LiveReader(col.cfg.db_path).get(t)
     assert row["outcome"] == "failed" and row["error"] == "http_503" and not col._retry_timers
+
+
+# ---- v0.8.1 audit: restore race and backup hygiene --------------------------------------------
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="flock is POSIX-only")
+
+
+def _db_with_backup(tmp_path):
+    db = tmp_path / "live.sqlite"
+    store = LiveStore(db)
+    f = feat.extract(esplora_tx(txid("keep")), txid=txid("keep"), first_seen=1, fetched_at=2)
+    store.add_fetched(f, [])
+    store.heartbeat(state="stopped", updated_at=1.0, started_at=1.0)
+    store.close()
+    return db, live_cli.backup(db, tmp_path / "b", keep=3)
+
+
+@posix_only
+def test_restore_is_refused_while_any_writer_has_the_database_open(tmp_path):
+    """The heartbeat check alone let a restore run while a just-started collector (state
+    still 'stopped') or a timer-run indicator refresh had the database open: their writes
+    went to the renamed files, or their fresh WAL was paired with the restored file."""
+    db, backup = _db_with_backup(tmp_path)
+    writer = LiveStore(db)  # e.g. a collector restarted by systemd, before its heartbeat
+    with pytest.raises(RuntimeError, match="in use"):
+        live_cli.restore(backup, db, heartbeat_s=5.0)
+    writer.close()
+    live_cli.restore(backup, db, heartbeat_s=5.0)
+
+
+@posix_only
+def test_no_writer_can_open_the_database_during_a_restore(tmp_path):
+    from chainwatch.live.store import DatabaseBusy, acquire_lock
+
+    db, _ = _db_with_backup(tmp_path)
+    lock = acquire_lock(db, exclusive=True)  # what restore holds
+    with pytest.raises(DatabaseBusy):
+        LiveStore(db)
+    lock.close()
+    LiveStore(db).close()
+
+
+def test_restore_keeps_uncheckpointed_data_in_the_pre_restore_copy(tmp_path):
+    """The WAL (up to an hour after a crash) was renamed to a name SQLite never pairs with
+    the renamed main file: the pre-restore copy silently lacked those rows."""
+    db, backup = _db_with_backup(tmp_path)
+    other = sqlite3.connect(db)  # e.g. what a crashed process left in the WAL
+    other.execute("PRAGMA wal_autocheckpoint=0")
+    other.execute("CREATE TABLE late (x INTEGER)")
+    other.executemany("INSERT INTO late VALUES (?)", [(i,) for i in range(100)])
+    other.commit()
+    live_cli.restore(backup, db, heartbeat_s=5.0)
+    other.close()
+    (pre,) = tmp_path.glob("live.sqlite.pre-restore-*")
+    assert sqlite3.connect(pre).execute("SELECT COUNT(*) FROM late").fetchone()[0] == 100
+    restored = sqlite3.connect(db)
+    assert restored.execute("SELECT COUNT(*) FROM tx").fetchone()[0] == 1
+    assert "late" not in {r[0] for r in restored.execute("SELECT name FROM sqlite_master")}
+
+
+def test_backup_rotation_counts_only_verified_copies(tmp_path, monkeypatch):
+    """A failed integrity check left the file under its final name (it then counted as one
+    of the kept copies); interrupted .partial files were never removed; the rotation glob
+    deleted an operator's own live-manual-*.sqlite."""
+    db, _ = _db_with_backup(tmp_path)
+    dest = tmp_path / "b"
+    manual = dest / "live-manual-before-upgrade.sqlite"
+    manual.write_bytes(b"x")
+    stale = dest / "live-20260101T000000Z.sqlite.partial"
+    stale.write_bytes(b"x")
+    for i in range(4):
+        live_cli.backup(db, dest, keep=2, now=1_800_000_000 + i)
+    ours = sorted(p.name for p in dest.glob("live-2*.sqlite"))
+    assert len(ours) == 2 and manual.exists() and not stale.exists()
+    for name in ours:
+        digest, fname = (dest / f"{name}.sha256").read_text().split()
+        assert fname == name and len(digest) == 64
+
+    def corrupt_check(self, dest_path):  # the copy fails its integrity check
+        raise RuntimeError(f"backup {dest_path} failed its integrity check")
+
+    monkeypatch.setattr(LiveStore, "backup", corrupt_check)
+    with pytest.raises(RuntimeError, match="integrity"):
+        live_cli.backup(db, dest, keep=2, now=1_900_000_000)
+    assert sorted(p.name for p in dest.glob("live-2*.sqlite")) == ours
+
+
+def _collect_argv(tmp_path, db):
+    from chainwatch.config import REPO_ROOT
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(f"extends: {REPO_ROOT / 'configs' / 'live.yaml'}\nlive:\n  db_path: {db}\n")
+    return ["--config", str(cfg), "collect", "--duration", "0.1"]
+
+
+def test_collector_refuses_a_corrupted_database_without_a_restart_loop(tmp_path, capsys):
+    """A corrupted file was opened and written to; only the nightly backup noticed."""
+    db = tmp_path / "live.sqlite"
+    store = LiveStore(db)
+    for i in range(400):
+        t = txid(f"c{i}")
+        store.add_fetched(feat.extract(esplora_tx(t), txid=t, first_seen=1, fetched_at=2), [])
+    store.checkpoint()
+    store.close()
+    size = db.stat().st_size
+    with open(db, "r+b") as fh:  # damage pages in the middle, keep the schema page
+        fh.seek(size // 2)
+        fh.write(b"\xff" * 8192)
+    assert live_cli.main(_collect_argv(tmp_path, db)) == 78
+    assert "integrity" in capsys.readouterr().err
+
+
+@posix_only
+def test_collector_start_during_a_restore_is_a_temporary_failure(tmp_path, capsys):
+    from chainwatch.live.store import acquire_lock
+
+    db, _ = _db_with_backup(tmp_path)
+    lock = acquire_lock(db, exclusive=True)
+    try:
+        assert live_cli.main(_collect_argv(tmp_path, db)) == 75  # systemd retries later
+    finally:
+        lock.close()
+    assert "being restored" in capsys.readouterr().err

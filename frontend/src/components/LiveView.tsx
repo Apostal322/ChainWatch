@@ -247,7 +247,7 @@ const FeedTable = memo(function FeedTable(props: {
           const isSel = selected === r.txid;
           return (
             <tr key={r.id} className={isSel ? "clickable selected" : "clickable"} onClick={() => onSelect(r.txid)}>
-              <td><PriorityMarker level={r.risk_priority ?? findingPriority.get(r.txid) ?? null} assessed={r.risk_assessed} /></td>
+              <td><PriorityMarker level={r.risk_priority ?? findingPriority.get(r.txid) ?? null} assessed={r.risk_assessed} state={r.risk_state} /></td>
               <td className="muted nowrap"><Ago ts={r.first_seen} skew={skew} /></td>
               <td>
                 <button type="button" className="rowbtn" aria-pressed={isSel}

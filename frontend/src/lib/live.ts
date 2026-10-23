@@ -26,6 +26,8 @@ export interface LiveRow {
   risk_priority?: PriorityLevel | null;
   /** True when a risk record exists (a null priority then means "no finding"). Absent on older servers. */
   risk_assessed?: boolean;
+  /** finding | no_finding | insufficient_evidence | failed | not_assessed (v0.8.1; absent before). */
+  risk_state?: string;
 }
 
 export interface LiveFeatures {

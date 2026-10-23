@@ -269,6 +269,7 @@ class Collector:
         self.queue: asyncio.Queue[tuple[str, float]] = asyncio.Queue(maxsize=cfg.queue_max)
         # txid -> (next attempt number, last error) while a retry is pending or queued
         self._retry: dict[str, tuple[int, str]] = {}
+        self._pending_update: dict[str, Any] | None = None  # detector update after commit
         self._retry_timers: dict[str, tuple[asyncio.TimerHandle, float]] = {}
         self.bucket = TokenBucket(cfg.fetch_per_minute, cfg.fetch_burst)
         self.recent_fee_rates: deque[float] = deque(maxlen=500)
@@ -740,14 +741,21 @@ class Collector:
         from chainwatch.risk import persistence as rp
 
         assessed = None
-        with rp.transaction(self.store.db):
-            tx_id = self.store.add_fetched_id(f, flags)
-            if tx_id is not None:
-                gone = self.gone.get(f["txid"])
-                if gone is not None:  # it left the mempool while its fetch was in flight
-                    rp.mark_lifecycle(self.store.db, [f["txid"]], gone[0], gone[1], gone[2])
-                assessed = self._assess(tx_id, f, payload)
+        try:
+            with rp.transaction(self.store.db):
+                tx_id = self.store.add_fetched_id(f, flags)
+                if tx_id is not None:
+                    gone = self.gone.get(f["txid"])
+                    if gone is not None:  # it left the mempool while its fetch was in flight
+                        rp.mark_lifecycle(self.store.db, [f["txid"]], gone[0], gone[1], gone[2])
+                    assessed = self._assess(tx_id, f, payload)
+        except BaseException:
+            self._pending_update = None  # rolled back: not part of the reference window
+            raise
         # counted only once committed (a disk-full rollback must not count as fetched)
+        pending, self._pending_update = self._pending_update, None
+        if pending is not None and self.engine is not None:
+            self.engine.detector.update(pending)
         if tx_id is not None:
             self.c.fetched += 1
             if assessed is not None:
@@ -761,8 +769,18 @@ class Collector:
         from chainwatch.risk import persistence as rp
         from chainwatch.risk.engine import alert_specs
 
+        db = self.store.db
+        addrs = None
+        try:  # in their own savepoint: retrospective screening finds the transaction later
+            addrs = feat.extract_addresses(payload)  # even if its assessment fails below
+            with rp.savepoint(db):
+                rp.save_addresses(db, tx_id, addrs)
+        except Exception:
+            if not db.in_transaction:
+                raise
         try:
-            addrs = feat.extract_addresses(payload)
+            if addrs is None:
+                raise ValueError("addresses could not be extracted")
             parents = sorted(
                 {
                     i["txid"]
@@ -773,11 +791,8 @@ class Collector:
                 }
             )
             record = self.engine.assess(f, addrs, parents)
-            self.engine.detector.update(f)  # the window holds only transactions before the next
-            db = self.store.db
             specs = alert_specs(record)
             with rp.savepoint(db):
-                rp.save_addresses(db, tx_id, addrs)
                 rp.save_risk(db, tx_id, record)
                 for spec in specs:
                     rp.upsert_alert(db, txid=f["txid"], at=record["evaluated_at"], **spec)
@@ -788,7 +803,19 @@ class Collector:
             self.c.risk_errors += 1
             self.last_error = f"risk: {type(e).__name__}: {e}"[:200]
             log.exception(json.dumps({"msg": "risk assessment failed", "txid": f["txid"]}))
+            from chainwatch.risk.engine import failed_record
+
+            try:  # a durable trace: the row reads "assessment failed", not "risk off"
+                with rp.savepoint(db):
+                    rp.save_risk(db, tx_id, failed_record(f, f"{type(e).__name__}: {e}",
+                                                          self.clock()))  # fmt: skip
+            except Exception:
+                if not db.in_transaction:
+                    raise
             return None
+        # the window holds only stored transactions, in order (a rolled-back record must not
+        # shape later scores; after a restart the warm start rebuilds the same window)
+        self._pending_update = f
         return record
 
     def _count_assessment(self, record: dict[str, Any]) -> None:

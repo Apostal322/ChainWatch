@@ -555,17 +555,22 @@ def mark_lifecycle(
 def prune_orphans(db: sqlite3.Connection, now: float, alert_days: float = 90.0) -> None:
     # Row ids grow with fetch order and retention removes the oldest rows, so an id range
     # (indexed) finds the orphans without scanning the table every minute.
-    min_id = db.execute("SELECT COALESCE(MIN(id), 0) FROM tx").fetchone()[0]
-    if min_id:
-        db.execute("DELETE FROM tx_address WHERE tx_id < ?", (min_id,))
-        db.execute("DELETE FROM risk WHERE tx_id < ?", (min_id,))
+    min_id = db.execute("SELECT MIN(id) FROM tx").fetchone()[0]
+    if min_id is None:  # every transaction aged out: all their rows are orphans
+        min_id = db.execute("SELECT COALESCE(MAX(tx_id), 0) + 1 FROM risk").fetchone()[0]
+        min_id = max(min_id, db.execute(
+            "SELECT COALESCE(MAX(tx_id), 0) + 1 FROM tx_address").fetchone()[0])  # fmt: skip
+    db.execute("DELETE FROM tx_address WHERE tx_id < ?", (min_id,))
+    db.execute("DELETE FROM risk WHERE tx_id < ?", (min_id,))
+    # Alerts nobody acted on expire after alert_days without a recurrence (this bounds the
+    # hourly anomaly groups). Alerts a person acted on (dismissed, under review, resolved,
+    # insufficient evidence) are kept with their notes: dropping a dismissal would make
+    # the next occurrence a fresh "new" alert.
     old = now - alert_days * 86400
+    stale = "SELECT id FROM alerts WHERE last_seen_at < ? AND status = 'new'"
     for table in ("alert_events", "alert_txids"):
-        db.execute(
-            f"DELETE FROM {table} WHERE alert_id IN (SELECT id FROM alerts WHERE last_seen_at < ?)",
-            (old,),
-        )
-    db.execute("DELETE FROM alerts WHERE last_seen_at < ?", (old,))
+        db.execute(f"DELETE FROM {table} WHERE alert_id IN ({stale})", (old,))
+    db.execute(f"DELETE FROM alerts WHERE id IN ({stale})", (old,))
 
 
 # ---------------------------------------------------------------- alerts
