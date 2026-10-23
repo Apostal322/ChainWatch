@@ -249,12 +249,17 @@ def cmd_indicators(args) -> int:
                         path = sources.fetch(spec.url, dest=Path(tmp) / "source")
                         snap = sources.load(spec, path, spec.url)
                 report = rp.ingest_snapshot(
-                    store.db, snap, time.time(), allow_mass_removal=args.allow_mass_removal
+                    store.db,
+                    snap,
+                    time.time(),
+                    allow_mass_removal=args.allow_mass_removal,
+                    allow_older=args.allow_older,
                 )
                 break
             except (OSError, ValueError, ET.ParseError, httpx.HTTPError) as e:
                 # unreachable, truncated, invalid, too big, or refused (SnapshotRejected)
-                failures.append({"source": source, "error": f"{type(e).__name__}: {e}"[:300]})
+                failures.append({"source": source, "error": f"{type(e).__name__}: {e}"[:300],
+                                 "refused": isinstance(e, rp.SnapshotRejected)})  # fmt: skip
                 print(f"chainwatch-live: source {source} failed: {failures[-1]['error']}",
                       file=sys.stderr)  # fmt: skip
         if report is None:
@@ -268,6 +273,10 @@ def cmd_indicators(args) -> int:
         report["rejected_examples"] = snap.rejected[:5]
         report["failures"] = failures
         print(json.dumps(report, indent=2, default=str))
+        if any(f["refused"] for f in failures):
+            # the fallback was used, but a refused snapshot (mass delisting, older content)
+            # needs a person: a non-zero exit shows in `systemctl --failed`
+            return 3
     finally:
         store.close()
     return 0
@@ -334,6 +343,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-mass-removal",
         action="store_true",
         help="accept a snapshot that delists most of the active list (verify it first)",
+    )
+    s.add_argument(
+        "--allow-older",
+        action="store_true",
+        help="accept a snapshot dated before the stored version (e.g. a deliberate rollback)",
     )
     s.add_argument("--db", type=Path, default=None)
     s.set_defaults(func=cmd_indicators)

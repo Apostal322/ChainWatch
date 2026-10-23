@@ -963,3 +963,137 @@ def test_supervised_gate_rejects_empty_or_malformed_evidence(tmp_path):
     (tmp_path / "model_card.json").write_text(json.dumps({**good, "evaluation": ["x"]}))
     layer = SupervisedLayer(tmp_path)  # a malformed card abstains instead of raising
     assert layer.predict({})["status"] == "NO_VALIDATED_MODEL" and layer.gate_error
+
+
+# ---- v0.8.1 independent audit: source precedence and retrospective screening ----------------
+def _observe(store, eng, name, out_addresses, at):
+    f, tx = _features(name, out_addresses=out_addresses)
+    f["first_seen"] = f["fetched_at"] = at
+    tx_id = store.add_fetched_id(f, [])
+    rec = eng.assess(f, feat.extract_addresses(tx), [])
+    rp.save_addresses(store.db, tx_id, feat.extract_addresses(tx))
+    rp.save_risk(store.db, tx_id, rec)
+    return rec
+
+
+def test_retro_screening_ignores_listings_closed_since(tmp_path):
+    """Every collector start re-screens each source's latest version. A mirror row that the
+    official file superseded later was still "now listed": a P1 alert for a transaction
+    correctly assessed without a match."""
+    store = _store(tmp_path)
+    base = [p2wpkh_address(f"base{i}") for i in range(10)]
+    y = p2wpkh_address("mirror-only-y")
+    _ingest(store, base, at=1.0, source_id="ofac-sdn")
+    mirror = _ingest(store, [*base, y], at=2.0, source_id="ofac-sdn-mirror")  # official failed
+    _ingest(store, base, at=3.0, source_id="ofac-sdn")  # official: y is not listed
+    eng = RiskEngine(_screener(store), RobustTailDetector(), SupervisedLayer(None),
+                     clock=lambda: 4.0)  # fmt: skip
+    rec = _observe(store, eng, "pays-y", [y], at=4.0)
+    assert rec["screening"]["status"] == "NO_KNOWN_SCREENING_MATCH"
+    with rp.transaction(store.db):
+        assert rp.retro_screen(store.db, mirror["version_id"], 5.0) == 0
+    assert rp.alerts(store.db) == []
+
+
+def test_official_refresh_is_not_blocked_by_a_mirrors_extra_rows(tmp_path):
+    """Superseding the mirror's extra rows counted towards the official file's mass-removal
+    limit: every later genuine official snapshot was refused and the mirror's junk stayed."""
+    store = _store(tmp_path)
+    base = [p2wpkh_address(f"o{i}") for i in range(20)]
+    junk = [p2wpkh_address(f"junk{i}") for i in range(50)]
+    z = p2wpkh_address("new-official")
+    _ingest(store, base, at=1.0, source_id="ofac-sdn")
+    _ingest(store, [*base, *junk], at=2.0, source_id="ofac-sdn-mirror")
+    report = _ingest(store, [*base, z], at=3.0, source_id="ofac-sdn")
+    assert report["status"] == "new_version" and report["superseded_elsewhere"] == 50
+    sc = _screener(store)
+    assert sc.screen(_addrs(outputs=[z]), 4.0)["status"] == "SCREENING_MATCH"
+    assert sc.screen(_addrs(outputs=[junk[0]]), 4.0)["status"] == "NO_KNOWN_SCREENING_MATCH"
+    # a truncated official file is still refused (its own rows), and so is a tiny first
+    # official snapshot measured against the mirror it would replace
+    with pytest.raises(rp.SnapshotRejected):
+        _ingest(store, base[:5], at=5.0, source_id="ofac-sdn")
+    fresh = _store(tmp_path / "b")
+    _ingest(fresh, base, at=1.0, source_id="ofac-sdn-mirror")
+    with pytest.raises(rp.SnapshotRejected):
+        _ingest(fresh, base[:2], at=2.0, source_id="ofac-sdn")
+
+
+def test_a_stale_mirror_cannot_relist_what_the_official_file_superseded(tmp_path):
+    """Only official delistings were remembered: the mirror's own row closed by the official
+    file left no trace, so the same stale mirror content listed it again."""
+    store = _store(tmp_path)
+    base = [p2wpkh_address(f"b{i}") for i in range(10)]
+    y = p2wpkh_address("superseded-y")
+    _ingest(store, base, at=1.0, source_id="ofac-sdn")
+    _ingest(store, [*base, y], at=2.0, source_id="ofac-sdn-mirror")
+    _ingest(store, base, at=3.0, source_id="ofac-sdn")  # closes the mirror's y
+    again = _ingest(store, [*base, y], at=4.0, source_id="ofac-sdn-mirror")  # identical content
+    assert again["status"] == "unchanged"
+    assert _screener(store).screen(_addrs(outputs=[y]), 5.0)["status"] == (
+        "NO_KNOWN_SCREENING_MATCH"
+    )
+    # the official file can still list it
+    _ingest(store, [*base, y], at=6.0, source_id="ofac-sdn")
+    assert _screener(store).screen(_addrs(outputs=[y]), 7.0)["status"] == "SCREENING_MATCH"
+
+
+def test_older_official_content_is_refused(tmp_path):
+    """An older file (stale CDN edge, an old --file copy) was a new version: it re-listed
+    what OFAC had delisted and delisted the newer designations."""
+    import dataclasses
+
+    store = _store(tmp_path)
+    base = [p2wpkh_address(f"c{i}") for i in range(10)]
+    x, y = p2wpkh_address("old-x"), p2wpkh_address("new-y")
+
+    def snap(addrs, at, issued):
+        s = parse_address_list("\n".join(addrs).encode(), source_id="ofac-sdn",
+                               url="https://example.invalid/sdn", licence="test",
+                               category="sanctions", label="TEST", retrieved_at=at)  # fmt: skip
+        return dataclasses.replace(s, published_at=issued)
+
+    rp.ingest_snapshot(store.db, snap([*base, x], 1.0, issued=100.0), 1.0)
+    rp.ingest_snapshot(store.db, snap([*base, y], 2.0, issued=200.0), 2.0)
+    with pytest.raises(rp.SnapshotRejected, match="older"):
+        rp.ingest_snapshot(store.db, snap([*base, x], 3.0, issued=100.0), 3.0)
+    sc = _screener(store)
+    assert sc.screen(_addrs(outputs=[y]), 4.0)["status"] == "SCREENING_MATCH"
+    assert sc.screen(_addrs(outputs=[x]), 4.0)["status"] == "NO_KNOWN_SCREENING_MATCH"
+    report = rp.ingest_snapshot(store.db, snap([*base, x], 5.0, issued=100.0), 5.0,
+                                allow_older=True)  # fmt: skip
+    assert report["status"] == "new_version"  # a deliberate rollback stays possible
+
+
+def test_a_refused_official_snapshot_fails_the_refresh_even_if_the_mirror_works(
+    tmp_path, monkeypatch, capsys
+):
+    """A refused official snapshot (mass delisting) followed by a successful fallback exited
+    0, so `systemctl --failed` never showed that the official list was being refused."""
+    from chainwatch.config import REPO_ROOT
+    from chainwatch.live import cli as live_cli
+    from chainwatch.risk import sources
+
+    base = [p2wpkh_address(f"r{i}") for i in range(20)]
+    lists = {"ofac-sdn": base}
+
+    def fake_load(spec, content, url=None):
+        return parse_address_list(
+            "\n".join(lists[spec.source_id]).encode(), source_id=spec.source_id, url="x",
+            licence="t", category="sanctions", label="T", retrieved_at=time.time(),
+        )  # fmt: skip
+
+    monkeypatch.setattr(sources, "fetch", lambda url, timeout=120.0, dest=None: dest)
+    monkeypatch.setattr(sources, "load", fake_load)
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(f"extends: {REPO_ROOT / 'configs' / 'live.yaml'}\n"
+                   f"live:\n  db_path: {tmp_path / 'i.sqlite'}\n")  # fmt: skip
+    argv = ["--config", str(cfg), "indicators", "update", "--source", "ofac-sdn",
+            "--fallback", "ofac-sdn-mirror"]  # fmt: skip
+    assert live_cli.main(argv) == 0
+    capsys.readouterr()
+    lists["ofac-sdn"] = base[:3]  # truncated official file
+    lists["ofac-sdn-mirror"] = base
+    assert live_cli.main(argv) == 3  # fallback used, refusal surfaced
+    out = json.loads(capsys.readouterr().out)
+    assert out["source_id"] == "ofac-sdn-mirror" and out["failures"][0]["refused"] is True

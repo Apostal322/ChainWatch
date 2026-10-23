@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS indicators (
     available_at REAL NOT NULL,
     removed_at REAL,
     version_added INTEGER NOT NULL,
-    version_last INTEGER NOT NULL
+    version_last INTEGER NOT NULL,
+    closed_by INTEGER
 );
 CREATE INDEX IF NOT EXISTS indicators_addr ON indicators(address);
 CREATE INDEX IF NOT EXISTS indicators_active ON indicators(source_id, removed_at);
@@ -146,6 +147,10 @@ def migrate(db: sqlite3.Connection) -> None:
         for name, typ in LIFECYCLE_COLUMNS:
             if name not in cols:
                 db.execute(f"ALTER TABLE tx ADD COLUMN {name} {typ}")
+        # the version that closed a listing (v0.8.1): a copy superseded by a higher-ranked
+        # source must not re-list it from the same stale content
+        if "closed_by" not in {r[1] for r in db.execute("PRAGMA table_info(indicators)")}:
+            db.execute("ALTER TABLE indicators ADD COLUMN closed_by INTEGER")
         if "n_errors" not in {r[1] for r in db.execute("PRAGMA table_info(risk)")}:
             db.execute("ALTER TABLE risk ADD COLUMN n_errors INTEGER NOT NULL DEFAULT 0")
             db.execute("UPDATE risk SET n_errors = 1 WHERE record LIKE '%\"errors\":[{%'")
@@ -266,7 +271,12 @@ savepoint = _savepoint
 
 # ---------------------------------------------------------------- indicators
 def ingest_snapshot(
-    db: sqlite3.Connection, snap: Snapshot, now: float, *, allow_mass_removal: bool = False
+    db: sqlite3.Connection,
+    snap: Snapshot,
+    now: float,
+    *,
+    allow_mass_removal: bool = False,
+    allow_older: bool = False,
 ) -> dict[str, Any]:
     """Record a source snapshot and make the active listings match it.
 
@@ -278,11 +288,16 @@ def ingest_snapshot(
       *lower-ranked* copy still lists but it does not, so a superseded copy cannot keep a
       delisted address alive. A lower-ranked copy (the fallback mirror, possibly days
       behind) never closes a higher-ranked listing, and never re-lists an address that a
-      higher-ranked source delisted: it can only add addresses the official list has not
-      dealt with yet.
-    * An empty snapshot, or one that would delist more than ``MASS_REMOVAL_SHARE`` of the
-      active listings, is refused (:class:`SnapshotRejected`) unless ``allow_mass_removal``:
-      a truncated download, an error page or a schema change must not silently empty the list.
+      higher-ranked source delisted or superseded (``closed_by``): it can only add addresses
+      the official list has not dealt with yet.
+    * An empty snapshot, or one that would delist more than ``MASS_REMOVAL_SHARE`` of this
+      source's own active listings, is refused (:class:`SnapshotRejected`) unless
+      ``allow_mass_removal``: a truncated download, an error page or a schema change must not
+      silently empty the list. Superseding a lower-ranked copy's extra rows is the official
+      list's authority and does not count, except for a first official snapshot, which is
+      measured against the copy it replaces.
+    * A snapshot that states an issue date older than the source's latest stored version (an
+      old file, a stale CDN edge) is refused unless ``allow_older``.
     * Nothing to change and the same content as the source's latest version: only
       ``checked_at`` (freshness) is refreshed.
     """
@@ -290,10 +305,21 @@ def ingest_snapshot(
     authority = authority_of(snap.source_id)
     with _tx(db):
         latest = db.execute(
-            "SELECT id, sha256 FROM indicator_versions WHERE source_id = ? "
+            "SELECT id, sha256, published_at FROM indicator_versions WHERE source_id = ? "
             "ORDER BY id DESC LIMIT 1",
             (snap.source_id,),
         ).fetchone()
+        if (
+            not allow_older
+            and latest
+            and snap.published_at is not None
+            and latest[2] is not None
+            and snap.published_at < latest[2]
+        ):
+            raise SnapshotRejected(
+                f"{snap.source_id}: the snapshot is dated {snap.published_at:.0f}, older than "
+                f"the stored version ({latest[2]:.0f}); refusing (pass --allow-older if intended)"
+            )
         active = {
             a: i
             for i, a in db.execute(
@@ -318,7 +344,18 @@ def ingest_snapshot(
                 open_above.add(a)
             else:
                 closed_above.add(a)
-        vetoed = closed_above - open_above
+        # this copy's own rows that a higher-ranked snapshot superseded (closed_by)
+        superseded = {
+            a
+            for a, src in db.execute(
+                "SELECT i.address, v.source_id FROM indicators i "
+                "JOIN indicator_versions v ON v.id = i.closed_by "
+                "WHERE i.source_id = ? AND i.removed_at IS NOT NULL",
+                (snap.source_id,),
+            )
+            if authority_of(src) == authority and rank_of(src) < rank
+        }
+        vetoed = (closed_above | superseded) - open_above
         to_add = [r for r in snap.records if r.address not in active and r.address not in vetoed]
         close_own = [i for a, i in active.items() if a not in current]
         close_other = [i for i, a in others if a not in current]
@@ -333,8 +370,10 @@ def ingest_snapshot(
                     f"{snap.source_id}: the snapshot has no valid address "
                     f"({len(snap.rejected)} rejected); refusing to empty the list"
                 )
-            base = len(active) + len(others)
-            removing = len(close_own) + len(close_other)
+            if active:  # this source's own list: a truncated download shows here
+                base, removing = len(active), len(close_own)
+            else:  # a first official snapshot replacing a lower-ranked copy
+                base, removing = len(others), len(close_other)
             if removing > max(MASS_REMOVAL_MIN, MASS_REMOVAL_SHARE * base):
                 raise SnapshotRejected(
                     f"{snap.source_id}: the snapshot would delist {removing} of {base} active "
@@ -367,8 +406,8 @@ def ingest_snapshot(
               json.dumps(r.details), snap.retrieved_at, vid, vid) for r in to_add],
         )  # fmt: skip
         db.executemany(
-            "UPDATE indicators SET removed_at = ? WHERE id = ?",
-            [(snap.retrieved_at, i) for i in close_own + close_other],
+            "UPDATE indicators SET removed_at = ?, closed_by = ? WHERE id = ?",
+            [(snap.retrieved_at, vid, i) for i in close_own + close_other],
         )
     return {"status": "new_version", "version_id": vid, "added": len(to_add),
             "removed": len(close_own), "superseded_elsewhere": len(close_other),
@@ -759,7 +798,9 @@ def retro_screen(db: sqlite3.Connection, version_id: int, at: float) -> int:
         "i.reference, i.listed_on, i.available_at, i.details, v.sha256 FROM indicators i "
         "JOIN indicator_versions v ON v.id = i.version_added "
         "JOIN tx_address a ON a.address = i.address JOIN tx t ON t.id = a.tx_id "
-        "WHERE i.version_added = ?",
+        # only listings still in force: a row closed since (delisted, or superseded by the
+        # official file) is not "now listed" (re-run at every collector start)
+        "WHERE i.version_added = ? AND i.removed_at IS NULL",
         (version_id,),
     ).fetchall()
     found = 0
