@@ -7,12 +7,14 @@ for a reverse proxy in a real deployment.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -28,7 +30,54 @@ SECURITY_HEADERS = {
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
     "x-frame-options": "DENY",
+    # ignored by browsers over plain http (local use); enforced behind Render's/Caddy's TLS
+    "strict-transport-security": "max-age=31536000",
 }
+
+
+def internal_error_headers(request_id: str | None) -> dict[str, str]:
+    """Headers for a 500 answer. Starlette sends it from ``ServerErrorMiddleware``, outside
+    every user middleware, so the usual header hook never sees it."""
+    out = {**SECURITY_HEADERS, "cache-control": "no-store"}
+    if request_id:
+        out["x-request-id"] = request_id
+    return out
+
+
+def client_key(scope: Scope, trusted_proxy_hops: int = 0) -> str:
+    """Client identity for rate limits and per-client caps.
+
+    ``trusted_proxy_hops`` is the number of reverse proxies in front of the app that
+    *append* to X-Forwarded-For; the key is the entry the outermost trusted proxy appended
+    (counted from the right), so a client-supplied header value cannot change it. With 0
+    the header is ignored and the socket peer is used. IPv6 clients are keyed by their /64,
+    the smallest block a single subscriber usually controls (rotating addresses inside it
+    must not reset the limit).
+    """
+    addr = None
+    if trusted_proxy_hops:
+        # repeated headers are equivalent to one comma-joined header (RFC 9110)
+        entries = [
+            part.strip()
+            for name, value in scope.get("headers", [])
+            if name == b"x-forwarded-for"
+            for part in value.decode("latin-1").split(",")
+        ]
+        entries = [e for e in entries if e]
+        if len(entries) >= trusted_proxy_hops:
+            addr = entries[-trusted_proxy_hops]
+    if addr is None:
+        client = scope.get("client")
+        addr = client[0] if client else "unknown"
+    try:
+        ip = ipaddress.ip_address(addr.strip("[]"))
+    except ValueError:
+        return addr[:64]
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
 
 
 def request_id(header_value: str | None) -> str:
@@ -45,6 +94,8 @@ def _json_error(status: int, code: str, message: str, extra_headers=()) -> tuple
     headers = [
         (b"content-type", b"application/json"),
         (b"content-length", str(len(body)).encode()),
+        (b"cache-control", b"no-store"),
+        *((k.encode(), v.encode()) for k, v in SECURITY_HEADERS.items()),
         *extra_headers,
     ]
     return {"type": "http.response.start", "status": status, "headers": headers}, body
@@ -105,13 +156,9 @@ class _BodyTooLarge(Exception):
 
 
 class RateLimitMiddleware:
-    """Token bucket per client address for /v1 routes (health checks are exempt).
-
-    ``trusted_proxy_hops`` is the number of reverse proxies in front of the app that
-    *append* to X-Forwarded-For. The client key is the entry that the outermost trusted
-    proxy appended (counted from the right), so a client-supplied header value cannot
-    change it. With 0 (the default) the header is ignored and the socket peer is used.
-    """
+    """Token bucket per client (see ``client_key``) for /v1 routes; health checks and
+    requests for which ``exempt(scope)`` is true (e.g. a valid service token) are not
+    limited, so unauthenticated traffic cannot drain an authenticated caller's budget."""
 
     def __init__(
         self,
@@ -120,6 +167,7 @@ class RateLimitMiddleware:
         burst: int | None = None,
         trusted_proxy_hops: int = 0,
         max_clients: int = 10_000,
+        exempt: Callable[[Scope], bool] | None = None,
     ) -> None:
         self.app = app
         self.rate = per_minute / 60.0
@@ -128,21 +176,10 @@ class RateLimitMiddleware:
         self.max_clients = max_clients
         self.buckets: OrderedDict[str, tuple[float, float]] = OrderedDict()
         self.lock = threading.Lock()
+        self.exempt = exempt
 
     def _client(self, scope: Scope) -> str:
-        if self.hops:
-            # repeated headers are equivalent to one comma-joined header (RFC 9110)
-            entries = [
-                part.strip()
-                for name, value in scope.get("headers", [])
-                if name == b"x-forwarded-for"
-                for part in value.decode("latin-1").split(",")
-            ]
-            entries = [e for e in entries if e]
-            if len(entries) >= self.hops:
-                return entries[-self.hops]
-        client = scope.get("client")
-        return client[0] if client else "unknown"
+        return client_key(scope, self.hops)
 
     def allow(self, key: str, now: float | None = None) -> tuple[bool, float]:
         now = time.monotonic() if now is None else now
@@ -159,7 +196,11 @@ class RateLimitMiddleware:
             return ok, retry
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope.get("path", "").startswith("/v1"):
+        if (
+            scope["type"] == "http"
+            and scope.get("path", "").startswith("/v1")
+            and not (self.exempt and self.exempt(scope))
+        ):
             ok, retry = self.allow(self._client(scope))
             if not ok:
                 start, body = _json_error(

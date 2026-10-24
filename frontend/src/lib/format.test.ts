@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeVersion, fmtHits, fmtPct, fmtScore } from "./format";
+import { describeVersion, fmtHits, fmtPct, fmtScore, shortCommit } from "./format";
 
 describe("format helpers", () => {
   it("formats missing values as an em dash, never as zero", () => {
@@ -18,5 +18,10 @@ describe("format helpers", () => {
     expect(describeVersion("snap-expanding-L1-t034")).toBe("snapshot @ end of step 34 (L=1)");
     expect(describeVersion("phase1-xgboost-all")).toContain("Phase 1");
     expect(describeVersion("other")).toBe("other");
+  });
+  it("shortens a commit and keeps the -dirty suffix", () => {
+    expect(shortCommit("0123456789abcdef")).toBe("0123456789");
+    expect(shortCommit("0123456789abcdef-dirty")).toBe("0123456789-dirty");
+    expect(shortCommit(null)).toBe("n/a");
   });
 });

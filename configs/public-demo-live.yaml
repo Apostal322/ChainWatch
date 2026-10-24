@@ -1,0 +1,15 @@
+# Public Render dashboard WITH the remote live monitor (docs/LIVE_CLOUD.md section 7).
+# Not active: render.yaml keeps public-demo.yaml until the owner switches it.
+# Required Render environment variables (set in the dashboard, never in Git):
+#   CHAINWATCH_LIVE_URL    https://<collector-host>   (the Caddy-fronted edge API)
+#   CHAINWATCH_LIVE_TOKEN  the edge API token (Render "secret" env var)
+extends: public-demo.yaml
+
+live:
+  enabled: true
+  remote_url: env:CHAINWATCH_LIVE_URL
+  api_token_env: CHAINWATCH_LIVE_TOKEN
+  remote_timeout_s: 5
+  remote_cache_s: 2
+  sse_max_clients: 10       # well below serving.limit_concurrency (32): streams hold a slot
+  sse_max_per_client: 2

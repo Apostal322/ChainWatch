@@ -1,0 +1,45 @@
+# Daily refresh of risk-indicator sources (docs/RISK_ENGINE.md section 2): the official OFAC
+# SDN XML, falling back to the third-party nightly extraction if the official file cannot be
+# fetched. A failed refresh keeps the previous version; the dashboard shows its age.
+[Unit]
+Description=ChainWatch indicator source refresh (OFAC SDN)
+Documentation=https://github.com/Apostal322/ChainWatch/blob/main/docs/RISK_ENGINE.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=chainwatch
+Group=chainwatch
+WorkingDirectory=/opt/chainwatch/app
+ExecStart=/opt/chainwatch/venv/bin/chainwatch-live --config /opt/chainwatch/app/configs/live-cloud.yaml indicators update --source ofac-sdn --fallback ofac-sdn-mirror
+TimeoutStartSec=600
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=400M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0027
+ReadWritePaths=/var/lib/chainwatch

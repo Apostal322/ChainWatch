@@ -33,7 +33,7 @@ Two properties make the naive approach misleading:
 | Phase | Method highlights |
 |---|---|
 | 1 | Schema validation; join on `txId` (the label file is separate); unknown class excluded from supervision; chronological split 1–29 / 30–34 / 35–49; train-only preprocessing inside the artifact; LR and XGBoost; AP, ROC-AUC, tie-aware P@K/R@K, per-step metrics; one-time test evaluation. |
-| 2 | Audit of Phase 1 (all metrics reproduced exactly). Pre-registered protocol committed before any experiment. Explicit **label latency** L (labels of step u known at end of u + L). Time-causal (no look-ahead) retraining schedules (static, expanding, periodic, sliding, recency-weighted) with per-fit assertions and leakage canaries. Dev backtest for selection, confirm backtest frozen. Circular block bootstrap over time steps. Shift diagnostics: prior, covariate, class-conditional, within-period learnability, calibration. |
+| 2 | Audit of Phase 1 (all metrics reproduced exactly). Protocol fixed before the Phase 2 runs (author's record; not verifiable from the published git history, where it first appears together with the results). Explicit **label latency** L (labels of step u known at end of u + L). Time-causal (no look-ahead) retraining schedules (static, expanding, periodic, sliding, recency-weighted) with per-fit assertions and leakage canaries. Dev backtest for selection, confirm backtest frozen. Circular block bootstrap over time steps. Shift diagnostics: prior, covariate, class-conditional, within-period learnability, calibration. |
 | 3 | Inference contract; versioned registry with hash, version and data-fingerprint checks; snapshots exported through the backtest code path; replay engine with no-look-ahead policies; FastAPI service and React dashboard; Docker and CI; latency benchmark. |
 
 ## 4. Results (real Elliptic++)
@@ -51,17 +51,22 @@ Pooled AP hides a collapse: XGBoost reaches **0.917 on steps 35–42 and 0.043 o
 ### Phase 2: why it fails and what helps (confirm steps 35–49 are exploratory, because they were inspected in Phase 1)
 
 * **Not just fewer illicit transactions.** ROC-AUC, which does not depend on prevalence,
-  drops from 0.97 to 0.70. A model fitted *within* the late period reaches AP 0.81 on it
+  drops from 0.97 (35–42) to 0.69 (43–49) for the Phase 1 XGBoost model, and from 0.97 to
+  0.70 for a past-only XGBoost fitted on steps 1–34. A model fitted *within* the late
+  period reaches AP 0.81 on it
   (a diagnostic, not deployable, because it trains on other late steps, including later
   ones), while the past-only model gets 0.05. Late illicit transactions are predictable
   from these features once same-period labels exist, but the boundary learned from the
   past does not transfer. This is consistent with concept or class-conditional shift; the
   data cannot identify its cause.
-* **Retraining as labels arrive** (L = 1) raises pooled AP on 43–49 from **0.050 to
-  0.458** (expanding window; +0.41 [95% CI 0.16, 0.62]) and to 0.493 with recency
-  weighting. Over all of 35–49 the gain is +0.085 [0.024, 0.229]. The gain on AP is
-  robust under the pre-registered rule; the gain on budget hits is not, because 35–42 is
-  at its ceiling.
+* **Retraining as labels arrive** (L = 1). On the protocol's primary comparison, pooled
+  AP over all of 35–49, expanding retraining beats static by **+0.085 [95% CI 0.024,
+  0.229]** (0.807 → 0.892). The gain is concentrated after the shift: on the 43–49
+  sub-period (its boundary was chosen from Phase 1 inspection) pooled AP rises from
+  0.050 to 0.458 (+0.41 [0.16, 0.62]), and to 0.493 with recency weighting. That interval
+  comes from a block bootstrap over only 7 steps, so its coverage is probably below 95%;
+  more simply, expanding beats static at all 7 late steps. The gain on AP is robust under
+  the protocol's rule; the gain on budget hits is not, because 35–42 is at its ceiling.
 * **Limits.** At L = 3 the gain shrinks to +0.05–0.07. The first steps after the regime
   change stay poor for every method. When unlabelled transactions compete for review
   slots, late-period detections at small budgets fall to about 0.
@@ -119,7 +124,7 @@ Pooled AP hides a collapse: XGBoost reaches **0.917 on steps 35–42 and 0.043 o
 2. **Cold start after regime change.** Test whether multi-hop graph representations
    transfer across regimes better than tabular features. First run a cheap control
    (XGBoost plus two-hop aggregates), then GraphSAGE inside the same backtest,
-   pre-registered with steps 43–45 as the target. A temporal GNN is not motivated, because
-   the graph has no edges between time steps.
+   pre-registered (publicly, before any run) with steps 43–45 as the target. A temporal
+   GNN is not motivated, because the graph has no edges between time steps.
 3. **Fresh data** for an untouched holdout, for example a later release or a different
    chain, before making any further performance claims.

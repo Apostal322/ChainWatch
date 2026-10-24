@@ -15,16 +15,29 @@ export default function TransactionDetail(props: {
   const [nb, setNb] = useState<Neighbourhood | null>(null);
   const [hops, setHops] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  const [nbError, setNbError] = useState<string | null>(null);
 
+  // Clear the previous transaction while loading and ignore late replies for an earlier one.
   useEffect(() => {
+    let ignore = false;
     setError(null);
-    api.tx(props.txId, props.policy).then(setD).catch((e) => setError(e.message));
+    setD(null);
+    api.tx(props.txId, props.policy)
+      .then((x) => { if (!ignore) setD(x); })
+      .catch((e) => { if (!ignore) setError(e.message); });
+    return () => { ignore = true; };
   }, [props.txId, props.policy]);
   useEffect(() => {
-    api.neighbourhood(props.txId, props.policy, hops).then(setNb).catch((e) => setError(e.message));
+    let ignore = false;
+    setNbError(null);
+    setNb(null);
+    api.neighbourhood(props.txId, props.policy, hops)
+      .then((x) => { if (!ignore) setNb(x); })
+      .catch((e) => { if (!ignore) setNbError(e.message); });
+    return () => { ignore = true; };
   }, [props.txId, props.policy, hops]);
 
-  if (error) return <p className="err">{error}</p>;
+  if (error) return <p className="err" role="status">{error}</p>;
   if (!d) return <p className="muted">Loading…</p>;
   return (
     <div>
@@ -57,7 +70,8 @@ export default function TransactionDetail(props: {
           ))}
         </span>
       </h3>
-      {nb ? <NeighbourhoodGraph data={nb} onSelect={props.onSelect} /> : <p className="muted">Loading…</p>}
+      {nbError ? <p className="err" role="status">{nbError}</p>
+        : nb ? <NeighbourhoodGraph data={nb} onSelect={props.onSelect} /> : <p className="muted">Loading…</p>}
 
       <h3>Augmented (non-anonymised) features</h3>
       <div className="scroll">

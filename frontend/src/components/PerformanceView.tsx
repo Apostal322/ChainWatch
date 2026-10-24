@@ -32,12 +32,16 @@ export default function PerformanceView({ info }: { info: Info }) {
     return [...byStep.values()].sort((a, b) => (a.step as number) - (b.step as number));
   }, [timelines]);
 
-  const budgetData = (timelines[budgetPolicy] ?? []).map((m) => ({
-    step: m.step,
-    labelled: m.budgets["20"].illicit_found_labelled_only,
-    all: m.budgets["20"].illicit_found_all_transactions,
-    max: m.budgets["20"].max_possible,
-  }));
+  // A step without a top-20 budget (e.g. too few transactions) becomes a gap, not a crash.
+  const budgetData = (timelines[budgetPolicy] ?? []).map((m) => {
+    const b = m.budgets?.["20"] as (typeof m.budgets)[string] | undefined;
+    return {
+      step: m.step,
+      labelled: b?.illicit_found_labelled_only ?? null,
+      all: b?.illicit_found_all_transactions ?? null,
+      max: b?.max_possible ?? null,
+    };
+  });
 
   const research = useMemo(() => {
     const rows = exp?.phase2_per_step?.confirm ?? [];
@@ -64,7 +68,7 @@ export default function PerformanceView({ info }: { info: Info }) {
 
   return (
     <section>
-      {error && <p className="err">{error}</p>}
+      {error && <p className="err" role="status">{error}</p>}
       <div className="card" style={{ marginBottom: 16 }}>
         <h2>Replay: average precision per step (labelled transactions only)</h2>
         <p className="muted" style={{ marginTop: 0, fontSize: 12 }}>

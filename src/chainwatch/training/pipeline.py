@@ -171,9 +171,10 @@ def evaluate(cfg: Config, run_dir: Path, force: bool = False) -> dict[str, Any]:
     pre_cfg = PreprocessingConfig(**saved["preprocessing"])
     split = load_split(cfg.paths.processed_dir, split_cfg, pre_cfg, meta["feature_set"])
 
-    manifest = _safe_manifest(cfg.paths.processed_dir)
-    if meta.get("data_manifest") and manifest and meta["data_manifest"] != manifest:
-        log.warning("Processed data differs from the data the model was trained on!")
+    for problem in compare_manifests(
+        meta.get("data_manifest"), _safe_manifest(cfg.paths.processed_dir)
+    ):
+        log.warning("Data provenance: %s", problem)
 
     X_te, y_te = make_xy(split.test, meta["feature_columns"])
     scores = model.predict_proba(X_te)[:, 1]
@@ -233,12 +234,68 @@ def _headline(m: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _safe_manifest(processed_dir: Path) -> dict[str, Any] | None:
+def _processed_fingerprint(processed_dir: Path) -> str | None:
+    # Same digest the replay service checks before serving (serving/store.py).
     try:
-        raw = load_manifest(processed_dir)["raw_files"]
-        return {k: v["sha256"] for k, v in raw.items()}
+        from chainwatch.serving.store import data_fingerprint
+
+        return data_fingerprint(processed_dir)
+    except (ImportError, OSError):
+        return None
+
+
+def _safe_manifest(processed_dir: Path) -> dict[str, Any] | None:
+    """Provenance of the processed data, for run metadata.
+
+    ``raw_files[name]["sha256"]`` is the digest of the raw file that was actually read
+    (manifest_version >= 2). Manifests written before that recorded the *published*
+    digest there instead, so for them the actual digest is unknown and reported as None.
+    """
+    try:
+        manifest = load_manifest(processed_dir)
+        raw = manifest["raw_files"]
     except (FileNotFoundError, KeyError):
         return None
+    version = int(manifest.get("manifest_version", 1))
+    return {
+        "manifest_version": version,
+        "synthetic": manifest.get("synthetic"),
+        "raw_files": {
+            name: {
+                "sha256": v.get("sha256") if version >= 2 else None,
+                "matches_published": v.get("matches_published"),
+            }
+            for name, v in raw.items()
+        },
+        "processed_fingerprint": _processed_fingerprint(processed_dir),
+    }
+
+
+def compare_manifests(trained: Any, current: dict[str, Any] | None) -> list[str]:
+    """Differences between the data a run was trained on and the data present now.
+
+    Only comparable, known values are compared; legacy run metadata (a flat
+    ``{file: published sha256}`` map) carries no fingerprint and yields one notice.
+    """
+    if not trained or not current:
+        return []
+    if not isinstance(trained.get("raw_files"), dict):
+        return [
+            "run metadata predates actual-file fingerprints (its hashes are the published "
+            "constants); cannot verify that the data matches the training data"
+        ]
+    problems = []
+    for name, now in current["raw_files"].items():
+        then = trained["raw_files"].get(name, {}).get("sha256")
+        if then and now.get("sha256") and then != now["sha256"]:
+            problems.append(f"raw file {name} differs from the one the model was trained on")
+    fp_then, fp_now = trained.get("processed_fingerprint"), current.get("processed_fingerprint")
+    if fp_then and fp_now and fp_then != fp_now:
+        problems.append(
+            "processed data fingerprint differs from training "
+            f"({fp_then} -> {fp_now}); the data or the Parquet writer changed"
+        )
+    return problems
 
 
 def runs_table(run_dirs: list[Path]) -> pd.DataFrame:

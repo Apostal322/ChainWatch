@@ -1,0 +1,15 @@
+# Inputs for requirements/live.lock.txt: the ALWAYS-ON COLLECTOR VM only (docs/LIVE_CLOUD.md).
+# No pandas / scikit-learn / XGBoost: the VM runs `chainwatch-live`, never the research stack.
+# Regenerate with the same versions as the serving image:
+#   pip-compile --generate-hashes --allow-unsafe --strip-extras \
+#     -c requirements/constraints.txt -o requirements/live.lock.txt requirements/live.in
+# Hashes cover every published wheel of each version, so the lock installs on x86-64 and
+# ARM64 (Ampere A1) alike; install with `pip install --require-hashes -r live.lock.txt`.
+fastapi
+uvicorn[standard]
+httpx
+websockets
+pyyaml
+# build backend for `pip install --no-deps --no-build-isolation -e .`
+setuptools
+wheel

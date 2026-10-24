@@ -1,0 +1,12 @@
+# Inputs for requirements/dev.lock.txt: the CI and contributor test environment.
+# The package's own dependencies and its `dev` extra come from pyproject.toml; this file adds
+# the build backend, so the editable install needs nothing unpinned:
+#   uv pip compile pyproject.toml requirements/dev.in --extra dev --universal \
+#     --python-version 3.11 --generate-hashes --no-emit-package chainwatch \
+#     -o requirements/dev.lock.txt
+# Add --exclude-newer <UTC timestamp of the last regeneration> to reproduce it exactly.
+# Universal: one lock for Python 3.11-3.13 on Linux, macOS and Windows (numpy and xgboost
+# fork below 3.12). Install with `pip install --require-hashes -r requirements/dev.lock.txt`
+# then `pip install --no-deps --no-build-isolation -e .`.
+setuptools==84.1.0
+wheel==0.48.0

@@ -6,7 +6,11 @@ export default function AboutView({ info }: { info: Info }) {
       <h2>What this application is</h2>
       <p>
         A replay of a published, historical research dataset (Elliptic++: Bitcoin transactions from
-        49 time steps of roughly two weeks each). For each step it shows how a frozen model snapshot
+        49 time steps of roughly two weeks each).
+        {info.data_mode === "synthetic" && (
+          <b> This deployment serves synthetic demo data with the Elliptic++ schema, not the dataset
+            itself: every replay number describes that synthetic data.</b>
+        )} For each step it shows how a frozen model snapshot
         would have ranked that step's transactions, using only labels available at the time
         (label latency L = {info.label_latency_steps}). It is <b>not</b> real-time blockchain monitoring.
       </p>

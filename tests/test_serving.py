@@ -19,6 +19,7 @@ from chainwatch.features.preprocessing import fill_degrees_from_edges
 from chainwatch.serving.app import ServiceState, create_app, research_results
 from chainwatch.serving.export import export_registry, snapshot_version
 from chainwatch.serving.registry import CARD_FILE, MODEL_FILE, RegistryError, load_bundle
+from chainwatch.serving.security import SECURITY_HEADERS
 from chainwatch.training.pipeline import evaluate, train
 from chainwatch.utils import read_json, write_json
 from conftest import make_test_config, write_raw
@@ -478,3 +479,40 @@ def test_load_registry_checks_each_card(env, tmp_path):
 def test_service_routes_only_bundles_listed_in_registry_meta(env):
     _, state = env
     assert set(state.bundles) == set(state.registry_meta["snapshots"]) | {"phase1-xgboost-all"}
+
+
+def test_internal_errors_carry_the_security_headers(env):
+    """A 500 is sent by Starlette's outermost ServerErrorMiddleware, which bypassed the
+    header hook: the answer had no nosniff, frame or HSTS headers."""
+    import dataclasses
+
+    cfg, state = env
+    app = create_app(dataclasses.replace(cfg), state=state)
+
+    @app.get("/v1/boom")
+    def boom():
+        raise RuntimeError("internal detail")
+
+    with TestClient(app, raise_server_exceptions=False) as c:
+        r = c.get("/v1/boom", headers={"x-request-id": "trace-500"})
+    assert r.status_code == 500 and r.json()["error"]["code"] == "internal_error"
+    assert "internal detail" not in r.text
+    for k, v in SECURITY_HEADERS.items():
+        assert r.headers[k] == v
+    assert r.headers["x-request-id"] == "trace-500"
+
+
+def test_api_answers_are_not_cached(client):
+    assert client.get("/v1/info").headers["cache-control"] == "no-store"
+
+
+def test_the_synthetic_demo_does_not_claim_the_research_dataset():
+    """The synthetic demo's Limitations tab showed "Historical replay on the Elliptic++
+    research dataset", contradicting its SYNTHETIC banner (v0.8.1 frontend audit)."""
+    from types import SimpleNamespace
+
+    from chainwatch.serving.app import DISCLAIMER, disclaimer_for
+
+    synthetic = disclaimer_for(SimpleNamespace(registry_meta={"data_mode": "synthetic"}))
+    assert "Synthetic demonstration" in synthetic and "Elliptic++ research dataset" not in synthetic
+    assert disclaimer_for(SimpleNamespace(registry_meta={"data_mode": "elliptic++"})) == DISCLAIMER

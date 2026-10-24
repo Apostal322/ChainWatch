@@ -66,9 +66,14 @@ GitHub's runners the whole training takes about 4 minutes). Render now **pulls a
 image**, so nothing is trained on Render, neither at build time nor at start-up.
 
 **Pipeline.**
-1. [`publish-demo-image.yml`](../.github/workflows/publish-demo-image.yml) runs on every
-   push to `main` (and on manual dispatch). It builds the same `demo` target as CI for
-   `linux/amd64`.
+1. [`publish-demo-image.yml`](../.github/workflows/publish-demo-image.yml) runs only after
+   the **CI** workflow has **succeeded for a push to `main`** (`workflow_run`), and builds
+   exactly the commit CI tested; a failed, cancelled or still-running CI publishes nothing.
+   Its first step re-checks through the API that CI succeeded for that commit (also for a
+   manual dispatch on `main`). CI covers the Python tests on Linux and Windows, the
+   dashboard, the dependency audit (pip-audit and npm audit), shellcheck and the Docker
+   smoke test. It builds the same `demo` target as CI for `linux/amd64`
+   (`tests/test_release_gate.py` keeps these conditions from regressing).
 2. [`scripts/check_demo_image.sh`](../scripts/check_demo_image.sh) gates the image:
    - the image holds synthetic data and synthetic-trained models only (marker file, raw-file
      hashes that do not match the published Elliptic++ files, `data_mode: synthetic`);
@@ -161,7 +166,7 @@ A deployment counts as "live" only when this script passes against its public UR
 | Authentication | none | Read-only API over synthetic data; no user data, no write endpoint. |
 | CORS | disabled | The dashboard is same-origin. |
 | Rate limit | 120/min per client on `/v1/*`, burst 30 | In-process token bucket; health checks exempt. |
-| Client identity | `trusted_proxy_hops: 1` | The rate limiter uses the `X-Forwarded-For` entry appended by the platform proxy (counted from the right), so a client cannot change its own key by sending the header. If the platform has more proxy hops, all clients share one bucket: that is safe, but tighter than intended. Set `0` when exposing uvicorn directly. |
+| Client identity | `trusted_proxy_hops: 1` (**unverified on Render**, see below) | The rate limiter and the per-client event-stream cap use the `X-Forwarded-For` entry appended by the outermost trusted proxy (counted from the right). The value must equal the real number of appending proxies. **Too high:** a client chooses its own key by sending forged entries and bypasses the 120/min limit and the 2-stream cap. **Too low:** every visitor shares one bucket, so one anonymous client sending about 2 requests/s gets every visitor a 429: a low-effort denial of service, not a "safe" setting (v0.8.1 audit). Set `0` when exposing uvicorn directly. |
 | Request body | 2 MB maximum (ASGI middleware, before parsing); batch size 200 | Larger requests get 413. |
 | Concurrency | `limit_concurrency: 32`, 1 worker | All state is in memory. |
 | Headers | same-origin CSP, `nosniff`, `X-Frame-Options: DENY`, `no-referrer` | |
@@ -178,3 +183,24 @@ docker compose --profile real up --build   # mounts data/processed and artifacts
 
 Do **not** expose this publicly. The dataset has no explicit redistribution licence (see
 [DATASET.md](DATASET.md)), and the API returns per-transaction features and labels.
+
+### Verifying `trusted_proxy_hops` on Render (do this before relying on the rate limit)
+
+Render's documentation does not state how many `X-Forwarded-For` entries its proxy appends,
+and community reports suggest it keeps client-supplied values. No debug endpoint is added for
+this; the rate limiter itself is the probe (burst 30, refill 2/s). Wait at least 20 s between
+steps.
+
+1. **Too high?** From network A, send 40 rapid `GET /v1/info` requests, each with a different
+   forged header, e.g. `X-Forwarded-For: 10.9.$i.1, 10.8.$i.1`. A 429 after about 30 means
+   the key is not attacker-controlled; 40 × 200 means `trusted_proxy_hops` is too high.
+2. **Too low?** Drain the bucket from network A (35 requests, no forged header), then within
+   2 s send 3 requests from network B (e.g. a phone hotspot; compare `curl ifconfig.me`).
+   B gets 200: the key is per client (correct). B gets 429: the key is shared (too low).
+   Repeat about 5 times: Render may run several proxy instances.
+3. **Optional, to read the chain:** deploy a separate, throwaway Render web service (same
+   plan and region, never the production one) running a few-line app that echoes
+   `X-Forwarded-For`; call it with `X-Forwarded-For: 192.0.2.1`. The correct value is the
+   position of your real IP counted from the right. Delete the service afterwards.
+4. Set `trusted_proxy_hops` to that value, repeat steps 1-2 against production, and record
+   the result in `docs/AUDIT.md`.

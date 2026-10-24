@@ -1,0 +1,160 @@
+{
+  "protocol": "docs/LIVE_FEATURE_SUBSET_PROTOCOL.md",
+  "status": "EXPLORATORY (steps 35-49 were inspected in Phase 1); NOT a live model",
+  "bootstrap": {
+    "unit": "test time step",
+    "block_length": 3,
+    "resamples": 2000
+  },
+  "results": [
+    {
+      "model": "logreg",
+      "feature_set": "all",
+      "run": "logreg_all_20261014-102529-175576",
+      "f1_at_val_threshold": 0.404839929417696,
+      "threshold": 0.9469374617560313,
+      "ap_35-49": 0.2306,
+      "prevalence_35-49": 0.065,
+      "ap_35-42": 0.3263,
+      "prevalence_35-42": 0.0916,
+      "ap_43-49": 0.0359,
+      "prevalence_43-49": 0.0253,
+      "roc_auc_35-49": 0.8711,
+      "mean_step_p_at_20": 0.08
+    },
+    {
+      "model": "xgboost",
+      "feature_set": "all",
+      "run": "xgboost_all_20261014-102715-651047",
+      "f1_at_val_threshold": 0.8004094165813715,
+      "threshold": 0.6764220595359802,
+      "ap_35-49": 0.7969,
+      "prevalence_35-49": 0.065,
+      "ap_35-42": 0.9172,
+      "prevalence_35-42": 0.0916,
+      "ap_43-49": 0.0426,
+      "prevalence_43-49": 0.0253,
+      "roc_auc_35-49": 0.9302,
+      "mean_step_p_at_20": 0.56
+    },
+    {
+      "model": "logreg",
+      "feature_set": "augmented",
+      "run": "logreg_augmented_20261014-102408-841199",
+      "f1_at_val_threshold": 0.5064886911383019,
+      "threshold": 0.8341177800671794,
+      "ap_35-49": 0.2356,
+      "prevalence_35-49": 0.065,
+      "ap_35-42": 0.4251,
+      "prevalence_35-42": 0.0916,
+      "ap_43-49": 0.017,
+      "prevalence_43-49": 0.0253,
+      "roc_auc_35-49": 0.7849,
+      "mean_step_p_at_20": 0.0833
+    },
+    {
+      "model": "xgboost",
+      "feature_set": "augmented",
+      "run": "xgboost_augmented_20261014-102420-389912",
+      "f1_at_val_threshold": 0.6027895694360218,
+      "threshold": 0.9513704180717468,
+      "ap_35-49": 0.6103,
+      "prevalence_35-49": 0.065,
+      "ap_35-42": 0.7549,
+      "prevalence_35-42": 0.0916,
+      "ap_43-49": 0.0339,
+      "prevalence_43-49": 0.0253,
+      "roc_auc_35-49": 0.8792,
+      "mean_step_p_at_20": 0.51
+    },
+    {
+      "model": "logreg",
+      "feature_set": "live_computable",
+      "run": "logreg_live_computable_20261014-102350-478553",
+      "f1_at_val_threshold": 0.4906204906204906,
+      "threshold": 0.8663189901553839,
+      "ap_35-49": 0.223,
+      "prevalence_35-49": 0.065,
+      "ap_35-42": 0.3993,
+      "prevalence_35-42": 0.0916,
+      "ap_43-49": 0.0179,
+      "prevalence_43-49": 0.0253,
+      "roc_auc_35-49": 0.7872,
+      "mean_step_p_at_20": 0.0727
+    },
+    {
+      "model": "xgboost",
+      "feature_set": "live_computable",
+      "run": "xgboost_live_computable_20261014-102400-772253",
+      "f1_at_val_threshold": 0.639067055393586,
+      "threshold": 0.9486032128334045,
+      "ap_35-49": 0.6459,
+      "prevalence_35-49": 0.065,
+      "ap_35-42": 0.7921,
+      "prevalence_35-42": 0.0916,
+      "ap_43-49": 0.0275,
+      "prevalence_43-49": 0.0253,
+      "roc_auc_35-49": 0.885,
+      "mean_step_p_at_20": 0.5133
+    }
+  ],
+  "paired_comparisons": {
+    "logreg: live_computable - all": {
+      "delta_ap_35-49": -0.0076,
+      "ci95": [
+        -0.0448,
+        0.0582
+      ],
+      "share_resamples_delta_le_0": 0.6025
+    },
+    "logreg: augmented - all": {
+      "delta_ap_35-49": 0.0051,
+      "ci95": [
+        -0.041,
+        0.0839
+      ],
+      "share_resamples_delta_le_0": 0.426
+    },
+    "xgboost: live_computable - all": {
+      "delta_ap_35-49": -0.1509,
+      "ci95": [
+        -0.2162,
+        -0.0887
+      ],
+      "share_resamples_delta_le_0": 1.0
+    },
+    "xgboost: augmented - all": {
+      "delta_ap_35-49": -0.1865,
+      "ci95": [
+        -0.2693,
+        -0.1133
+      ],
+      "share_resamples_delta_le_0": 1.0
+    }
+  },
+  "xgboost_live_computable_checks": {
+    "test_rows_missing_any_feature": 324,
+    "illicit_among_missing": 0,
+    "ap_all_rows": 0.6459,
+    "ap_complete_rows_only": 0.646,
+    "val_ap_selected_model": 0.7308,
+    "total_gain_share": {
+      "size": 0.464,
+      "fees": 0.19,
+      "num_output_addresses": 0.136,
+      "out_BTC_min": 0.039,
+      "num_input_addresses": 0.038,
+      "in_BTC_min": 0.03,
+      "in_BTC_total": 0.02,
+      "in_BTC_median": 0.016,
+      "out_BTC_max": 0.012,
+      "in_BTC_max": 0.012,
+      "in_txs_degree": 0.009,
+      "out_BTC_mean": 0.009,
+      "out_BTC_median": 0.009,
+      "total_BTC": 0.006,
+      "in_BTC_mean": 0.006,
+      "out_BTC_total": 0.005
+    }
+  }
+}

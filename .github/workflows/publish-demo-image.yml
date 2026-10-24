@@ -4,8 +4,17 @@ name: Publish demo image
 # models takes minutes), validates it, and publishes it to GHCR so that Render pulls a
 # prebuilt image instead of training during its own build (which exceeded Render's limit).
 # Only synthetic data and synthetic-trained models are in this image (scripts/check_demo_image.sh).
+#
+# Release gate: an image is only ever built from a commit whose full CI run (tests on Linux
+# and Windows, frontend, dependency audit, shellcheck, Docker smoke test) succeeded.
+# * Automatically: after CI completes successfully for a push to main (workflow_run), for
+#   exactly the commit CI tested (not whatever main points at by then).
+# * Manually (workflow_dispatch on main): the same check is made through the API first.
+# A failed, cancelled or still-running CI publishes nothing.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -20,12 +29,37 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' && (
+        github.event_name == 'workflow_dispatch' || (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.head_repository.full_name == github.repository))
     permissions:
       contents: read
       packages: write
+      actions: read  # to confirm the CI result for the commit
+    env:
+      # the commit CI tested (workflow_run), or main's head for a manual run
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
+      - name: Require a successful CI run for this exact commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ok=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&event=push&status=success" \
+               --jq '.total_count')
+          if [ "${ok:-0}" -lt 1 ]; then
+            echo "::error::CI has not succeeded for a push of ${SHA}; refusing to publish"
+            exit 1
+          fi
+          echo "CI succeeded for ${SHA} (${ok} run(s))"
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
 
       - name: Image name and version
         id: meta
@@ -36,11 +70,13 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Build synthetic demo image (linux/amd64; hash-locked deps, digest-pinned bases)
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           docker build --platform linux/amd64 --target demo \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
-            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.version="${{ steps.meta.outputs.version }}" \
+            --label org.opencontainers.image.revision="${SHA}" \
+            --label org.opencontainers.image.version="$VERSION" \
             --label org.opencontainers.image.licenses=MIT \
             --label org.opencontainers.image.description="ChainWatch public demo: synthetic data and synthetic-trained models only" \
             -t chainwatch-demo:candidate .
@@ -55,20 +91,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker tag chainwatch-demo:candidate "$IMAGE:sha-$GITHUB_SHA"
-          docker push "$IMAGE:sha-$GITHUB_SHA"
-          # version tags are never overwritten: bump the version in pyproject.toml to publish a new one
-          if docker manifest inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
-            echo "::notice::$IMAGE:$VERSION already exists; not overwritten (published sha-$GITHUB_SHA only)"
-          else
+          docker tag chainwatch-demo:candidate "$IMAGE:sha-$SHA"
+          docker push "$IMAGE:sha-$SHA"
+          # version tags are never overwritten: bump the version in pyproject.toml to publish a
+          # new one. Only an explicit "manifest unknown" means the tag is free; any other
+          # failure (network, rate limit, auth) stops the job rather than overwrite a release.
+          if out=$(docker manifest inspect "$IMAGE:$VERSION" 2>&1); then
+            echo "::notice::$IMAGE:$VERSION already exists; not overwritten (published sha-$SHA only)"
+          elif grep -qiE "manifest unknown|no such manifest|not found" <<<"$out"; then
             docker tag chainwatch-demo:candidate "$IMAGE:$VERSION"
             docker push "$IMAGE:$VERSION"
+          else
+            echo "::error::could not check whether $IMAGE:$VERSION exists: $out"
+            exit 1
           fi
-          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:sha-$GITHUB_SHA")
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:sha-$SHA")
           docker logout ghcr.io
           {
             echo "### Published synthetic demo image"
             echo "- digest (immutable): \`$digest\`"
-            echo "- tags: \`sha-$GITHUB_SHA\`, \`$VERSION\` (if new)"
+            echo "- tags: \`sha-$SHA\`, \`$VERSION\` (if new)"
             echo "- Render: image URL in render.yaml, then Manual Deploy (docs/DEPLOYMENT.md)"
           } >> "$GITHUB_STEP_SUMMARY"

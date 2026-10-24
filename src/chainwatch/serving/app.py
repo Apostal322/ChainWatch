@@ -31,6 +31,7 @@ from chainwatch import __version__
 from chainwatch.config import REPO_ROOT, Config, load_config
 from chainwatch.data import schema as S
 from chainwatch.serving.export import REGISTRY_META
+from chainwatch.serving.live_api import install_live_routes
 from chainwatch.serving.registry import RegistryError, load_registry
 from chainwatch.serving.replay import POLICIES, ReplayEngine, ReplayError
 from chainwatch.serving.schemas import (
@@ -47,6 +48,7 @@ from chainwatch.serving.security import (
     SECURITY_HEADERS,
     BodySizeLimitMiddleware,
     RateLimitMiddleware,
+    internal_error_headers,
     request_id,
 )
 from chainwatch.serving.store import FeatureStore, UnknownTransactionError, data_fingerprint
@@ -60,6 +62,21 @@ DISCLAIMER = (
     "probabilities, not evidence of criminal activity, and not valid for arbitrary current "
     "Bitcoin transactions. Unknown-label transactions are never treated as licit."
 )
+SYNTHETIC_DISCLAIMER = (
+    "Synthetic demonstration: transactions, labels and models are generated (no Elliptic++ "
+    "data and no real Bitcoin transaction). Scores rank synthetic transactions by similarity "
+    "to synthetic 'illicit' examples; they show how the system works and say nothing about "
+    "any real transaction or person."
+)
+
+
+def disclaimer_for(svc) -> str:
+    """The disclaimer of the data actually being served (the synthetic demo used to state
+    the research dataset's one, contradicting its SYNTHETIC banner)."""
+    mode = (getattr(svc, "registry_meta", None) or {}).get("data_mode")
+    return SYNTHETIC_DISCLAIMER if mode == "synthetic" else DISCLAIMER
+
+
 FEATURE_SPACE = (
     "Elliptic++ transaction features: 165 anonymised features standardised by the dataset "
     "publisher plus 17 augmented features. Not computable for new real-world transactions."
@@ -176,11 +193,15 @@ def _install_error_handlers(app: FastAPI) -> None:
             "unhandled error",
             extra={"extra_fields": {"request_id": getattr(request.state, "request_id", None)}},
         )
-        return _error(500, "internal_error", "internal server error", request)
+        response = _error(500, "internal_error", "internal server error", request)
+        response.headers.update(internal_error_headers(getattr(request.state, "request_id", None)))
+        return response
 
 
 # --------------------------------------------------------------------------- app
-def create_app(cfg: Config | None = None, state: ServiceState | None = None) -> FastAPI:
+def create_app(
+    cfg: Config | None = None, state: ServiceState | None = None, live_backend=None
+) -> FastAPI:
     cfg = cfg or load_config(os.environ.get("CHAINWATCH_CONFIG"))
 
     @asynccontextmanager
@@ -231,6 +252,8 @@ def create_app(cfg: Config | None = None, state: ServiceState | None = None) -> 
         path = request.url.path
         if not path.startswith(("/docs", "/redoc", "/v1", "/health", "/openapi")):
             response.headers.setdefault("content-security-policy", DASHBOARD_CSP)
+        elif path.startswith("/v1"):  # API answers (live data among them) are not cached
+            response.headers.setdefault("cache-control", "no-store")
         if request.url.path.startswith(("/v1", "/health")):
             log.info(
                 "request",
@@ -247,6 +270,15 @@ def create_app(cfg: Config | None = None, state: ServiceState | None = None) -> 
         return response
 
     _routes(app)
+    app.state.live_enabled = cfg.live.enabled
+    # read-only; 404 live_disabled unless opted in; remote mode proxies to the collector VM
+    install_live_routes(
+        app,
+        cfg.live,
+        _error,
+        backend=live_backend,
+        trusted_proxy_hops=sv.trusted_proxy_hops if sv else 0,
+    )
     _mount_frontend(app, cfg)
     if sv and sv.rate_limit_per_minute > 0:
         app.add_middleware(
@@ -332,8 +364,9 @@ def _routes(app: FastAPI) -> None:
             ),
             "scoring_assumption": "end-of-step batch scoring: features of step s use the "
             "complete transaction graph of step s",
-            "disclaimer": DISCLAIMER,
+            "disclaimer": disclaimer_for(svc),
             "n_models": len(svc.bundles),
+            "live_enabled": request.app.state.live_enabled,
         }
 
     @app.get("/v1/models", tags=["models"])
@@ -457,7 +490,7 @@ def _routes(app: FastAPI) -> None:
             **svc.store.label_info(tx_id, svc.engine.latency),
             "augmented_features": {c: _clean(row[c]) for c in S.AUGMENTED_FEATURES},
             "explanation": svc.engine.explain(version, tx_id, top_k),
-            "disclaimer": DISCLAIMER,
+            "disclaimer": disclaimer_for(svc),
         }
 
     @app.get("/v1/transactions/{tx_id}/neighbourhood", tags=["transactions"])
@@ -547,7 +580,7 @@ def _routes(app: FastAPI) -> None:
                 )
         order = {t: i for i, t in enumerate(req.tx_ids)}
         preds.sort(key=lambda p: order[p.tx_id])
-        return BatchResponse(predictions=preds, errors=errors, disclaimer=DISCLAIMER)
+        return BatchResponse(predictions=preds, errors=errors, disclaimer=disclaimer_for(svc))
 
     @app.post("/v1/predict/features", response_model=FeatureVectorResponse, tags=["predict"])
     def predict_features(req: FeatureVectorRequest, request: Request) -> FeatureVectorResponse:
@@ -564,7 +597,7 @@ def _routes(app: FastAPI) -> None:
             model_version=b.version,
             risk_scores=scores.tolist(),
             feature_space=FEATURE_SPACE,
-            disclaimer=DISCLAIMER,
+            disclaimer=disclaimer_for(svc),
         )
 
     # ------------------------------------------------------------------ research results

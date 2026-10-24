@@ -36,7 +36,10 @@ This protocol was fixed before any model was trained. Changes to it are listed u
 | decision threshold (max F1) | no | yes | no |
 | reported metrics | no | yes (optimistic, since it is used for selection) | **yes, once** |
 
-`chainwatch train` never loads test labels into any computation. `chainwatch evaluate`
+`chainwatch train` uses no test labels for fitting, selection or thresholding. It is not
+blind to the test period, though: it loads the full dataset, and the run metadata
+records each split's row and illicit counts (so the test prevalence), and the published
+EDA reports per-step prevalence for the test steps. `chainwatch evaluate`
 reads test data with the split and threshold **frozen in the artifact**, not the current
 config. It refuses to overwrite an existing test evaluation unless `--force` is given,
 so repeated test-set looks are an explicit, logged action.

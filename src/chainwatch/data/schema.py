@@ -86,8 +86,19 @@ NON_FEATURE_COLUMNS = (TX_ID, TIME_STEP, RAW_LABEL, LABEL)
 EXPECTED_N_TIME_STEPS = 49
 
 
+# Elliptic++ augmented features that ChainWatch's live collector can also compute from a
+# single mempool transaction with its prevouts (docs/LIVE_FEATURE_SUBSET_PROTOCOL.md).
+# out_txs_degree is excluded: it counts LATER transactions spending this one's outputs,
+# which is unknown when a transaction is first observed.
+LIVE_COMPUTABLE_FEATURES = [f for f in AUGMENTED_FEATURES if f != "out_txs_degree"]
+
+
 def feature_columns(feature_set: str) -> list[str]:
     """Return the ordered model input columns for a named feature set."""
+    if feature_set == "augmented":
+        return list(AUGMENTED_FEATURES)
+    if feature_set == "live_computable":
+        return list(LIVE_COMPUTABLE_FEATURES)
     if feature_set == "local":
         return list(LOCAL_FEATURES)
     if feature_set == "local_aggregate":

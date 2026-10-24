@@ -1,0 +1,3 @@
+# Inputs for requirements/audit.lock.txt (the CI dependency-audit job).
+#   uv pip compile requirements/audit.in --python-version 3.13 --generate-hashes -o requirements/audit.lock.txt
+pip-audit

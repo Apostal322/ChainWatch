@@ -59,7 +59,7 @@ tracking:
   tracking_uri: sqlite:///mlflow.db
 
 # --------------------------------------------------------------------------- #
-# Phase 2: rolling-origin backtests (pre-registered in docs/PHASE2_PROTOCOL.md)
+# Phase 2: rolling-origin backtests (protocol fixed before the runs: docs/PHASE2_PROTOCOL.md)
 # --------------------------------------------------------------------------- #
 backtest:
   label_latency: 1              # label of step u is available at the end of step u + L
@@ -90,7 +90,7 @@ backtest:
   bootstrap: {n_resamples: 2000, block_length: 3, seed: 0}
   confirm_split_after: 42       # confirm sub-periods 35-42 and 43-49 (protocol §5)
   time_proxy_threshold: 0.9     # |Spearman(feature, time step)| on steps <= time_proxy_max_step
-  time_proxy_max_step: 34       # (deviation 1: added after pre-registration)
+  time_proxy_max_step: 34       # (deviation 1: added after the protocol was fixed)
 
 # --------------------------------------------------------------------------- #
 # Phase 3: inference service (docs/INFERENCE_CONTRACT.md)
