@@ -35,12 +35,18 @@ import {
   type ThroughputPoint,
 } from "../lib/live";
 import {
-  filterAlerts,
+  authoritiesOf,
+  NO_ALERTS_FILTER,
+  NO_FINDINGS_FILTER,
+  PAGE_SIZE,
   priorityByTxid,
   riskApi,
   riskState as riskStateOf,
   type Alert,
+  type AlertsFilter,
   type Finding,
+  type FindingsFilter,
+  type PageInfo,
   type PriorityLevel,
   type RiskSummary,
 } from "../lib/risk";
@@ -53,8 +59,9 @@ import {
   RecentFindings,
   RiskAssessment,
   RiskOverview,
-  type AlertFilter,
   type DataKind,
+  type ListState,
+  type PageAction,
 } from "./RiskPanels";
 
 const SORTS: Record<SortKey, string> = {
@@ -70,7 +77,56 @@ const STATS_POLL_MS = 15000;
 const RISK_POLL_MS = 15000;
 /** Fallback for the event stream: poll the newest rows while it is not open or the feed lags. */
 const FEED_POLL_MS = 15000;
-const ALERTS_LIMIT = 200;
+/** Feed priorities learnt from loaded findings pages (for rows the stream sent unassessed). */
+const PRIORITY_MEMORY = 2000;
+
+type PageFetch<T, F> = (f: F, cursor: string | null) => Promise<{ items: T[]; page?: PageInfo }>;
+const fetchFindings: PageFetch<Finding, FindingsFilter> = (f, c) =>
+  riskApi.findingsPage(f, PAGE_SIZE, c).then((r) => ({ items: r.findings ?? [], page: r.page }));
+const fetchAlerts: PageFetch<Alert, AlertsFilter> = (f, c) =>
+  riskApi.alertsPage(f, PAGE_SIZE, c).then((r) => ({ items: r.alerts ?? [], page: r.page }));
+
+/** One server-paged list: filter, cursor stack (page k = cursors[k]) and the loaded page.
+ * The latest request wins; a filter or page change clears the rows first, so rows are never
+ * shown under a filter or page they do not belong to. `reload` refreshes the current page. */
+function usePagedList<T, F>(initial: F, fetchPage: PageFetch<T, F>) {
+  const [list, setList] = useState<ListState<T>>({ items: null, info: null, page: 0, error: null, busy: false });
+  const [filter, setFilterState] = useState<F>(initial);
+  const ref = useRef({ filter: initial, cursors: [null] as (string | null)[], info: null as PageInfo | null, seq: 0 });
+  const reload = useCallback(async () => {
+    const r = ref.current;
+    const seq = ++r.seq;
+    const page = r.cursors.length - 1;
+    try {
+      const res = await fetchPage(r.filter, r.cursors[page]);
+      if (seq !== r.seq) return;
+      // an older collector API answers without page details: one unpaged list, total unknown
+      const info = res.page ?? { limit: PAGE_SIZE, total: null, next_cursor: null, available: true };
+      r.info = info;
+      setList({ items: res.items, info, page, error: null, busy: false });
+    } catch (e) {
+      if (seq !== r.seq) return;
+      setList((l) => ({ ...l, error: describeRiskError(e), busy: false }));
+    }
+  }, [fetchPage]);
+  const navigate = useCallback((cursors: (string | null)[]) => {
+    ref.current.cursors = cursors;
+    setList((l) => ({ items: null, info: l.info, page: cursors.length - 1, error: null, busy: true }));
+    void reload();
+  }, [reload]);
+  const setFilter = useCallback((f: F) => {
+    ref.current.filter = f;
+    setFilterState(f);
+    navigate([null]);
+  }, [navigate]);
+  const onPage = useCallback((a: PageAction) => {
+    const { cursors, info } = ref.current;
+    if (a === "first") navigate([null]);
+    else if (a === "prev" && cursors.length > 1) navigate(cursors.slice(0, -1));
+    else if (a === "next" && info?.next_cursor) navigate([...cursors, info.next_cursor]);
+  }, [navigate]);
+  return { list, filter, setFilter, onPage, reload };
+}
 
 // Recharts' default tooltip is white with inherited text colour: unreadable in dark mode.
 const TOOLTIP = {
@@ -357,14 +413,10 @@ export default function LiveView({ info }: { info: Info }) {
   const [filter, setFilter] = useState<FeedFilter>({ minFeeRate: null, flag: null, showFailed: false, sort: "newest" });
   const [risk, setRisk] = useState<RiskSummary | null>(null);
   const [riskError, setRiskError] = useState<string | null>(null);
-  const [findings, setFindings] = useState<Finding[] | null>(null);
-  const [findingsError, setFindingsError] = useState<string | null>(null);
-  const [alerts, setAlerts] = useState<{ list: Alert[]; filter: AlertFilter } | null>(null);
-  const [alertsError, setAlertsError] = useState<string | null>(null);
-  const [alertFilter, setAlertFilter] = useState<AlertFilter>(null);
+  const findings = usePagedList(NO_FINDINGS_FILTER, fetchFindings);
+  const alerts = usePagedList(NO_ALERTS_FILTER, fetchAlerts);
   const [skew, setSkew] = useState(0); // server minus client clock, for source ages
-  const alertFilterRef = useRef<AlertFilter>(null);
-  const alertsSeq = useRef(0);
+  const priorityMemory = useRef(new Map<string, PriorityLevel>());
   const detailRef = useRef<HTMLDivElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const skewRef = useRef(0); // server clock minus client clock, from the last status
@@ -374,26 +426,8 @@ export default function LiveView({ info }: { info: Info }) {
 
   const enabled = info.live_enabled;
 
-  /** Latest request wins (a filter change can overlap a poll). A specific status is filtered by
-   * the API (complete up to the limit); "open" is filtered here (the API returns open first). */
-  const loadAlerts = useCallback(async () => {
-    const seq = ++alertsSeq.current;
-    const f = alertFilterRef.current;
-    try {
-      const r = await riskApi.alerts(f === null || f === "open" ? null : f, ALERTS_LIMIT);
-      if (seq !== alertsSeq.current) return;
-      setAlerts({ list: r.alerts ?? [], filter: f });
-      setAlertsError(null);
-    } catch (e) {
-      if (seq === alertsSeq.current) setAlertsError(describeRiskError(e));
-    }
-  }, []);
-
-  const onAlertFilter = useCallback((f: AlertFilter) => {
-    alertFilterRef.current = f;
-    setAlertFilter(f);
-    void loadAlerts();
-  }, [loadAlerts]);
+  const reloadFindings = findings.reload;
+  const reloadAlerts = alerts.reload;
 
   useEffect(() => {
     if (!enabled) return;
@@ -447,16 +481,13 @@ export default function LiveView({ info }: { info: Info }) {
       if (busy.risk || document.hidden) return;
       busy.risk = true;
       try {
-        const [s, f] = await Promise.allSettled([riskApi.summary(24), riskApi.findings(4, 50), loadAlerts()]);
+        // the lists refresh the page being viewed (its cursor is stable: rows never shift)
+        const [s] = await Promise.allSettled([riskApi.summary(24), reloadFindings(), reloadAlerts()]);
         if (!alive) return;
         if (s.status === "fulfilled") {
           setRisk(s.value);
           setRiskError(null);
         } else setRiskError(describeRiskError(s.reason));
-        if (f.status === "fulfilled") {
-          setFindings(f.value.findings ?? []);
-          setFindingsError(null);
-        } else setFindingsError(describeRiskError(f.reason));
       } finally {
         busy.risk = false;
       }
@@ -575,7 +606,7 @@ export default function LiveView({ info }: { info: Info }) {
       document.removeEventListener("visibilitychange", onVisibility);
       es?.close();
     };
-  }, [enabled, loadAlerts]);
+  }, [enabled, reloadFindings, reloadAlerts]);
 
   useEffect(() => {
     if (!selected) {
@@ -625,11 +656,16 @@ export default function LiveView({ info }: { info: Info }) {
   );
   const binEdges = useMemo(() => (stats?.data.fee_rate_histogram ?? []).map((b) => b.from).join(", "), [stats]);
   const flags = useMemo(() => Object.keys(status?.indicators ?? {}), [status?.indicators]);
-  const findingPriority = useMemo(() => priorityByTxid(findings ?? []), [findings]);
-  const shownAlerts = useMemo(
-    () => (alerts && alerts.filter === alertFilter ? filterAlerts(alerts.list, alertFilter) : null),
-    [alerts, alertFilter],
-  );
+  const findingPriority = useMemo(() => {
+    const mem = priorityMemory.current;
+    for (const [t, p] of priorityByTxid(findings.list.items ?? [])) mem.set(t, p);
+    for (const t of mem.keys()) {
+      if (mem.size <= PRIORITY_MEMORY) break;
+      mem.delete(t); // oldest learnt first
+    }
+    return new Map(mem);
+  }, [findings.list.items]);
+  const authorities = useMemo(() => authoritiesOf(risk?.summary?.sources), [risk?.summary?.sources]);
   const kind: DataKind = sourceBadge(status).kind;
   const riskState = riskStateOf(risk, Date.now() / 1000 + skew);
   const lag = problem === null ? feedLag(status, feed) : null;
@@ -692,9 +728,11 @@ export default function LiveView({ info }: { info: Info }) {
 
       <RiskOverview data={risk} error={riskError} skew={skew} kind={kind} riskUnavailable={riskUnavailable} />
       <div className="split" style={{ marginTop: 16 }}>
-        <InvestigationQueue alerts={shownAlerts} error={alertsError} filter={alertFilter} onFilter={onAlertFilter}
+        <InvestigationQueue list={alerts.list} filter={alerts.filter} authorities={authorities} onFilter={alerts.setFilter}
+                            onPage={alerts.onPage}
                             onSelect={onSelectFar} skew={skew} kind={kind} riskState={riskState} />
-        <RecentFindings findings={findings} error={findingsError} selected={selected} onSelect={onSelectFar}
+        <RecentFindings list={findings.list} filter={findings.filter} authorities={authorities} onFilter={findings.setFilter}
+                        onPage={findings.onPage} selected={selected} onSelect={onSelectFar}
                         skew={skew} kind={kind} riskState={riskState} />
       </div>
 

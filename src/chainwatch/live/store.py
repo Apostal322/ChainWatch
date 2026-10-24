@@ -126,6 +126,9 @@ def risk_state(found: tuple | None) -> str:
     return "no_finding"
 
 
+EMPTY_PAGE: dict[str, Any] = {"items": [], "total": 0, "next_cursor": None, "available": False}
+
+
 class DatabaseBusy(RuntimeError):
     """Another process holds the database lock this operation needs (e.g. a restore)."""
 
@@ -497,6 +500,19 @@ class LiveReader:
         from chainwatch.risk import persistence as rp
 
         return self._risk(lambda c: rp.alerts(c, status=status, limit=limit), [])
+
+    def findings_page(self, q, now: float) -> dict[str, Any]:
+        """A page of findings; ``available`` False when the database has no risk tables."""
+        from chainwatch.risk import persistence as rp
+
+        page = self._risk(lambda c: rp.findings_page(c, q, now), None)
+        return EMPTY_PAGE if page is None else {**page, "available": True}
+
+    def alerts_page(self, q, now: float) -> dict[str, Any]:
+        from chainwatch.risk import persistence as rp
+
+        page = self._risk(lambda c: rp.alerts_page(c, q, now), None)
+        return EMPTY_PAGE if page is None else {**page, "available": True}
 
     def risk_summary(self, since: float) -> dict[str, Any] | None:
         from chainwatch.risk import persistence as rp

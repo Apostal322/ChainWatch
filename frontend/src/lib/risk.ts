@@ -225,12 +225,115 @@ export interface RiskRecord {
   latency_ms: number;
 }
 
+// ------------------------------------------------------------------ paged lists
+/** `total`: rows matching the filters (null: the collector's API predates paging). */
+export interface PageInfo {
+  limit: number;
+  total: number | null;
+  next_cursor: string | null;
+  /** False: the collector database has no risk tables (risk intelligence never ran). */
+  available: boolean;
+}
+
+/** `insufficient_evidence` lists assessments that are not findings (kept in their own list). */
+export type FindingType = "source_match" | "relation" | "anomaly" | "insufficient_evidence";
+export type AlertType = "source_match" | "retrospective" | "relation" | "anomaly";
+export type AlertSort = "triage" | "newest";
+
+export interface FindingsFilter {
+  type: FindingType | null;
+  authority: string | null;
+  priority: PriorityLevel | null;
+  hours: number | null;
+}
+
+export interface AlertsFilter {
+  status: AlertStatus | "open" | null;
+  type: AlertType | null;
+  authority: string | null;
+  priority: PriorityLevel | null;
+  hours: number | null;
+  sort: AlertSort;
+}
+
+export const NO_FINDINGS_FILTER: FindingsFilter = { type: null, authority: null, priority: null, hours: null };
+export const NO_ALERTS_FILTER: AlertsFilter = { status: null, type: null, authority: null, priority: null, hours: null, sort: "triage" };
+/** Rows per page: each alert has several tab stops, so pages stay short. */
+export const PAGE_SIZE = 25;
+
+export const FINDING_TYPE_LABEL: Record<FindingType, string> = {
+  source_match: "Source matches (P1)",
+  relation: "Relations to a match (P2)",
+  anomaly: "Behavioural anomalies (P3/P4)",
+  insufficient_evidence: "Insufficient evidence (not findings)",
+};
+export const ALERT_TYPE_LABEL: Record<AlertType, string> = {
+  source_match: "Source matches",
+  retrospective: "Retrospective source matches",
+  relation: "Relations to a match",
+  anomaly: "Behavioural anomalies",
+};
+export const TIME_RANGES: { hours: number | null; label: string }[] = [
+  { hours: null, label: "Any time" },
+  { hours: 1, label: "Last hour" },
+  { hours: 24, label: "Last 24 hours" },
+  { hours: 168, label: "Last 7 days" },
+  { hours: 720, label: "Last 30 days" },
+];
+
+function query(params: Record<string, string | number | null | undefined>): string {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== null && v !== undefined) q.set(k, String(v));
+  return q.toString();
+}
+
+export function findingsQuery(f: FindingsFilter, limit: number, cursor: string | null): string {
+  return query({ limit, type: f.type, authority: f.authority, priority: f.priority, hours: f.hours, cursor });
+}
+
+export function alertsQuery(f: AlertsFilter, limit: number, cursor: string | null): string {
+  return query({
+    limit, status: f.status, type: f.type, authority: f.authority, priority: f.priority, hours: f.hours,
+    sort: f.sort === "triage" ? null : f.sort, cursor,
+  });
+}
+
+/** Insufficient evidence carries no priority and no source: those filters do not apply. */
+export function normaliseFindingsFilter(f: FindingsFilter): FindingsFilter {
+  return f.type === "insufficient_evidence" ? { ...f, priority: null, authority: null } : f;
+}
+
+export function isFiltered(f: FindingsFilter | AlertsFilter): boolean {
+  return Object.entries(f).some(([k, v]) => v !== null && !(k === "sort" && v === "triage"));
+}
+
+/** "Page 2 of 13 · 312 alerts"; positions are approximate while the list changes, so no ranges. */
+export function pageText(page: number, total: number | null, size: number, noun: [string, string]): string {
+  if (total === null) return `Page ${page + 1} · total not reported (the collector's API is older than this dashboard)`;
+  const pages = Math.max(1, Math.ceil(total / size));
+  return `Page ${page + 1} of ${Math.max(pages, page + 1)} · ${total.toLocaleString("en-US")} ${total === 1 ? noun[0] : noun[1]}`;
+}
+
+/** Display name for an authority (the official file and its mirror share one). */
+export function authorityName(id: string): string {
+  return id === "ofac-sdn" ? "OFAC SDN (official list or its mirror)" : sourceName(id);
+}
+
+/** Authorities of the loaded sources, for the source filter. */
+export function authoritiesOf(sources: { source_id: string; authority?: string }[] | null | undefined): string[] {
+  return [...new Set((sources ?? []).map((s) => s.authority || s.source_id))].sort();
+}
+
 export const riskApi = {
   summary: (hours = 24) => liveGet<RiskSummary>(`/v1/live/risk/summary?hours=${hours}`),
   findings: (maxPriority = 4, limit = 50) =>
     liveGet<{ findings: Finding[] }>(`/v1/live/findings?max_priority=${maxPriority}&limit=${limit}`),
   alerts: (status: AlertStatus | null = null, limit = 50) =>
     liveGet<{ alerts: Alert[] }>(`/v1/live/alerts?limit=${limit}${status ? `&status=${status}` : ""}`),
+  findingsPage: (f: FindingsFilter, limit: number, cursor: string | null) =>
+    liveGet<{ findings: Finding[]; page?: PageInfo }>(`/v1/live/findings?${findingsQuery(f, limit, cursor)}`),
+  alertsPage: (f: AlertsFilter, limit: number, cursor: string | null) =>
+    liveGet<{ alerts: Alert[]; page?: PageInfo }>(`/v1/live/alerts?${alertsQuery(f, limit, cursor)}`),
 };
 
 // ------------------------------------------------------------------ wording (hard rules)
@@ -557,7 +660,9 @@ export function emptyRiskText(what: "alerts" | "findings", state: RiskState, fil
   }
   const base = what === "alerts"
     ? `No alerts${filterText}.`
-    : "No findings yet. Absence of findings is not a statement that transactions are legitimate.";
+    : filterText
+      ? `No assessments${filterText}. Absence of findings is not a statement that transactions are legitimate.`
+      : "No findings yet. Absence of findings is not a statement that transactions are legitimate.";
   return state === "no-screening" ? `${base} ${NO_SCREENING_TEXT}; only behavioural anomalies (P3/P4) can be reported.` : base;
 }
 

@@ -238,3 +238,16 @@ main:focus { outline: none; }
 .tile.superseded .v, .tile.superseded .k { color: var(--muted); }
 .alert-item code, .alert-item .small { overflow-wrap: anywhere; word-break: break-word; }
 .prio.na { color: var(--muted); border: 1px dashed var(--border); font-weight: 600; }
+
+/* ---- paged risk lists (v0.8.1): server-side filters and pager ---- */
+.card .filters select { width: 14em; max-width: 100%; }
+.pager { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 10px; }
+.pager button:not(.linkbtn) { background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font: inherit; color: inherit; cursor: pointer; min-height: 32px; }
+.pager button[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+.pager [role="status"] { flex: 1 1 160px; }
+@media (max-width: 520px) {
+  .card .filters .field { flex: 1 1 100%; }
+  .card .filters select { width: 100%; }
+  .pager button:not(.linkbtn) { flex: 1 1 40%; }
+}

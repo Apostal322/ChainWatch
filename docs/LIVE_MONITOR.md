@@ -115,6 +115,8 @@ legality.
 | `GET /v1/live/transactions` | paged list; `limit≤200`, `sort` ∈ {id, first_seen, fee_rate, fee, vsize, n_inputs, n_outputs}, `order`, `min_fee_rate`, `max_fee_rate`, `flag`, `outcome` ∈ {fetched, failed, all} |
 | `GET /v1/live/transactions/{txid}` | full features, explorer link, flag descriptions; 400 on a malformed txid, 404 if not observed |
 | `GET /v1/live/stats?window_minutes=` | per-minute counters, fee-rate and vsize quantiles, fee-rate histogram, flag counts, failure reasons |
+| `GET /v1/live/findings` | assessed transactions with a finding (P1–P4), newest first, one page at a time: `limit≤200`, `type` ∈ {source_match, relation, anomaly, insufficient_evidence}, `authority`, `priority`, `max_priority`, `since`/`until` (evaluated at, epoch seconds) or `hours≤720`, `cursor` (from `page.next_cursor`; `before_id` still accepted). `insufficient_evidence` lists assessments that are not findings. Details: [RISK_ENGINE.md §9](RISK_ENGINE.md#paged-findings-and-alert-queue) |
+| `GET /v1/live/alerts` | the investigation queue, one page at a time: `limit≤200`, `status` ∈ {open, new, under_review, dismissed, resolved, insufficient_evidence}, `type` ∈ {source_match, retrospective, relation, anomaly}, `authority`, `priority`, `max_priority`, `since`/`until` or `hours` (last seen), `sort` ∈ {triage, newest}, `cursor`. Read-only |
 | `GET /v1/live/events` | SSE: `tx` per new observation (with `id:`, resumable through `Last-Event-ID` or `?since=`) and `status` every 5 s. At most 20 streams, each closed after 300 s (browsers reconnect) |
 
 ## 6. Run it locally (no paid resources)

@@ -250,6 +250,68 @@ alert reopens it. Statuses: `new`, `under_review`, `dismissed`, `resolved`,
   `/v1/live/transactions/{txid}`. All are read-only, token-protected on the
   edge API, and proxied with the same cache and limits as the other live routes.
 
+### Paged findings and alert queue
+
+Until v0.8.1 the dashboard loaded the 50 newest findings and the first 200 alerts; anything
+older could not be reached from the UI. Both lists are now filtered and paged on the server
+(`src/chainwatch/risk/persistence.py`: `findings_page`, `alerts_page`).
+
+* **Responses** keep their list (`findings` / `alerts`) and add `page`: `total` (rows
+  matching the filters), `next_cursor` (null on the last page), `limit`, `available`
+  (false when the collector database has no risk tables) and the filters applied.
+* **Filters, findings:** `type` (source_match = P1 screening match, relation = P2, anomaly =
+  P3/P4, insufficient_evidence), `authority` (the publisher: the official OFAC file and
+  its mirror are one authority), `priority` / `max_priority`, and a time range on the
+  evaluation time. `insufficient_evidence` returns assessments with no priority, no
+  screening data and no anomaly baseline; they are not findings and never appear in the
+  findings list; a failed assessment is in neither. Priority or source filters together
+  with it are a 400.
+* **Filters, alerts:** `status` (`open` = new or under review), `type` (live source
+  matches and **retrospective** matches are separate types; relation; anomaly),
+  `authority` (from the immutable group key, so keys written before v0.8 that name a
+  source id are included), `priority` / `max_priority`, and a time range on the last
+  occurrence.
+* **Order and cursors.** Findings are ordered by observation id, newest first: the key is
+  immutable, so a row never moves; rows stored while someone pages appear on the first
+  page only. Alerts default to triage order (open first, priority, last seen, then id);
+  `sort=newest` orders by creation. Cursors are keyset positions (an opaque string for
+  alerts, bound to its sort order), not offsets: an unchanged row is never skipped or shown
+  twice. In triage order an alert whose sort key changes between two requests (a new
+  occurrence, a status change) moves to its new place, which can be on a page already
+  passed; the UI says so.
+* **Consistency.** The total and the page are read in one SQLite read transaction, so they
+  describe the same state even while the collector commits.
+* **Bounds.** `limit` ≤ 200 (the dashboard uses 25), cursors ≤ 200 characters, time bounds
+  validated (`nan`, ±inf, out-of-range: 422; an empty range: 400). Ids, totals and the
+  page's keys come from covering indexes (`risk_findings_cov`, `alerts_queue_cov`); full
+  rows are read for the page only. The `authority` filter reads the stored record of P1/P2
+  rows only.
+* **Remote proxy.** The dashboard validates filters and cursors itself (a bad request is
+  a 400 there, never forwarded), snaps `hours` to the cached steps and forwards the rest.
+  The unfiltered first page bypasses the proxy's upstream budget like the other polled
+  routes. An edge API from before paging ignores unknown parameters: the dashboard then
+  shows unfiltered first pages with "total not reported" and refuses filtered requests
+  (502, "upgrade the collector") rather than mislabelling rows.
+* **CLI:** `chainwatch-live alerts list --limit N` lists any number in triage order and
+  accepts `--status open`.
+
+Measured with `scripts/bench_risk_pages.py` on constructed data (50,000 assessed
+observations, the retention cap, of which 6,582 findings; 30 repetitions, read-only
+connection as on the edge; local container, not the VM):
+
+| Query (page of 25 unless noted) | 50k alerts p50 / max (ms) | 2k alerts p50 / max (ms) |
+|---|---|---|
+| findings, first page / page 101 | 2.3 / 3.3 · 1.5 / 1.7 | 1.4 / 2.3 · 1.6 / 1.9 |
+| findings, type filter / time range | 1.0–1.9 / ≤ 2.3 | 1.0–1.9 / ≤ 2.3 |
+| findings, authority filter | 20.0 / 22.3 | 19.2 / 23.3 |
+| findings, page of 200 | 3.6 / 4.3 | 3.4 / 4.1 |
+| alerts, triage first page / page 101 | 9.9 / 15.5 · 12.2 / 19.4 | 1.2 / 1.4 |
+| alerts, open / retrospective / newest | 5.5 / 8.7 / 1.8 (max ≤ 10) | ≤ 1.1 (max ≤ 2.0) |
+| alerts, authority filter | 26.4 / 45.8 | 1.8 / 2.2 |
+| alerts, page of 200 | 13.8 / 16.7 | 3.3 / 4.4 |
+
+50,000 alerts is a stress case (a realistic queue holds hundreds to a few thousand groups).
+
 ## 10. Not claimed
 
 * No fraud detection, no fraud probabilities, no labels of people or organisations.

@@ -6,8 +6,9 @@
 Checks that a new transaction arrives live and its detail panel matches the API, that risk
 intelligence works end to end (a local TEST indicator list naming some mock output addresses
 -> source matches in the API, the investigation queue and the per-transaction assessment;
-every fetched row is assessed in the same commit), that a collector outage and its recovery
-are shown, and that the replay tab stays synthetic.
+every fetched row is assessed in the same commit), that the findings list and the queue are
+filtered and paged on the server (keyboard paging, filters, empty states, 375 px), that a
+collector outage and its recovery are shown, and that the replay tab stays synthetic.
 Needs Playwright with Chromium in the running interpreter; the services run with
 CHAINWATCH_PY (default: this interpreter), which needs the project installed. Built
 frontend required (cd frontend && npm run build).
@@ -76,13 +77,24 @@ results = {}
 NNBSP = chr(0x202F)  # narrow no-break space (locale number grouping)
 
 
-def until(fn, timeout):
+def until(fn, timeout, every=0.5):
     end = time.time() + timeout
     while time.time() < end:
         if fn():
             return True
-        time.sleep(0.5)
+        time.sleep(every)
     raise SystemExit("timed out waiting")
+
+
+def api(url, **kw):
+    """GET JSON from the dashboard; waits out its rate limit (the browser polls it too)."""
+    for _ in range(30):
+        r = httpx.get(url, timeout=10, **kw)
+        if r.status_code != 429:
+            r.raise_for_status()
+            return r.json()
+        time.sleep(2)
+    raise SystemExit(f"{url}: still rate limited")
 
 
 def check(name, ok, detail=""):
@@ -210,6 +222,85 @@ try:
             p1["txid"] in detail and match["address"] in detail and "Source match" in detail,
         )
         pg.screenshot(path=str(OUT / "e2e_risk.png"), full_page=True)
+        # ---- paged, filtered lists through the remote proxy (v0.8.1)
+        # every 5 s: this script shares the dashboard's per-client rate limit with the browser
+        until(lambda: (api(f"{base}/findings?limit=1")["page"]["total"] or 0) > 25, 240, every=5)
+        seen, cursor = [], None
+        while True:
+            q = {"limit": 50, **({"cursor": cursor} if cursor else {})}
+            pj = api(f"{base}/findings", params=q)
+            seen += [f["id"] for f in pj["findings"]]
+            cursor = pj["page"]["next_cursor"]
+            if not cursor:
+                break
+        check(
+            "findings pages via the proxy: newest first, no duplicates, total reported",
+            seen == sorted(set(seen), reverse=True) and isinstance(pj["page"]["total"], int),
+            f"{len(seen)} rows, pages of 50",
+        )
+        fsec = pg.locator("section[aria-labelledby='findings-h']")
+        pg.wait_for_function(
+            "() => /Page 1 of [2-9]/.test(document.querySelector("
+            "\"section[aria-labelledby='findings-h'] nav.pager\")?.innerText || '')",
+            timeout=40000,
+        )
+        first = fsec.locator("ul.findings li button.rowbtn").first.get_attribute("aria-label")
+        nxt = fsec.get_by_role("button", name="Next →")
+        nxt.focus()
+        pg.keyboard.press("Enter")  # keyboard only
+        pg.wait_for_function(
+            "() => /Page 2 of/.test(document.querySelector("
+            "\"section[aria-labelledby='findings-h'] nav.pager\")?.innerText || '')",
+            timeout=20000,
+        )
+        fsec.locator("ul.findings li").first.wait_for(timeout=20000)
+        second = fsec.locator("ul.findings li button.rowbtn").first.get_attribute("aria-label")
+        focused = pg.evaluate("document.activeElement && document.activeElement.innerText")
+        prev = fsec.get_by_role("button", name="← Previous")
+        prev.focus()
+        pg.keyboard.press("Enter")
+        pg.wait_for_function(
+            "() => /Page 1 of/.test(document.querySelector("
+            "\"section[aria-labelledby='findings-h'] nav.pager\")?.innerText || '')",
+            timeout=20000,
+        )
+        check(
+            "findings pager works from the keyboard (focus kept)",
+            first != second and focused and "Next" in focused
+            and prev.get_attribute("aria-disabled") == "true",
+            f"page 2 starts at {second[-12:] if second else None}",
+        )  # fmt: skip
+        ftype = fsec.get_by_label("Type", exact=True)
+        ftype.select_option(label="Insufficient evidence (not findings)")
+        fsec.get_by_text("These are not findings").wait_for(timeout=20000)
+        check(
+            "insufficient evidence listed apart, no priority or source filter",
+            fsec.get_by_label("Review priority", exact=True).is_disabled()
+            and fsec.get_by_label("Source", exact=True).is_disabled(),
+        )
+        fsec.get_by_role("button", name="Clear filters").click()
+        qsec = pg.locator("section[aria-labelledby='queue-h']")
+        qsec.get_by_label("Type", exact=True).select_option(label="Retrospective source matches")
+        qsec.get_by_text("No alerts matching these filters.").wait_for(timeout=20000)
+        retro = api(f"{base}/alerts?type=retrospective")["page"]["total"]
+        qsec.get_by_label("Type", exact=True).select_option(label="Source matches")
+        qsec.get_by_label("Status", exact=True).select_option(label="Open (new or under review)")
+        qsec.locator("ul.alerts li").first.wait_for(timeout=20000)
+        api_open = api(f"{base}/alerts?type=source_match&status=open")["page"]["total"]
+        pager_text = qsec.locator("nav.pager").inner_text()
+        check(
+            "alert filters on the server: retrospective apart, totals shown",
+            retro == 0 and api_open > 0 and "alerts" in pager_text,
+            pager_text.replace("\n", " ")[:80],
+        )
+        pg.set_viewport_size({"width": 375, "height": 800})
+        time.sleep(1)
+        overflow = pg.evaluate("document.documentElement.scrollWidth - window.innerWidth")
+        qsec.locator("nav.pager").scroll_into_view_if_needed()
+        pg.screenshot(path=str(OUT / "e2e_pages_mobile.png"), full_page=True)
+        check("risk lists at 375 px: no horizontal page scroll", overflow <= 0, f"{overflow}px")
+        pg.set_viewport_size({"width": 1280, "height": 900})
+        qsec.get_by_role("button", name="Clear filters").click()
         # upstream outage: kill the collector (unclean) and keep it down
         procs["collector"].send_signal(signal.SIGKILL)
         procs["collector"].wait()

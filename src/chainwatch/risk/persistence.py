@@ -17,13 +17,17 @@ Tables (docs/RISK_ENGINE.md section 5):
 
 from __future__ import annotations
 
+import base64
+import binascii
+import dataclasses
 import json
+import math
 import sqlite3
 from collections.abc import Iterable
 from typing import Any
 
 from chainwatch.risk.indicators import Snapshot
-from chainwatch.risk.sources import authority_of, rank_of, source_title
+from chainwatch.risk.sources import SOURCES, authority_of, rank_of, source_title
 
 _VERSIONS_TABLE = """indicator_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,6 +175,16 @@ def migrate(db: sqlite3.Connection) -> None:
         )
         db.execute(
             "CREATE INDEX IF NOT EXISTS tx_fetched_lifecycle ON tx(outcome, fetched_at, lifecycle)"
+        )
+        # covering indexes for the paged findings and alert queue (v0.8.1): filters, totals and
+        # the page's ids are read from index entries; full rows only for the page itself
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS risk_findings_cov ON risk(priority, screening, graph, "
+            "anomaly, evaluated_at)"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS alerts_queue_cov ON alerts(status, priority, "
+            "last_seen_at, layer, kind, group_key)"
         )
         if not had_alert_txids:  # alerts from before v0.8: their (capped) txid lists
             for aid, txids in db.execute("SELECT id, txids FROM alerts").fetchall():
@@ -665,77 +679,360 @@ def risk_record(db: sqlite3.Connection, txid: str) -> dict[str, Any] | None:
     return json.loads(row[0]) if row else None
 
 
+FINDING_TYPES = ("source_match", "relation", "anomaly", "insufficient_evidence")
+ALERT_TYPES = ("source_match", "retrospective", "relation", "anomaly")
+ALERT_SORTS = ("triage", "newest")
+MAX_PAGE = 200
+_NO_EVIDENCE_SCREENING = ("SCREENING_DATA_UNAVAILABLE", "INSUFFICIENT_INFORMATION", "ERROR")
+_NO_EVIDENCE_ANOMALY = ("INSUFFICIENT_BASELINE", "INSUFFICIENT_INFORMATION", "ERROR")
+_OPEN = "(CASE WHEN status IN ('new', 'under_review') THEN 0 ELSE 1 END)"
+
+
+class InvalidQuery(ValueError):
+    """A filter combination or cursor the API answers with 400."""
+
+
+@dataclasses.dataclass(frozen=True)
+class FindingsQuery:
+    """Filters of the findings list. ``type`` None = every finding (priority 1..max);
+    ``insufficient_evidence`` lists assessments that are *not* findings (no screening data
+    and no anomaly baseline), so the two are never mixed in one list."""
+
+    type: str | None = None
+    authority: str | None = None  # publisher (the official file and its mirror share one)
+    priority: int | None = None
+    max_priority: int = 4
+    since: float | None = None  # evaluated_at range [since, until)
+    until: float | None = None
+    hours: float | None = None  # relative lower bound, resolved against `now`
+    before_id: int | None = None  # keyset cursor (tx id); pages are newest first
+    limit: int = 50
+
+
+@dataclasses.dataclass(frozen=True)
+class AlertsQuery:
+    """Filters of the investigation queue. ``status`` "open" = new or under review.
+    ``sort`` triage = open first, then priority, then most recently seen; newest = created."""
+
+    status: str | None = None
+    type: str | None = None
+    authority: str | None = None
+    priority: int | None = None
+    max_priority: int | None = None
+    since: float | None = None  # last_seen_at range [since, until)
+    until: float | None = None
+    hours: float | None = None
+    sort: str = "triage"
+    cursor: str | None = None
+    limit: int = 50
+
+
+def _snapshot(db: sqlite3.Connection):
+    """One read transaction: the total and the page come from the same database state, even
+    while the collector commits between the two statements (WAL readers see a snapshot)."""
+
+    class _S:
+        def __enter__(self):
+            self.own = not db.in_transaction
+            if self.own:
+                db.execute("BEGIN")
+
+        def __exit__(self, *_):
+            if self.own and db.in_transaction:
+                db.execute("COMMIT")
+            return False
+
+    return _S()
+
+
+def _bounds(since: float | None, until: float | None, hours: float | None, now: float):
+    lower = since
+    if hours is not None:
+        rel = now - hours * 3600
+        lower = rel if lower is None else max(lower, rel)
+    if lower is not None and until is not None and lower >= until:
+        raise InvalidQuery("the time range is empty (since must be before until)")
+    return lower, until
+
+
+def _authority_ids(authority: str) -> list[str]:
+    """Every source id that speaks for ``authority`` (records store the copy that matched)."""
+    return sorted({authority} | {sid for sid in SOURCES if authority_of(sid) == authority})
+
+
+def _encode_cursor(values: list[Any]) -> str:
+    raw = json.dumps(values, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str, sort: str) -> list[Any]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        v = json.loads(raw)
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        raise InvalidQuery("invalid cursor") from None
+
+    def is_int(x: Any) -> bool:
+        return type(x) is int
+
+    def is_num(x: Any) -> bool:
+        return type(x) in (int, float) and math.isfinite(x)
+
+    ok = isinstance(v, list) and len(v) > 1 and v[0] == sort[0]
+    if ok and sort == "triage":
+        ok = len(v) == 5 and v[1] in (0, 1) and is_int(v[2]) and is_num(v[3]) and is_int(v[4])
+    elif ok:
+        ok = len(v) == 2 and is_int(v[1])
+    if not ok:
+        raise InvalidQuery("invalid cursor (or one from a different sort order)")
+    return v
+
+
+def _finding_where(q: FindingsQuery, now: float) -> tuple[list[str], list[Any]]:
+    where: list[str] = []
+    args: list[Any] = []
+    if q.type is not None and q.type not in FINDING_TYPES:
+        raise InvalidQuery(f"type must be one of {FINDING_TYPES}")
+    if q.type == "insufficient_evidence":
+        if q.priority is not None or q.authority is not None:
+            raise InvalidQuery("insufficient evidence has no priority or source (not a finding)")
+        marks_s = ",".join("?" * len(_NO_EVIDENCE_SCREENING))
+        marks_a = ",".join("?" * len(_NO_EVIDENCE_ANOMALY))
+        where += ["r.priority IS NULL", f"r.screening IN ({marks_s})", f"r.anomaly IN ({marks_a})",
+                  "NOT (r.screening = 'ERROR' AND r.anomaly = 'ERROR')"]  # fmt: skip
+        args += [*_NO_EVIDENCE_SCREENING, *_NO_EVIDENCE_ANOMALY]
+    else:
+        where.append("r.priority BETWEEN 1 AND ?")
+        args.append(q.max_priority)
+        if q.priority is not None:
+            where.append("r.priority = ?")
+            args.append(q.priority)
+        if q.type == "source_match":
+            where.append("r.screening = 'SCREENING_MATCH'")
+        elif q.type == "relation":
+            where.append("r.graph = 'RELATION_FOUND'")
+        elif q.type == "anomaly":
+            where.append("r.anomaly = 'ANOMALY'")
+    if q.authority is not None:
+        ids = _authority_ids(q.authority)
+        marks = ",".join("?" * len(ids))
+        # only priorities 1 and 2 carry a source; the JSON is read for those rows alone
+        where.append(
+            "r.priority <= 2 AND (EXISTS (SELECT 1 FROM json_each(r.record, "
+            f"'$.screening.matches') j WHERE json_extract(j.value, '$.source_id') IN ({marks})) "
+            "OR EXISTS (SELECT 1 FROM json_each(r.record, '$.graph.relations') j "
+            f"WHERE json_extract(j.value, '$.source_id') IN ({marks})))"
+        )
+        args += [*ids, *ids]
+    lower, upper = _bounds(q.since, q.until, q.hours, now)
+    if lower is not None:
+        where.append("r.evaluated_at >= ?")
+        args.append(lower)
+    if upper is not None:
+        where.append("r.evaluated_at < ?")
+        args.append(upper)
+    return where, args
+
+
+def findings_page(db: sqlite3.Connection, q: FindingsQuery, now: float) -> dict[str, Any]:
+    """One page of assessed transactions, newest first (by tx id: immutable, so a row never
+    moves between pages; new rows only appear on the first page), with the total matching the
+    filters. Bounded: ids from the covering index, full records for at most ``limit`` rows."""
+    limit = max(1, int(q.limit))  # the API bounds it (MAX_PAGE); the CLI may list more
+    where, args = _finding_where(q, now)
+    cond = " AND ".join(where)
+    with _snapshot(db):
+        total = db.execute(f"SELECT COUNT(*) FROM risk r WHERE {cond}", args).fetchone()[0]
+        page_cond, page_args = cond, list(args)
+        if q.before_id is not None:
+            page_cond += " AND r.tx_id < ?"
+            page_args.append(q.before_id)
+        ids = [r[0] for r in db.execute(
+            f"SELECT r.tx_id FROM risk r WHERE {page_cond} ORDER BY r.tx_id DESC LIMIT ?",
+            (*page_args, limit + 1),
+        )]  # fmt: skip
+        more = len(ids) > limit
+        ids = ids[:limit]
+        rows = []
+        if ids:
+            marks = ",".join("?" * len(ids))
+            rows = db.execute(
+                "SELECT r.tx_id, r.record, t.lifecycle, t.lifecycle_at, t.replaced_by FROM risk r "
+                f"JOIN tx t ON t.id = r.tx_id WHERE r.tx_id IN ({marks}) ORDER BY r.tx_id DESC",
+                ids,
+            ).fetchall()
+    return {
+        "items": [_finding(*row) for row in rows],
+        "total": total,
+        "next_cursor": str(ids[-1]) if more else None,
+    }
+
+
+def _finding(tx_id, rec, lifecycle, lifecycle_at, replaced_by) -> dict[str, Any]:
+    r = json.loads(rec)
+    return {
+        "id": tx_id,
+        "txid": r["txid"],
+        "evaluated_at": r["evaluated_at"],
+        "observed_at": r["observed_at"],
+        "priority": r["priority"],
+        "screening": {
+            "status": r["screening"].get("status"),
+            "matches": r["screening"].get("matches", []),
+        },
+        "graph": {
+            "status": r["graph"].get("status"),
+            "relations": r["graph"].get("relations", []),
+        },
+        "anomaly": {
+            "status": r["anomaly"].get("status"),
+            "level": r["anomaly"].get("level"),
+            "indicators": r["anomaly"].get("indicators", []),
+        },
+        "insufficient_evidence": r.get("insufficient_evidence", False),
+        "errors": r.get("errors", []),
+        "lifecycle": {"state": lifecycle, "at": lifecycle_at, "replaced_by": replaced_by},
+    }
+
+
 def findings(
     db: sqlite3.Connection, *, max_priority: int = 4, limit: int = 50, before_id: int | None = None
 ) -> list[dict[str, Any]]:
     """Assessed transactions with a finding (priority 1..max_priority), newest first."""
-    args: list[Any] = [max_priority]
-    where = "r.priority IS NOT NULL AND r.priority <= ?"
-    if before_id is not None:
-        where += " AND r.tx_id < ?"
-        args.append(before_id)
-    rows = db.execute(
-        "SELECT r.tx_id, r.record, t.lifecycle, t.lifecycle_at, t.replaced_by FROM risk r "
-        f"JOIN tx t ON t.id = r.tx_id WHERE {where} ORDER BY r.tx_id DESC LIMIT ?",
-        (*args, limit),
-    ).fetchall()
-    out = []
-    for tx_id, rec, lifecycle, lifecycle_at, replaced_by in rows:
-        r = json.loads(rec)
-        out.append(
-            {
-                "id": tx_id,
-                "txid": r["txid"],
-                "evaluated_at": r["evaluated_at"],
-                "observed_at": r["observed_at"],
-                "priority": r["priority"],
-                "screening": {
-                    "status": r["screening"].get("status"),
-                    "matches": r["screening"].get("matches", []),
-                },
-                "graph": {
-                    "status": r["graph"].get("status"),
-                    "relations": r["graph"].get("relations", []),
-                },
-                "anomaly": {
-                    "status": r["anomaly"].get("status"),
-                    "level": r["anomaly"].get("level"),
-                    "indicators": r["anomaly"].get("indicators", []),
-                },
-                "insufficient_evidence": r.get("insufficient_evidence", False),
-                "errors": r.get("errors", []),
-                "lifecycle": {"state": lifecycle, "at": lifecycle_at, "replaced_by": replaced_by},
-            }
+    q = FindingsQuery(max_priority=max_priority, limit=limit, before_id=before_id)
+    return findings_page(db, q, 0.0)["items"]
+
+
+def _alert_where(q: AlertsQuery, now: float) -> tuple[list[str], list[Any]]:
+    where: list[str] = []
+    args: list[Any] = []
+    if q.status == "open":
+        where.append("status IN ('new', 'under_review')")
+    elif q.status is not None:
+        if q.status not in ALERT_STATUSES:
+            raise InvalidQuery(f"status must be open or one of {ALERT_STATUSES}")
+        where.append("status = ?")
+        args.append(q.status)
+    if q.type is not None:
+        clause = {
+            "source_match": "kind = 'source_match'",
+            "retrospective": "kind = 'retrospective_source_match'",
+            "relation": "layer = 'graph'",
+            "anomaly": "layer = 'anomaly'",
+        }.get(q.type)
+        if clause is None:
+            raise InvalidQuery(f"type must be one of {ALERT_TYPES}")
+        where.append(clause)
+    if q.priority is not None:
+        where.append("priority = ?")
+        args.append(q.priority)
+    if q.max_priority is not None:
+        where.append("priority <= ?")
+        args.append(q.max_priority)
+    if q.authority is not None:
+        # the group key is "<screening|relation|retro>:<authority>:..." (immutable); keys from
+        # before v0.8 named the source id, so every id of the authority is accepted
+        ids = _authority_ids(q.authority)
+        where.append(
+            "layer IN ('screening', 'graph') AND ("
+            + " OR ".join(["substr(group_key, instr(group_key, ':') + 1, ?) = ?"] * len(ids))
+            + ")"
         )
-    return out
+        for sid in ids:
+            args += [len(sid) + 1, sid + ":"]
+    lower, upper = _bounds(q.since, q.until, q.hours, now)
+    if lower is not None:
+        where.append("last_seen_at >= ?")
+        args.append(lower)
+    if upper is not None:
+        where.append("last_seen_at < ?")
+        args.append(upper)
+    return where, args
+
+
+def validate_findings(q: FindingsQuery, now: float) -> None:
+    """Raise :class:`InvalidQuery` for a query the database would refuse (no I/O: the remote
+    proxy checks before forwarding, so a bad request is a 400 there, not an upstream error)."""
+    _finding_where(q, now)
+
+
+def validate_alerts(q: AlertsQuery, now: float) -> tuple[list[str], list[Any], list | None]:
+    if q.sort not in ALERT_SORTS:
+        raise InvalidQuery(f"sort must be one of {ALERT_SORTS}")
+    where, args = _alert_where(q, now)
+    after = None if q.cursor is None else _decode_cursor(q.cursor, q.sort)
+    return where, args, after
+
+
+def alerts_page(db: sqlite3.Connection, q: AlertsQuery, now: float) -> dict[str, Any]:
+    """One page of the investigation queue with the total matching the filters.
+
+    Keyset pagination over a total order (``id`` breaks every tie), so pages never overlap
+    and nothing is skipped while the queue is unchanged. An alert whose sort key changes
+    between two page requests (a new occurrence, a status change) moves to its new place:
+    with ``triage`` it can then show up on a page already passed or not yet reached; the
+    ``newest`` order (creation, immutable) has no such movement."""
+    limit = max(1, int(q.limit))  # the API bounds it (MAX_PAGE); the CLI may list more
+    where, args, after = validate_alerts(q, now)
+    cond = " AND ".join(where) or "1"
+    page_cond, page_args = cond, list(args)
+    if q.sort == "triage":
+        order = f"{_OPEN}, priority, last_seen_at DESC, id DESC"
+        if after is not None:
+            _, rank, prio, seen, aid = after
+            page_cond += f" AND ({_OPEN}, priority, -last_seen_at, -id) > (?, ?, ?, ?)"
+            page_args += [rank, prio, -float(seen), -aid]
+    else:
+        order = "id DESC"
+        if after is not None:
+            page_cond += " AND id < ?"
+            page_args.append(after[1])
+    with _snapshot(db):
+        total = db.execute(f"SELECT COUNT(*) FROM alerts WHERE {cond}", args).fetchone()[0]
+        keys = db.execute(
+            f"SELECT id, {_OPEN}, priority, last_seen_at FROM alerts WHERE {page_cond} "
+            f"ORDER BY {order} LIMIT ?",
+            (*page_args, limit + 1),
+        ).fetchall()
+        more = len(keys) > limit
+        keys = keys[:limit]
+        rows = {}
+        if keys:
+            marks = ",".join("?" * len(keys))
+            for r in db.execute(f"SELECT {_ALERT_COLS} FROM alerts WHERE id IN ({marks})",
+                                [k[0] for k in keys]):  # fmt: skip
+                rows[r[0]] = r
+    nxt = None
+    if more:
+        last = keys[-1]
+        nxt = _encode_cursor(["t", last[1], last[2], last[3], last[0]] if q.sort == "triage"
+                             else ["n", last[0]])  # fmt: skip
+    return {
+        "items": [_alert(rows[k[0]]) for k in keys if k[0] in rows],
+        "total": total,
+        "next_cursor": nxt,
+    }
+
+
+_ALERT_KEYS = ("id", "group_key", "layer", "kind", "priority", "status", "title", "created_at",
+               "updated_at", "last_seen_at", "occurrences", "suppressed", "retrospective",
+               "txids", "evidence", "note")  # fmt: skip
+_ALERT_COLS = ", ".join(_ALERT_KEYS)
+
+
+def _alert(r) -> dict[str, Any]:
+    d = dict(zip(_ALERT_KEYS, r, strict=True))
+    d["txids"] = json.loads(d["txids"])
+    d["evidence"] = json.loads(d["evidence"])
+    d["retrospective"] = bool(d["retrospective"])
+    return d
 
 
 def alerts(
     db: sqlite3.Connection, *, status: str | None = None, limit: int = 50
 ) -> list[dict[str, Any]]:
-    args: list[Any] = []
-    where = ""
-    if status:
-        where = "WHERE status = ?"
-        args.append(status)
-    rows = db.execute(
-        "SELECT id, group_key, layer, kind, priority, status, title, created_at, updated_at, "
-        f"last_seen_at, occurrences, suppressed, retrospective, txids, evidence, note FROM alerts "
-        f"{where} ORDER BY (status IN ('new', 'under_review')) DESC, priority ASC, "
-        "last_seen_at DESC LIMIT ?",
-        (*args, limit),
-    ).fetchall()
-    keys = ("id", "group_key", "layer", "kind", "priority", "status", "title", "created_at",
-            "updated_at", "last_seen_at", "occurrences", "suppressed", "retrospective", "txids",
-            "evidence", "note")  # fmt: skip
-    out = []
-    for r in rows:
-        d = dict(zip(keys, r, strict=True))
-        d["txids"] = json.loads(d["txids"])
-        d["evidence"] = json.loads(d["evidence"])
-        d["retrospective"] = bool(d["retrospective"])
-        out.append(d)
-    return out
+    """The first ``limit`` alerts in triage order (the CLI's list; the API pages)."""
+    return alerts_page(db, AlertsQuery(status=status, limit=limit), 0.0)["items"]
 
 
 def alert_history(db: sqlite3.Connection, alert_id: int) -> list[dict[str, Any]]:

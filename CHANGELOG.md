@@ -27,6 +27,14 @@ fix has a test that fails on v0.8.0. Matrix: [docs/AUDIT.md](docs/AUDIT.md#v081-
   fee, value, output shape): vsize and the counts that determine it are one fact.
 - **Alerts.** Alerts a person acted on are kept with their notes (only untouched `new`
   alerts expire after 90 days).
+- **Paged risk lists.** The findings list and the investigation queue are filtered and
+  paged on the server (`/v1/live/findings`, `/v1/live/alerts`: type, source authority,
+  priority, status, time range; keyset cursors; totals), so no finding or alert is out of
+  the dashboard's reach any more (it showed the newest 50 / first 200). Live and
+  retrospective source matches are separate alert types; insufficient evidence is its
+  own list, never mixed with findings. Older clients keep working; a dashboard refuses
+  filters an older edge API would ignore. `scripts/bench_risk_pages.py`: every query
+  ≤ 46 ms at 50,000 observations and 50,000 alerts.
 - **API.** Out-of-range ids are 422 (not 500); edge validation errors use the envelope;
   `/v1` answers are `no-store`; Caddy passes GET only; the synthetic demo states a synthetic
   disclaimer.

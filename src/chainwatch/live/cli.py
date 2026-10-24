@@ -346,7 +346,11 @@ def cmd_alerts(args) -> int:
     store = LiveStore(_live(args).db_path)
     try:
         if args.action == "list":
-            print(json.dumps(rp.alerts(store.db, status=args.status, limit=args.limit), indent=2))
+            try:
+                listed = rp.alerts(store.db, status=args.status, limit=args.limit)
+            except rp.InvalidQuery as e:
+                raise SystemExit(f"alerts list: {e}") from None
+            print(json.dumps(listed, indent=2))
         elif args.action == "set-status":
             rp.set_alert_status(store.db, args.id, args.status, time.time(), args.note)
             print(json.dumps({"id": args.id, "status": args.status}))

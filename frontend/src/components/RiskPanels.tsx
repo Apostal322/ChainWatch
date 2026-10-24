@@ -1,11 +1,22 @@
 // Risk intelligence UI for the live monitor: layer health, investigation queue, recent findings
 // and the per-transaction assessment. Every finding is shown per layer with its evidence and
 // limitations; nothing is combined into a single score.
-import { memo, useState, type ReactNode } from "react";
+import { memo, useId, type ReactNode } from "react";
 import { ago, formatDuration, shortTxid, utcStamp } from "../lib/live";
 import {
   ALERT_STATUSES,
+  ALERT_TYPE_LABEL,
   ANOMALY_MIN_REFERENCE,
+  authorityName,
+  FINDING_TYPE_LABEL,
+  isFiltered,
+  NO_ALERTS_FILTER,
+  NO_FINDINGS_FILTER,
+  normaliseFindingsFilter,
+  PAGE_SIZE,
+  pageText,
+  RISK_UNAVAILABLE_TEXT,
+  TIME_RANGES,
   alertEvidence,
   alertStatusLabel,
   anomalyStatusText,
@@ -41,7 +52,11 @@ import {
   supervisedStatusText,
   supervisedTile,
   type Alert,
-  type AlertStatus,
+  type AlertsFilter,
+  type AlertType,
+  type FindingsFilter,
+  type FindingType,
+  type PageInfo,
   type AnomalyIndicator,
   type Finding,
   type GraphRelation,
@@ -58,7 +73,6 @@ import {
 import { useNow } from "../lib/useNow";
 
 export type DataKind = "real" | "mock" | "unknown";
-export type AlertFilter = AlertStatus | "open" | null;
 
 function Ago({ ts, skew = 0 }: { ts: number; skew?: number }) {
   return <>{ago(ts, useNow() + skew)}</>;
@@ -397,25 +411,109 @@ function AlertItem({ a, onSelect, skew }: { a: Alert; onSelect: (txid: string) =
   );
 }
 
-/** Alerts rendered before "Show all": each one has interactive controls (tab stops). */
-export const QUEUE_INITIAL = 20;
+// ------------------------------------------------------------------ paging and filters
+export type PageAction = "prev" | "next" | "first";
 
-const FILTER_LABEL: Record<string, string> = { all: "All statuses", open: "Open (new or under review)" };
+/** Previous / next over server pages. Buttons stay focusable at the ends (aria-disabled, not
+ * disabled), so keyboard focus is never dropped; the page line is announced politely. */
+export function ListPager(props: {
+  label: string;
+  page: number;
+  info: PageInfo | null;
+  noun: [string, string];
+  busy: boolean;
+  onPage: (a: PageAction) => void;
+}) {
+  const { label, page, info, noun, busy, onPage } = props;
+  const canPrev = page > 0 && !busy;
+  const canNext = !!info?.next_cursor && !busy;
+  return (
+    <nav className="pager" aria-label={`${label} pages`}>
+      <button type="button" aria-disabled={!canPrev} onClick={() => canPrev && onPage("prev")}>← Previous</button>
+      <span className="small muted" role="status" aria-live="polite">
+        {info ? pageText(page, info.total, PAGE_SIZE, noun) : ""}{busy ? " · loading…" : ""}
+      </span>
+      <button type="button" aria-disabled={!canNext} onClick={() => canNext && onPage("next")}>Next →</button>
+      {page > 1 && <button type="button" className="linkbtn small" onClick={() => !busy && onPage("first")}>First page</button>}
+    </nav>
+  );
+}
+
+function Select<T extends string | number>(props: {
+  label: string;
+  value: T | null;
+  options: { value: T | null; label: string }[];
+  onChange: (v: T | null) => void;
+  disabled?: boolean;
+}) {
+  const { label, value, options, onChange, disabled } = props;
+  const id = useId(); // explicit label: the accessible name is the label alone, not the options
+  const key = (v: T | null) => (v === null ? "" : String(v));
+  return (
+    <span className="field">
+      <label htmlFor={id}>{label}</label>
+      <select id={id} value={key(value)} disabled={disabled}
+              onChange={(e) => onChange(options.find((o) => key(o.value) === e.target.value)?.value ?? null)}>
+        {options.map((o) => <option key={key(o.value)} value={key(o.value)}>{o.label}</option>)}
+      </select>
+    </span>
+  );
+}
+
+const timeOptions = TIME_RANGES.map((t) => ({ value: t.hours, label: t.label }));
+
+function authorityOptions(authorities: string[]) {
+  return [{ value: null as string | null, label: "All sources" }, ...authorities.map((a) => ({ value: a, label: authorityName(a) }))];
+}
+
+function priorityOptions(levels: PriorityLevel[]) {
+  return [{ value: null as PriorityLevel | null, label: "All priorities" },
+    ...levels.map((l) => ({ value: l, label: `P${l} · ${PRIORITY_INFO[l].name}` }))];
+}
+
+/** One paged list's state, as the panels receive it. */
+export interface ListState<T> {
+  items: T[] | null;
+  info: PageInfo | null;
+  page: number;
+  error: string | null;
+  busy: boolean;
+}
+
+/** Empty, unavailable and "page emptied meanwhile" states; null when there are rows to show. */
+function listNotice<T>(list: ListState<T>, what: "alerts" | "findings", riskState: RiskState, filtered: boolean,
+                       onPage: (a: PageAction) => void): ReactNode {
+  if (list.items === null) return list.error ? null : <p className="muted">Loading…</p>;
+  if (list.info && !list.info.available) {
+    return <p className="muted">{RISK_UNAVAILABLE_TEXT}: this collector has stored no risk assessments.</p>;
+  }
+  if (list.items.length > 0) return null;
+  if (list.page > 0) {
+    return (
+      <p className="muted">
+        This page is empty now: the list changed since the previous page.{" "}
+        <button type="button" className="linkbtn" onClick={() => onPage("first")}>Go to the first page</button>
+      </p>
+    );
+  }
+  return <p className="muted">{emptyRiskText(what, riskState, filtered ? " matching these filters" : "")}</p>;
+}
 
 export const InvestigationQueue = memo(function InvestigationQueue(props: {
-  alerts: Alert[] | null;
-  error: string | null;
-  filter: AlertFilter;
-  onFilter: (f: AlertFilter) => void;
+  list: ListState<Alert>;
+  filter: AlertsFilter;
+  authorities: string[];
+  onFilter: (f: AlertsFilter) => void;
+  onPage: (a: PageAction) => void;
   onSelect: (txid: string) => void;
   skew: number;
   kind: DataKind;
   riskState?: RiskState;
 }) {
-  const { alerts, error, filter, onFilter, onSelect, skew, kind, riskState = "ok" } = props;
-  const [showAll, setShowAll] = useState(false);
-  const shown = alerts && !showAll ? alerts.slice(0, QUEUE_INITIAL) : alerts;
-  const filterText = filter ? ` with status “${FILTER_LABEL[filter] ?? alertStatusLabel(filter)}”` : "";
+  const { list, filter, authorities, onFilter, onPage, onSelect, skew, kind, riskState = "ok" } = props;
+  const set = <K extends keyof AlertsFilter>(k: K) => (v: AlertsFilter[K] | null) =>
+    onFilter({ ...filter, [k]: k === "sort" ? (v ?? "triage") : v });
+  const alerts = list.items;
   return (
     <section className="card" aria-labelledby="queue-h">
       <h2 id="queue-h">Investigation queue</h2>
@@ -423,36 +521,43 @@ export const InvestigationQueue = memo(function InvestigationQueue(props: {
         {STATUS_CLI_NOTE} <code>{STATUS_CLI_COMMAND}</code>
       </p>
       <MockNotice kind={kind} />
-      <div className="filters">
-        <label>
-          Alert status
-          <select value={filter ?? "all"} onChange={(e) => onFilter(e.target.value === "all" ? null : (e.target.value as AlertFilter))}>
-            <option value="all">{FILTER_LABEL.all}</option>
-            <option value="open">{FILTER_LABEL.open}</option>
-            {ALERT_STATUSES.map((s) => <option key={s} value={s}>{alertStatusLabel(s)}</option>)}
-          </select>
-        </label>
+      <div className="filters" role="group" aria-label="Alert filters">
+        <Select label="Status" value={filter.status}
+                options={[{ value: null, label: "All statuses" }, { value: "open", label: "Open (new or under review)" },
+                          ...ALERT_STATUSES.map((s) => ({ value: s, label: alertStatusLabel(s) }))]}
+                onChange={set("status")} />
+        <Select label="Type" value={filter.type}
+                options={[{ value: null, label: "All types" },
+                          ...(Object.keys(ALERT_TYPE_LABEL) as AlertType[]).map((t) => ({ value: t, label: ALERT_TYPE_LABEL[t] }))]}
+                onChange={set("type")} />
+        <Select label="Source" value={filter.authority} options={authorityOptions(authorities)} onChange={set("authority")} />
+        <Select label="Review priority" value={filter.priority} options={priorityOptions([1, 2, 3])} onChange={set("priority")} />
+        <Select label="Last seen" value={filter.hours} options={timeOptions} onChange={set("hours")} />
+        <Select label="Order" value={filter.sort}
+                options={[{ value: "triage", label: "Open first, then priority" }, { value: "newest", label: "Newest first (created)" }]}
+                onChange={set("sort")} />
+        {isFiltered(filter) && (
+          <button type="button" className="linkbtn small" onClick={() => onFilter(NO_ALERTS_FILTER)}>Clear filters</button>
+        )}
       </div>
-      {error && <p className="err" role="status">{alerts ? "Could not refresh alerts (showing the last loaded list)" : "Could not load alerts"}: {error}</p>}
-      {alerts === null && !error && <p className="muted">Loading…</p>}
-      {alerts !== null && alerts.length === 0 && <p className="muted">{emptyRiskText("alerts", riskState, filterText)}</p>}
+      {list.error && <p className="err" role="status">{alerts ? "Could not refresh alerts (showing the last loaded page)" : "Could not load alerts"}: {list.error}</p>}
+      {listNotice(list, "alerts", riskState, isFiltered(filter), onPage)}
       {alerts !== null && alerts.length > 0 && riskState === "no-screening" && <p className="muted small">{NO_SCREENING_TEXT}.</p>}
       {alerts !== null && alerts.length > 0 && (
         <>
           <a className="skip-inline" href="#findings-h">Skip the alert list to recent findings</a>
-          <ul className="alerts scroll-y" aria-label="Alerts, open first, then by priority and last seen">
-            {(shown ?? []).map((a) => <AlertItem key={a.id} a={a} onSelect={onSelect} skew={skew} />)}
+          <ul className="alerts scroll-y" aria-label={filter.sort === "newest" ? "Alerts, newest first"
+              : "Alerts, open first, then by priority and last seen"}>
+            {alerts.map((a) => <AlertItem key={a.id} a={a} onSelect={onSelect} skew={skew} />)}
           </ul>
-          {alerts.length > QUEUE_INITIAL && (
-            <button type="button" className="linkbtn small" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
-              {showAll ? `Show the first ${QUEUE_INITIAL} only` : `Show all ${alerts.length} alerts`}
-            </button>
-          )}
         </>
       )}
+      {list.info && list.info.available && <ListPager label="Alert" page={list.page} info={list.info} noun={["alert", "alerts"]}
+                                                       busy={list.busy} onPage={onPage} />}
       <p className="muted small">
-        Grouped: repeats of the same address, relation or anomaly type update one item. Up to 200
-        alerts shown.
+        Grouped: repeats of the same address, relation or anomaly type update one item. Filtered
+        and paged on the server; {PAGE_SIZE} per page. In this order an alert that changes (a new
+        occurrence, a status change) moves to its new place; new alerts appear on the first page.
       </p>
     </section>
   );
@@ -460,33 +565,57 @@ export const InvestigationQueue = memo(function InvestigationQueue(props: {
 
 // ------------------------------------------------------------------ recent findings
 export const RecentFindings = memo(function RecentFindings(props: {
-  findings: Finding[] | null;
-  error: string | null;
+  list: ListState<Finding>;
+  filter: FindingsFilter;
+  authorities: string[];
+  onFilter: (f: FindingsFilter) => void;
+  onPage: (a: PageAction) => void;
   selected: string | null;
   onSelect: (txid: string) => void;
   skew: number;
   kind: DataKind;
   riskState?: RiskState;
 }) {
-  const { findings, error, selected, onSelect, skew, kind, riskState = "ok" } = props;
+  const { list, filter, authorities, onFilter, onPage, selected, onSelect, skew, kind, riskState = "ok" } = props;
+  const set = <K extends keyof FindingsFilter>(k: K) => (v: FindingsFilter[K] | null) =>
+    onFilter(normaliseFindingsFilter({ ...filter, [k]: v }));
+  const findings = list.items;
+  const insufficient = filter.type === "insufficient_evidence";
   return (
     <section className="card" aria-labelledby="findings-h">
       <h2 id="findings-h" tabIndex={-1}>Recent findings</h2>
-      <p className="muted small">Assessed transactions with a finding (P1–P4), newest first. Select one to see its full assessment.</p>
+      <p className="muted small">
+        {insufficient
+          ? "Assessments without a finding because no screening data and no anomaly baseline were available. These are not findings and say nothing either way."
+          : "Assessed transactions with a finding (P1–P4), newest first. Select one to see its full assessment."}
+      </p>
       <MockNotice kind={kind} />
-      {error && <p className="err" role="status">{findings ? "Could not refresh findings (showing the last loaded list)" : "Could not load findings"}: {error}</p>}
-      {findings === null && !error && <p className="muted">Loading…</p>}
-      {findings !== null && findings.length === 0 && <p className="muted">{emptyRiskText("findings", riskState)}</p>}
-      {findings !== null && findings.length > 0 && riskState === "no-screening" && <p className="muted small">{NO_SCREENING_TEXT}.</p>}
+      <div className="filters" role="group" aria-label="Finding filters">
+        <Select label="Type" value={filter.type}
+                options={[{ value: null, label: "All findings (P1–P4)" },
+                          ...(Object.keys(FINDING_TYPE_LABEL) as FindingType[]).map((t) => ({ value: t, label: FINDING_TYPE_LABEL[t] }))]}
+                onChange={set("type")} />
+        <Select label="Source" value={filter.authority} options={authorityOptions(authorities)} onChange={set("authority")}
+                disabled={insufficient} />
+        <Select label="Review priority" value={filter.priority} options={priorityOptions([1, 2, 3, 4])} onChange={set("priority")}
+                disabled={insufficient} />
+        <Select label="Assessed" value={filter.hours} options={timeOptions} onChange={set("hours")} />
+        {isFiltered(filter) && (
+          <button type="button" className="linkbtn small" onClick={() => onFilter(NO_FINDINGS_FILTER)}>Clear filters</button>
+        )}
+      </div>
+      {list.error && <p className="err" role="status">{findings ? "Could not refresh findings (showing the last loaded page)" : "Could not load findings"}: {list.error}</p>}
+      {listNotice(list, "findings", riskState, isFiltered(filter), onPage)}
+      {findings !== null && findings.length > 0 && riskState === "no-screening" && !insufficient && <p className="muted small">{NO_SCREENING_TEXT}.</p>}
       {findings !== null && findings.length > 0 && (
-        <ul className="findings scroll-y">
+        <ul className="findings scroll-y" aria-label={insufficient ? "Assessments with insufficient evidence, newest first" : "Findings, newest first"}>
           {findings.map((f) => {
             const isSel = selected === f.txid;
             const layers = findingLayers(f);
             return (
               <li key={f.id} className={isSel ? "finding selected" : "finding"}>
                 <div className="alert-head">
-                  <PriorityMarker level={f.priority?.level} />
+                  <PriorityMarker level={f.priority?.level} state={f.priority?.level == null ? "insufficient_evidence" : null} />
                   <button type="button" className="rowbtn" aria-pressed={isSel}
                           aria-label={`Show details for transaction ${f.txid}`} onClick={() => onSelect(f.txid)}>
                     <code>{shortTxid(f.txid)}</code>
@@ -496,13 +625,18 @@ export const RecentFindings = memo(function RecentFindings(props: {
                   {f.lifecycle?.state && <span className="chip">{f.lifecycle.state}</span>}
                 </div>
                 <ul className="lines">
-                  {findingLines(f).map((ln, i) => <li key={i}>{ln.text}</li>)}
+                  {insufficient
+                    ? <li>Insufficient evidence: no screening data and no anomaly baseline at assessment time (not a finding).</li>
+                    : findingLines(f).map((ln, i) => <li key={i}>{ln.text}</li>)}
                 </ul>
               </li>
             );
           })}
         </ul>
       )}
+      {list.info && list.info.available && <ListPager label="Finding" page={list.page} info={list.info}
+                                                       noun={insufficient ? ["assessment", "assessments"] : ["finding", "findings"]}
+                                                       busy={list.busy} onPage={onPage} />}
     </section>
   );
 });

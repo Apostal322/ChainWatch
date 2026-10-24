@@ -49,14 +49,20 @@ non-`main` dispatches; the token is compared in constant time and never logged; 
 headers on every status of both apps; ARM64 wheels exist for every VM package; no secrets
 or datasets in Git history.
 
+### Follow-up: paged risk lists
+
+| # | Sev | Component | Problem | Fix | Test | Commit |
+|---|---|---|---|---|---|---|
+| X1 | P2 | dashboard / API | Only the 50 newest findings and the first 200 alerts reached the UI; no type, retrospective, source, priority or time filter; "open" filtered in the browser over a truncated list | server-side filters and keyset pagination with totals from one read snapshot; covering indexes; remote proxy validates and refuses filters an older edge would ignore; pager and filters in the UI (keyboard, 375 px) | `tests/test_risk_pages.py` (54), vitest "paged risk lists", e2e 5 checks; benchmark in RISK_ENGINE.md §9 | see PR |
+
 ### Accepted or open after v0.8.1
 
 * **External:** Render's real `X-Forwarded-For` hop count (procedure in DEPLOYMENT.md;
   a wrong value is P1 on the public demo), real mempool.space traffic (the egress proxy
   here refuses it: HTTP 403, 0 txids), the Oracle VM, a 24-hour run.
-* **Open, P2 (dashboard):** the alert queue and findings list show at most 200 / 50 items
-  with no layer or retrospective filter: with many P1 alerts, lower ones are unreachable in
-  the UI (the CLI `alerts list` reaches all).
+* **Closed after v0.8.1 review (was open, P2, dashboard):** the alert queue and findings
+  list showed at most 200 / 50 items with no layer or retrospective filter. Now filtered
+  and paged on the server (row X1 above).
 * **Open, P3:** a copy-txid control; the tab bar at 360 px scrolls without a cue; one
   649 kB JS bundle; uvicorn `limit_concurrency` counts idle keep-alives (safe behind Caddy,
   never expose uvicorn directly); the first frame of a connection cannot be recognised as

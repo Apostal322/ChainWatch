@@ -38,6 +38,13 @@ from chainwatch.live.features import INDICATORS
 from chainwatch.live.protocol import valid_txid
 from chainwatch.live.store import SORTABLE, LiveReader, NoLiveData
 from chainwatch.risk.anomaly import DetectorConfig
+from chainwatch.risk.persistence import (
+    AlertsQuery,
+    FindingsQuery,
+    InvalidQuery,
+    validate_alerts,
+    validate_findings,
+)
 from chainwatch.serving.security import client_key
 
 LIVE_NOTICE = (
@@ -62,6 +69,11 @@ RISK_SUMMARY_TTL_S = 15.0
 MAX_ROW_ID = 2**63 - 1  # SQLite INTEGER: larger ids raised OverflowError (HTTP 500)
 STALE_OK_S = 60.0  # RemoteBackend serves a key's last good answer this long on failure
 HOURS_STEPS = (1, 6, 24, 168, 720)  # remote queries are snapped to these (bounded key space)
+MAX_EPOCH = 1e11  # time-range bounds (seconds since 1970; far beyond any real timestamp)
+AUTHORITY_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,63}$"
+# filters an edge API from before paged risk lists (v0.8.1) would silently ignore
+LEGACY_FINDINGS = {"max_priority", "limit", "before_id"}
+LEGACY_ALERTS = {"status", "limit"}
 WINDOW_STEPS = (60, 240, 1440)
 
 
@@ -248,6 +260,12 @@ class LocalBackend:
 
     def alerts(self, status: str | None, limit: int) -> list[dict]:
         return self.reader.alerts(status, limit)
+
+    def findings_page(self, q: FindingsQuery) -> dict[str, Any]:
+        return self.reader.findings_page(q, time.time())
+
+    def alerts_page(self, q: AlertsQuery) -> dict[str, Any]:
+        return self.reader.alerts_page(q, time.time())
 
     def max_id(self) -> int:
         return self.reader.max_id()
@@ -459,6 +477,37 @@ class RemoteBackend:
         q = {"status": status, "limit": limit}
         return self._get("/v1/live/alerts", q, priority=limit == 200)["alerts"]
 
+    def _page(self, path: str, key: str, params: dict[str, Any], legacy: set[str],
+              polled: bool) -> dict[str, Any]:  # fmt: skip
+        params = {k: v for k, v in params.items() if v is not None}
+        if params.get("hours") is not None:
+            params["hours"] = _snap(params["hours"], HOURS_STEPS)
+        body = self._get(path, params, priority=polled)
+        page = body.get("page") if isinstance(body, dict) else None
+        if page is None:  # an edge API from before paged lists: it ignores unknown filters
+            if set(params) - legacy:
+                raise UpstreamUnavailable("the collector's edge API does not support these "
+                                          "filters (upgrade the collector)")  # fmt: skip
+            page = {"total": None, "next_cursor": None, "available": True}
+        return {"items": body[key], "total": page.get("total"),
+                "next_cursor": page.get("next_cursor"),
+                "available": page.get("available", True)}  # fmt: skip
+
+    def findings_page(self, q: FindingsQuery) -> dict[str, Any]:
+        validate_findings(q, time.time())
+        polled = q == FindingsQuery(limit=q.limit)  # the dashboard's unfiltered first page
+        params = dataclasses.asdict(q)
+        return self._page("/v1/live/findings", "findings", params, LEGACY_FINDINGS, polled)
+
+    def alerts_page(self, q: AlertsQuery) -> dict[str, Any]:
+        validate_alerts(q, time.time())
+        polled = q == AlertsQuery(limit=q.limit)
+        params = dataclasses.asdict(q)
+        if params["sort"] == "triage":
+            params["sort"] = None  # the default (an older edge has no sort parameter)
+        legacy = LEGACY_ALERTS if q.status != "open" else LEGACY_ALERTS - {"status"}
+        return self._page("/v1/live/alerts", "alerts", params, legacy, polled)
+
 
 def _code(body: Any) -> str:
     try:
@@ -587,25 +636,101 @@ def install_live_routes(
         """Risk intelligence health: layer outcomes, latency, sources and their freshness."""
         return {"mode": "live", **be.risk_summary(hours)}
 
+    def page_body(key: str, page: dict[str, Any], limit: int, filters: dict[str, Any]):
+        return {
+            "mode": "live",
+            key: page["items"],
+            "page": {
+                "limit": limit,
+                "total": page["total"],  # matching the filters (None: an older edge API)
+                "next_cursor": page["next_cursor"],
+                "available": page["available"],  # False: no risk tables on this collector
+                "filters": {k: v for k, v in filters.items() if v is not None},
+            },
+        }
+
     @r.get("/findings")
     def live_findings(
         max_priority: int = Query(4, ge=1, le=4),
         limit: int = Query(50, ge=1, le=200),
         before_id: int | None = Query(None, ge=0, le=MAX_ROW_ID),
+        cursor: str | None = Query(None, pattern=r"^[0-9]{1,19}$"),
+        kind: str | None = Query(
+            None, alias="type", pattern="^(source_match|relation|anomaly|insufficient_evidence)$"
+        ),
+        authority: str | None = Query(None, pattern=AUTHORITY_PATTERN),
+        priority: int | None = Query(None, ge=1, le=4),
+        since: float | None = Query(None, ge=0, le=MAX_EPOCH),
+        until: float | None = Query(None, ge=0, le=MAX_EPOCH),
+        hours: float | None = Query(None, gt=0, le=720),
     ) -> dict[str, Any]:
-        """Assessed transactions with a finding, newest first (priority 1 = source match)."""
-        return {"mode": "live", "findings": be.findings(max_priority, limit, before_id)}
+        """Assessed transactions with a finding, newest first (priority 1 = source match),
+        one page at a time: pass ``page.next_cursor`` back as ``cursor`` for the next one.
+        ``type=insufficient_evidence`` lists assessments that are not findings."""
+        if cursor is not None:
+            if before_id is not None:
+                raise HTTPException(400, "pass cursor or before_id, not both")
+            before_id = int(cursor)
+            if before_id > MAX_ROW_ID:
+                raise HTTPException(400, "invalid cursor")
+        q = FindingsQuery(type=kind, authority=authority, priority=priority,
+                          max_priority=max_priority, since=since, until=until, hours=hours,
+                          before_id=before_id, limit=limit)  # fmt: skip
+        try:
+            page = be.findings_page(q)
+        except InvalidQuery as e:
+            raise HTTPException(400, str(e)) from None
+        filters = {
+            "type": kind,
+            "authority": authority,
+            "priority": priority,
+            "max_priority": max_priority,
+            "since": since,
+            "until": until,
+            "hours": hours,
+        }
+        return page_body("findings", page, limit, filters)
 
     @r.get("/alerts")
     def live_alerts(
         status: str | None = Query(
-            None, pattern="^(new|under_review|dismissed|resolved|insufficient_evidence)$"
+            None, pattern="^(open|new|under_review|dismissed|resolved|insufficient_evidence)$"
         ),
         limit: int = Query(50, ge=1, le=200),
+        kind: str | None = Query(
+            None, alias="type", pattern="^(source_match|retrospective|relation|anomaly)$"
+        ),
+        authority: str | None = Query(None, pattern=AUTHORITY_PATTERN),
+        priority: int | None = Query(None, ge=1, le=4),
+        max_priority: int | None = Query(None, ge=1, le=4),
+        since: float | None = Query(None, ge=0, le=MAX_EPOCH),
+        until: float | None = Query(None, ge=0, le=MAX_EPOCH),
+        hours: float | None = Query(None, gt=0, le=720),
+        sort: str = Query("triage", pattern="^(triage|newest)$"),
+        cursor: str | None = Query(None, pattern=r"^[A-Za-z0-9_-]{1,200}$"),
     ) -> dict[str, Any]:
-        """Investigation queue (grouped, deduplicated). Read-only over HTTP; statuses are
-        changed with `chainwatch-live alerts set-status` on the collector host."""
-        return {"mode": "live", "alerts": be.alerts(status, limit)}
+        """Investigation queue (grouped, deduplicated), one page at a time. Read-only over
+        HTTP; statuses are changed with `chainwatch-live alerts set-status` on the collector
+        host. ``status=open`` = new or under review; time range = last seen."""
+        q = AlertsQuery(status=status, type=kind, authority=authority, priority=priority,
+                        max_priority=max_priority, since=since, until=until, hours=hours,
+                        sort=sort, cursor=cursor, limit=limit)  # fmt: skip
+        try:
+            page = be.alerts_page(q)
+        except InvalidQuery as e:
+            raise HTTPException(400, str(e)) from None
+        filters = {
+            "status": status,
+            "type": kind,
+            "authority": authority,
+            "priority": priority,
+            "max_priority": max_priority,
+            "since": since,
+            "until": until,
+            "hours": hours,
+            "sort": sort,
+        }
+        return page_body("alerts", page, limit, filters)
 
     @r.get("/outages")
     def live_outages(

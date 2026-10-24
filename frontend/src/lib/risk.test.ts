@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ALERT_STATUS_LABEL,
+  ALERT_TYPE_LABEL,
+  alertsQuery,
+  authoritiesOf,
+  authorityName,
+  FINDING_TYPE_LABEL,
+  findingsQuery,
+  isFiltered,
+  NO_ALERTS_FILTER,
+  NO_FINDINGS_FILTER,
+  normaliseFindingsFilter,
+  PAGE_SIZE,
+  pageText,
+  TIME_RANGES,
   alertEvidence,
   anomalyStatusText,
   ANOMALY_MIN_REFERENCE,
@@ -397,5 +410,70 @@ describe("risk API client", () => {
       "/v1/live/findings?max_priority=4&limit=50",
       "/v1/live/risk/summary?hours=24",
     ]);
+  });
+});
+
+describe("paged risk lists", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("sends only the active filters and the cursor", () => {
+    expect(findingsQuery(NO_FINDINGS_FILTER, 25, null)).toBe("limit=25");
+    expect(findingsQuery({ type: "anomaly", authority: null, priority: 4, hours: 24 }, 25, "812"))
+      .toBe("limit=25&type=anomaly&priority=4&hours=24&cursor=812");
+    expect(alertsQuery(NO_ALERTS_FILTER, 25, null)).toBe("limit=25"); // triage is the default
+    expect(alertsQuery({ ...NO_ALERTS_FILTER, status: "open", type: "retrospective", authority: "ofac-sdn", sort: "newest" }, 10, "a_b-c"))
+      .toBe("limit=10&status=open&type=retrospective&authority=ofac-sdn&sort=newest&cursor=a_b-c");
+  });
+
+  it("keeps insufficient evidence apart from priorities and sources", () => {
+    const f = normaliseFindingsFilter({ type: "insufficient_evidence", authority: "ofac-sdn", priority: 1, hours: null });
+    expect(f).toEqual({ type: "insufficient_evidence", authority: null, priority: null, hours: null });
+    expect(normaliseFindingsFilter({ type: "source_match", authority: "ofac-sdn", priority: 1, hours: null }).priority).toBe(1);
+    expect(FINDING_TYPE_LABEL.insufficient_evidence).toMatch(/not findings/);
+    expect(ALERT_TYPE_LABEL.retrospective).not.toBe(ALERT_TYPE_LABEL.source_match);
+  });
+
+  it("knows when a list is filtered", () => {
+    expect(isFiltered(NO_FINDINGS_FILTER)).toBe(false);
+    expect(isFiltered(NO_ALERTS_FILTER)).toBe(false);
+    expect(isFiltered({ ...NO_ALERTS_FILTER, sort: "newest" })).toBe(true);
+    expect(isFiltered({ ...NO_FINDINGS_FILTER, hours: 1 })).toBe(true);
+  });
+
+  it("states the page and total, or that the total is unknown", () => {
+    expect(pageText(0, 312, 25, ["alert", "alerts"])).toBe("Page 1 of 13 · 312 alerts");
+    expect(pageText(0, 1, 25, ["alert", "alerts"])).toBe("Page 1 of 1 · 1 alert");
+    expect(pageText(0, 0, 25, ["finding", "findings"])).toBe("Page 1 of 1 · 0 findings");
+    // rows removed while paging: never "page 3 of 2"
+    expect(pageText(2, 40, 25, ["alert", "alerts"])).toBe("Page 3 of 3 · 40 alerts");
+    expect(pageText(1, null, 25, ["alert", "alerts"])).toMatch(/^Page 2 · total not reported/);
+  });
+
+  it("offers each authority once", () => {
+    const sources = [{ source_id: "ofac-sdn", authority: "ofac-sdn" }, { source_id: "ofac-sdn-mirror", authority: "ofac-sdn" },
+      { source_id: "local-list" }];
+    expect(authoritiesOf(sources)).toEqual(["local-list", "ofac-sdn"]);
+    expect(authoritiesOf(null)).toEqual([]);
+    expect(authorityName("ofac-sdn")).toMatch(/official list or its mirror/);
+  });
+
+  it("says when filters, not the data, emptied a list", () => {
+    expect(emptyRiskText("alerts", "ok", " matching these filters")).toBe("No alerts matching these filters.");
+    expect(emptyRiskText("findings", "ok", " matching these filters")).toMatch(/^No assessments matching these filters\. Absence/);
+    for (const t of [...Object.values(FINDING_TYPE_LABEL), ...Object.values(ALERT_TYPE_LABEL), ...TIME_RANGES.map((r) => r.label)]) {
+      expect(t).not.toMatch(FORBIDDEN_WORDS);
+      expect(t).not.toMatch(/probab|score/i);
+    }
+  });
+
+  it("requests pages through the API client", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => ({ alerts: [], findings: [], page: { total: 0 } }) } as Response;
+    }));
+    await riskApi.findingsPage({ ...NO_FINDINGS_FILTER, type: "source_match" }, PAGE_SIZE, null);
+    await riskApi.alertsPage({ ...NO_ALERTS_FILTER, status: "dismissed" }, PAGE_SIZE, "xyz");
+    expect(calls).toEqual(["/v1/live/findings?limit=25&type=source_match", "/v1/live/alerts?limit=25&status=dismissed&cursor=xyz"]);
   });
 });
