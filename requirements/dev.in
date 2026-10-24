@@ -8,5 +8,5 @@
 # Universal: one lock for Python 3.11-3.13 on Linux, macOS and Windows (numpy and xgboost
 # fork below 3.12). Install with `pip install --require-hashes -r requirements/dev.lock.txt`
 # then `pip install --no-deps --no-build-isolation -e .`.
-setuptools==84.0.0
+setuptools==84.1.0
 wheel==0.48.0

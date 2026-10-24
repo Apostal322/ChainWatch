@@ -53,7 +53,7 @@ or datasets in Git history.
 
 | # | Sev | Component | Problem | Fix | Test | Commit |
 |---|---|---|---|---|---|---|
-| X1 | P2 | dashboard / API | Only the 50 newest findings and the first 200 alerts reached the UI; no type, retrospective, source, priority or time filter; "open" filtered in the browser over a truncated list | server-side filters and keyset pagination with totals from one read snapshot; covering indexes; remote proxy validates and refuses filters an older edge would ignore; pager and filters in the UI (keyboard, 375 px) | `tests/test_risk_pages.py` (54), vitest "paged risk lists", e2e 5 checks; benchmark in RISK_ENGINE.md §9 | see PR |
+| X1 | P2 | dashboard / API | Only the 50 newest findings and the first 200 alerts reached the UI; no type, retrospective, source, priority or time filter; "open" filtered in the browser over a truncated list | server-side filters and keyset pagination with totals from one read snapshot; covering indexes; remote proxy validates and refuses filters an older edge would ignore; pager and filters in the UI (keyboard, 375 px) | `tests/test_risk_pages.py` (54), vitest "paged risk lists", e2e 5 checks; benchmark in RISK_ENGINE.md §9 | `a26b60d` |
 
 ### Accepted or open after v0.8.1
 

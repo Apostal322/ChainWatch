@@ -6,7 +6,8 @@ Seven parallel adversarial reviews of v0.8.0 and a second review of the fixes; e
 fix has a test that fails on v0.8.0. Matrix: [docs/AUDIT.md](docs/AUDIT.md#v081-independent-audit).
 
 - **Security updates.** certifi 2026.10.19 (a trusted root with compromised intermediates),
-  pillow 13.0.0 (serving image), vitest 4.1.12.
+  pillow 13.0.0 (serving image), vitest 4.1.12; setuptools 84.1.0 (GHSA-xmj3-9gf7-h52w,
+  published after the first v0.8.1 validation; dev, serve and live locks).
 - **Screening.** Retrospective screening uses only listings in force (no "now listed"
   alerts for closed ones); the mass-removal guard measures a source's own rows; a stale
   mirror cannot re-list what the official file superseded (`indicators.closed_by`);
